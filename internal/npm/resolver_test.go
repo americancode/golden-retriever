@@ -2,6 +2,7 @@ package npm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -89,6 +90,81 @@ func TestResolverRecordsUnsatisfiedOptionalPeerDependency(t *testing.T) {
 	}
 }
 
+func TestResolverErrorsOnPeerConflict(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	var conflict *PeerConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("got %v, want PeerConflictError", err)
+	}
+	if conflict.PeerName != "host" || conflict.PeerSpec != "^1.0.0" || conflict.FoundVersion != "2.0.0" {
+		t.Fatalf("unexpected conflict: %#v", conflict)
+	}
+}
+
+func TestResolverLegacyPeerDepsIgnoresPeers(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, LegacyPeerDeps: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "plugin")
+	if len(plugin.Peers) != 0 {
+		t.Fatalf("legacy peer deps should not record peers: %#v", plugin.Peers)
+	}
+	if len(graph.Packages()) != 1 {
+		t.Fatalf("legacy peer deps should not auto-install peers: %#v", graph.Packages())
+	}
+}
+
+func TestResolverOptionalPeerConflictRecordsByDefault(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "optional-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.PeerConflicts) != 1 {
+		t.Fatalf("peer conflicts = %#v", graph.PeerConflicts)
+	}
+	plugin := findNode(t, graph, "optional-plugin")
+	peer := plugin.Peers["host"]
+	if peer == nil || peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "2.0.0" {
+		t.Fatalf("unexpected optional peer conflict edge: %#v", peer)
+	}
+}
+
+func TestResolverStrictPeerDepsErrorsOnOptionalPeerConflict(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, StrictPeerDeps: true}}
+	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "optional-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	var conflict *PeerConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("got %v, want PeerConflictError", err)
+	}
+}
+
 func peerRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,15 +172,20 @@ func peerRegistry(t *testing.T) *httptest.Server {
 		case "/host":
 			fmt.Fprintf(w, `{
   "name": "host",
-  "dist-tags": {"latest": "1.2.0"},
+  "dist-tags": {"latest": "2.0.0"},
   "versions": {
     "1.2.0": {
       "name": "host",
       "version": "1.2.0",
       "dist": {"tarball": "%s/host/-/host-1.2.0.tgz"}
+    },
+    "2.0.0": {
+      "name": "host",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/host/-/host-2.0.0.tgz"}
     }
   }
-}`, serverURL(r))
+}`, serverURL(r), serverURL(r))
 		case "/plugin":
 			fmt.Fprintf(w, `{
   "name": "plugin",

@@ -12,6 +12,8 @@ import (
 type ResolveOptions struct {
 	IncludeDev         bool
 	IncludeOptional    bool
+	LegacyPeerDeps     bool
+	StrictPeerDeps     bool
 	ResolveConcurrency int
 }
 
@@ -22,7 +24,7 @@ type packageJSON struct {
 	DevDependencies      map[string]string `json:"devDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
-	Overrides            any               `json:"overrides"`
+	Overrides            json.RawMessage   `json:"overrides"`
 	Workspaces           any               `json:"workspaces"`
 }
 
@@ -43,11 +45,13 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	if root.Overrides != nil {
-		return nil, fmt.Errorf("package overrides are not implemented yet")
-	}
 	if root.Workspaces != nil {
 		return nil, fmt.Errorf("workspaces are not implemented yet")
+	}
+	rootSpecs := rootDependencySpecs(root)
+	overrides, err := ParseOverrides(root.Overrides, rootSpecs)
+	if err != nil {
+		return nil, err
 	}
 
 	var deps []DependencyRequest
@@ -59,8 +63,26 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 		deps = appendDeps(deps, root.OptionalDependencies, EdgeOptional)
 	}
 
-	r := &Resolver{Client: client, Options: opts}
+	r := &Resolver{Client: client, Options: opts, Overrides: overrides}
 	return r.ResolveRoot(ctx, deps)
+}
+
+func rootDependencySpecs(root packageJSON) map[string]string {
+	specs := map[string]string{}
+	for name, spec := range root.Dependencies {
+		specs[name] = spec
+	}
+	for name, spec := range root.DevDependencies {
+		if specs[name] == "" {
+			specs[name] = spec
+		}
+	}
+	for name, spec := range root.OptionalDependencies {
+		if specs[name] == "" {
+			specs[name] = spec
+		}
+	}
+	return specs
 }
 
 func mergeDeps(dst, src map[string]string) {

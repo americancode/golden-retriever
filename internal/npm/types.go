@@ -13,9 +13,10 @@ func (p Package) Key() string {
 }
 
 type Graph struct {
-	Root     *Node
-	packages map[string]Package
-	nodes    map[string]*Node
+	Root          *Node
+	PeerConflicts []PeerConflict
+	packages      map[string]Package
+	nodes         map[string]*Node
 }
 
 func NewGraph() *Graph {
@@ -82,7 +83,7 @@ func (g *Graph) Nodes() []*Node {
 	return out
 }
 
-func (g *Graph) AddDependency(parent, child *Node, name, spec string, edgeType EdgeType) {
+func (g *Graph) AddDependency(parent, child *Node, name, rawSpec, spec string, edgeType EdgeType) {
 	if parent == nil || child == nil || edgeType == "" {
 		return
 	}
@@ -94,6 +95,7 @@ func (g *Graph) AddDependency(parent, child *Node, name, spec string, edgeType E
 		To:        child,
 		Name:      name,
 		Spec:      spec,
+		RawSpec:   rawSpec,
 		Type:      edgeType,
 		Satisfied: true,
 	}
@@ -120,6 +122,19 @@ func (g *Graph) AddPeer(parent, target *Node, name, spec string, optional bool, 
 	}
 }
 
+func (g *Graph) AddPeerConflict(from, found *Node, name, spec string) {
+	if from == nil || found == nil {
+		return
+	}
+	g.PeerConflicts = append(g.PeerConflicts, PeerConflict{
+		From:         from,
+		Found:        found,
+		Name:         name,
+		Spec:         spec,
+		FoundVersion: found.Version,
+	})
+}
+
 type Node struct {
 	ID           string
 	Name         string
@@ -144,7 +159,16 @@ type Edge struct {
 	To           *Node
 	Name         string
 	Spec         string
+	RawSpec      string
 	Type         EdgeType
 	PeerOptional bool
 	Satisfied    bool
+}
+
+type PeerConflict struct {
+	From         *Node
+	Found        *Node
+	Name         string
+	Spec         string
+	FoundVersion string
 }

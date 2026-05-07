@@ -1,0 +1,202 @@
+package npm
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+type Overrides struct {
+	rootSpecs map[string]string
+	rules     []OverrideRule
+}
+
+type OverrideRule struct {
+	Ancestors []OverrideSelector
+	Target    OverrideSelector
+	Spec      string
+}
+
+type OverrideConflictError struct {
+	Name    string
+	RawSpec string
+	Spec    string
+}
+
+func (e *OverrideConflictError) Error() string {
+	return fmt.Sprintf("override for %s@%s conflicts with direct dependency", e.Name, e.RawSpec)
+}
+
+type OverrideSelector struct {
+	Name string
+	Spec string
+}
+
+func ParseOverrides(raw json.RawMessage, rootSpecs map[string]string) (*Overrides, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("parse overrides: %w", err)
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("overrides must be an object")
+	}
+	overrides := &Overrides{rootSpecs: rootSpecs}
+	if err := overrides.parseObject(nil, obj); err != nil {
+		return nil, err
+	}
+	if len(overrides.rules) == 0 {
+		return nil, nil
+	}
+	return overrides, nil
+}
+
+func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any) error {
+	for key, value := range obj {
+		if key == "." {
+			if len(ancestors) == 0 {
+				return fmt.Errorf("override self rule without package")
+			}
+			spec, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("override %q must be a string", key)
+			}
+			target := ancestors[len(ancestors)-1]
+			o.addRule(ancestors[:len(ancestors)-1], target, spec)
+			continue
+		}
+
+		selector := parseOverrideSelector(key)
+		switch typed := value.(type) {
+		case string:
+			o.addRule(ancestors, selector, typed)
+		case map[string]any:
+			if self, ok := typed["."]; ok {
+				spec, ok := self.(string)
+				if !ok {
+					return fmt.Errorf("override %q self rule must be a string", key)
+				}
+				o.addRule(ancestors, selector, spec)
+			}
+			childAncestors := appendSelector(ancestors, selector)
+			children := map[string]any{}
+			for childKey, childValue := range typed {
+				if childKey != "." {
+					children[childKey] = childValue
+				}
+			}
+			if len(children) > 0 {
+				if err := o.parseObject(childAncestors, children); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("override %q must be a string or object", key)
+		}
+	}
+	return nil
+}
+
+func (o *Overrides) addRule(ancestors []OverrideSelector, target OverrideSelector, spec string) {
+	if target.Name == "" || spec == "" {
+		return
+	}
+	o.rules = append(o.rules, OverrideRule{
+		Ancestors: append([]OverrideSelector(nil), ancestors...),
+		Target:    target,
+		Spec:      spec,
+	})
+}
+
+func (o *Overrides) Resolve(parent *Node, name, spec string) string {
+	resolved, _ := o.ResolveWithRule(parent, name, spec)
+	return resolved
+}
+
+func (o *Overrides) ResolveWithRule(parent *Node, name, spec string) (string, *OverrideRule) {
+	if o == nil {
+		return "", nil
+	}
+	var best *OverrideRule
+	for i := range o.rules {
+		rule := &o.rules[i]
+		if rule.Target.Name != name {
+			continue
+		}
+		if rule.Target.Spec != "" && !selectorSpecMatches(spec, rule.Target.Spec) {
+			continue
+		}
+		if !matchAncestors(parent, rule.Ancestors) {
+			continue
+		}
+		if best == nil || len(rule.Ancestors) > len(best.Ancestors) {
+			best = rule
+		}
+	}
+	if best == nil {
+		return "", nil
+	}
+	return o.resolveSpec(best.Spec), best
+}
+
+func (o *Overrides) resolveSpec(spec string) string {
+	if !strings.HasPrefix(spec, "$") {
+		return spec
+	}
+	ref := strings.TrimPrefix(spec, "$")
+	if ref == "" {
+		return spec
+	}
+	if value := o.rootSpecs[ref]; value != "" {
+		return value
+	}
+	return spec
+}
+
+func isOverrideReference(spec string) bool {
+	return strings.HasPrefix(spec, "$")
+}
+
+func parseOverrideSelector(key string) OverrideSelector {
+	name, spec := splitNameSpec(key)
+	return OverrideSelector{Name: name, Spec: spec}
+}
+
+func appendSelector(in []OverrideSelector, selector OverrideSelector) []OverrideSelector {
+	out := append([]OverrideSelector(nil), in...)
+	return append(out, selector)
+}
+
+func selectorSpecMatches(candidate, selector string) bool {
+	if selector == "" {
+		return true
+	}
+	if candidate == selector {
+		return true
+	}
+	return satisfies(candidate, selector)
+}
+
+func matchAncestors(parent *Node, ancestors []OverrideSelector) bool {
+	if len(ancestors) == 0 {
+		return true
+	}
+	cursor := parent
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		if cursor == nil || cursor.ID == "root" {
+			return false
+		}
+		selector := ancestors[i]
+		if cursor.Name != selector.Name {
+			return false
+		}
+		if selector.Spec != "" && !satisfies(cursor.Version, selector.Spec) {
+			return false
+		}
+		cursor = cursor.Parent
+	}
+	return true
+}

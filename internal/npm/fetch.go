@@ -26,14 +26,18 @@ type FetchOptions struct {
 }
 
 type FetchReport struct {
-	Downloaded int
-	Skipped    int
-	Failed     int
+	Downloaded    int
+	Skipped       int
+	TargetSkipped int
+	Failed        int
 }
 
 type State struct {
-	UpdatedAt  time.Time              `json:"updatedAt"`
-	Downloaded map[string]StateRecord `json:"downloaded"`
+	SchemaVersion int                    `json:"schemaVersion"`
+	UpdatedAt     time.Time              `json:"updatedAt"`
+	Target        map[string]StateRecord `json:"target"`
+	Local         map[string]StateRecord `json:"local"`
+	Downloaded    map[string]StateRecord `json:"downloaded,omitempty"`
 }
 
 type StateRecord struct {
@@ -42,9 +46,11 @@ type StateRecord struct {
 	Tarball      string    `json:"tarball"`
 	Integrity    string    `json:"integrity,omitempty"`
 	Shasum       string    `json:"shasum,omitempty"`
-	Path         string    `json:"path"`
-	Size         int64     `json:"size"`
-	DownloadedAt time.Time `json:"downloadedAt"`
+	Path         string    `json:"path,omitempty"`
+	Size         int64     `json:"size,omitempty"`
+	DownloadedAt time.Time `json:"downloadedAt,omitempty"`
+	PresentAt    time.Time `json:"presentAt,omitempty"`
+	Source       string    `json:"source,omitempty"`
 }
 
 func FetchAll(ctx context.Context, client *Client, packages []Package, opts FetchOptions) (FetchReport, error) {
@@ -74,16 +80,18 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 		go func() {
 			defer wg.Done()
 			for pkg := range jobs {
-				downloaded, err := fetchOne(ctx, client, pkg, opts.OutDir, state, &stateMu, opts.MaxRetries)
+				result, err := fetchOne(ctx, client, pkg, opts.OutDir, state, &stateMu, opts.MaxRetries)
 				mu.Lock()
 				if err != nil {
 					report.Failed++
 					if firstErr == nil {
 						firstErr = err
 					}
-				} else if downloaded {
+				} else if result == fetchDownloaded {
 					report.Downloaded++
-				} else {
+				} else if result == fetchTargetPresent {
+					report.TargetSkipped++
+				} else if result == fetchLocalPresent {
 					report.Skipped++
 				}
 				mu.Unlock()
@@ -109,36 +117,65 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	return report, firstErr
 }
 
-func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, state *State, stateMu *sync.Mutex, maxRetries int) (bool, error) {
+type fetchResult int
+
+const (
+	fetchDownloaded fetchResult = iota
+	fetchLocalPresent
+	fetchTargetPresent
+)
+
+func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, state *State, stateMu *sync.Mutex, maxRetries int) (fetchResult, error) {
 	if pkg.Tarball == "" {
-		return false, fmt.Errorf("%s missing tarball URL", pkg.Key())
+		return fetchLocalPresent, fmt.Errorf("%s missing tarball URL", pkg.Key())
 	}
 	path := filepath.Join(outDir, tarballFileName(pkg))
 	stateMu.Lock()
-	if rec, ok := state.Downloaded[pkg.Key()]; ok && rec.Tarball == pkg.Tarball && rec.Path == path {
+	if targetContainsPackage(state, pkg) {
+		stateMu.Unlock()
+		return fetchTargetPresent, nil
+	}
+	if rec, ok := state.Local[pkg.Key()]; ok && rec.Tarball == pkg.Tarball && rec.Path == path {
 		stateMu.Unlock()
 		if verifyFile(path, pkg) == nil {
-			return false, nil
+			return fetchLocalPresent, nil
 		}
 	} else {
 		stateMu.Unlock()
 	}
 	if err := downloadWithRetries(ctx, client, pkg.Tarball, path, pkg, maxRetries); err != nil {
-		return false, err
+		return fetchLocalPresent, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return false, err
+		return fetchLocalPresent, err
 	}
 	stateMu.Lock()
-	state.Downloaded[pkg.Key()] = StateRecord{
+	state.Local[pkg.Key()] = StateRecord{
 		Name: pkg.Name, Version: pkg.Version, Tarball: pkg.Tarball,
 		Integrity: pkg.Integrity, Shasum: pkg.Shasum, Path: path,
 		Size: info.Size(), DownloadedAt: time.Now().UTC(),
 	}
 	state.UpdatedAt = time.Now().UTC()
 	stateMu.Unlock()
-	return true, nil
+	return fetchDownloaded, nil
+}
+
+func targetContainsPackage(state *State, pkg Package) bool {
+	rec, ok := state.Target[pkg.Key()]
+	if !ok {
+		return false
+	}
+	if rec.Name != pkg.Name || rec.Version != pkg.Version {
+		return false
+	}
+	if rec.Integrity != "" && pkg.Integrity != "" && rec.Integrity != pkg.Integrity {
+		return false
+	}
+	if rec.Shasum != "" && pkg.Shasum != "" && rec.Shasum != pkg.Shasum {
+		return false
+	}
+	return true
 }
 
 func downloadWithRetries(ctx context.Context, client *Client, tarball, path string, pkg Package, maxRetries int) error {
@@ -270,8 +307,8 @@ func verifyIntegrity(sha512Sum, sha1Sum []byte, integrity string) error {
 	return nil
 }
 
-func loadState(path string) (*State, error) {
-	state := &State{Downloaded: map[string]StateRecord{}}
+func LoadState(path string) (*State, error) {
+	state := NewState()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return state, nil
@@ -282,13 +319,38 @@ func loadState(path string) (*State, error) {
 	if err := json.Unmarshal(data, state); err != nil {
 		return nil, err
 	}
-	if state.Downloaded == nil {
-		state.Downloaded = map[string]StateRecord{}
-	}
+	normalizeState(state)
 	return state, nil
 }
 
-func saveState(path string, state *State) error {
+func NewState() *State {
+	return &State{
+		SchemaVersion: 1,
+		Target:        map[string]StateRecord{},
+		Local:         map[string]StateRecord{},
+	}
+}
+
+func normalizeState(state *State) {
+	if state.SchemaVersion == 0 {
+		state.SchemaVersion = 1
+	}
+	if state.Target == nil {
+		state.Target = map[string]StateRecord{}
+	}
+	if state.Local == nil {
+		state.Local = map[string]StateRecord{}
+	}
+	if len(state.Local) == 0 && len(state.Downloaded) > 0 {
+		for key, rec := range state.Downloaded {
+			state.Local[key] = rec
+		}
+		state.Downloaded = nil
+	}
+}
+
+func SaveState(path string, state *State) error {
+	normalizeState(state)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -297,6 +359,24 @@ func saveState(path string, state *State) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+func loadState(path string) (*State, error) {
+	return LoadState(path)
+}
+
+func saveState(path string, state *State) error {
+	return SaveState(path, state)
+}
+
+func MarkTargetPresent(state *State, pkg Package, source string) {
+	normalizeState(state)
+	state.Target[pkg.Key()] = StateRecord{
+		Name: pkg.Name, Version: pkg.Version, Tarball: pkg.Tarball,
+		Integrity: pkg.Integrity, Shasum: pkg.Shasum,
+		PresentAt: time.Now().UTC(), Source: source,
+	}
+	state.UpdatedAt = time.Now().UTC()
 }
 
 func tarballFileName(pkg Package) string {

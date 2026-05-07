@@ -4,7 +4,7 @@
 
 Build a Go CLI that acquires every npm package tarball needed for an air-gapped install. The tool must accept `package.json`, `package-lock.json`, and `npm-shrinkwrap.json`, resolve or import the entire dependency tree, and download all required `.tgz` files into a target directory.
 
-The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. The Go implementation should reproduce npm's resolution behavior natively while making package acquisition faster and more resumable than npm's normal install-oriented path.
+The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. The Go implementation should reproduce npm's resolution behavior natively. The practical success condition is: run this tool against a known `package.json`, push the acquired tarballs to a target npm-compatible registry, configure npm to use that target registry, and have `npm install` complete correctly from that target.
 
 ## Current State
 
@@ -22,6 +22,10 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Resolved graphs now retain root placement, dependency edges, edge types, and peer dependency edges in addition to the flat tarball set.
 - Non-optional peer dependencies can be auto-placed at the parent location when no ancestor satisfies them.
 - Optional peer dependencies are recorded without auto-installing when unsatisfied.
+- Peer conflicts are detected when an ancestor/root candidate exists but does not satisfy the requested peer range.
+- `--legacy-peer-deps` ignores peer dependencies.
+- `--strict-peer-deps` fails on optional peer conflicts in addition to required peer conflicts.
+- Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies.
 - Packument metadata can be cached on disk with `--metadata-cache`.
 - Cached packuments support freshness control with `--metadata-cache-ttl`.
 - Stale cached packuments revalidate with `If-None-Match` / `If-Modified-Since`, and `304 Not Modified` refreshes cache timestamps.
@@ -32,7 +36,10 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Transient packument metadata failures retry with backoff via `--metadata-retries`.
 - Stale cached packuments are used on transient metadata failures when available.
 - Tarball downloads apply matching `.npmrc` registry auth.
-- A JSON state file tracks downloaded packages for resume/skipping.
+- A JSON state file tracks target registry inventory separately from local downloaded tarballs.
+- `fetch` skips packages marked as present in the target registry.
+- `state sync-target` resolves an input package set, queries a target registry, and marks package versions already present in `state.target`.
+- `state mark-target` can mark a package/version as already present in the target registry.
 - Tarball integrity verification streams data and supports `sha512` SRI, `sha1` SRI, and legacy `sha1` shasum.
 - Tests cover semver basics, lockfile import, mock registry resolution/fetching, state reuse, and opt-in npm parity.
 
@@ -46,7 +53,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Build a test framework using npm for parity checks.
 - Make package acquisition very efficient.
 - Download as much as possible in parallel.
-- Maintain a persistent state file tracking what has and has not been downloaded.
+- Maintain a persistent state file tracking what package versions are already present in the target registry, so they are not fetched again.
 - Reference npm CLI source code as the guide.
 - Implement the resolver in Go rather than shelling out to npm.
 - Optimize for acquiring all `.tgz` files, not for creating `node_modules`.
@@ -58,10 +65,10 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Replace the current minimal semver implementation with npm-compatible semver behavior.
 - Expand alias handling beyond registry aliases if npm requires it.
 - Continue hardening dist-tags, exact versions, ranges, prereleases, wildcards, hyphen ranges, and OR ranges against npm parity fixtures.
-- Support `overrides`.
+- Continue hardening `overrides`, including full selector semantics and npm parity fixtures.
 - Continue hardening `peerDependencies`.
 - Continue hardening `peerDependenciesMeta.optional`.
-- Reproduce npm Arborist peer conflict behavior, peer set grouping, and strict/legacy peer modes.
+- Continue reproducing npm Arborist peer conflict behavior, peer set grouping, and strict/legacy peer mode edge cases.
 - Support `optionalDependencies` with platform and failure semantics matching npm.
 - Support `bundleDependencies` / `bundledDependencies`.
 - Support `devDependencies` inclusion/exclusion modes.
@@ -94,9 +101,12 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 
 ## State File Work
 
-- Version the state file schema.
+- Continue versioning the state file schema.
+- Treat target registry inventory as the primary state model.
 - Track package name, version, resolved URL, integrity, shasum, output path, size, and timestamps.
 - Track packument metadata cache keys separately from downloaded tarballs.
+- Continue hardening target registry query/sync, including registry-specific auth and retry behavior.
+- Add push/publish workflow that marks target inventory after successful upload.
 - Track failures with retry counts and last error.
 - Validate state against existing files at startup.
 - Add `state inspect` or similar command if useful.

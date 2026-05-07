@@ -102,6 +102,66 @@ func TestResolveAndFetchFromMockRegistry(t *testing.T) {
 	}
 }
 
+func TestFetchSkipsTargetPresentPackage(t *testing.T) {
+	tgz := []byte("already pushed")
+	integrity := sri(tgz)
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Write(tgz)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, ".gr", "state.json")
+	state := NewState()
+	MarkTargetPresent(state, Package{
+		Name: "present", Version: "1.0.0", Tarball: srv.URL + "/present-1.0.0.tgz", Integrity: integrity,
+	}, "test")
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{{
+		Name: "present", Version: "1.0.0", Tarball: srv.URL + "/present-1.0.0.tgz", Integrity: integrity,
+	}}, FetchOptions{
+		OutDir:      filepath.Join(dir, "tgzs"),
+		StatePath:   statePath,
+		Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.TargetSkipped != 1 || report.Downloaded != 0 || atomic.LoadInt64(&hits) != 0 {
+		t.Fatalf("report=%#v hits=%d", report, hits)
+	}
+}
+
+func TestLoadStateMigratesDownloadedToLocal(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, ".gr", "state.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{
+  "downloaded": {
+    "left-pad@1.3.0": {"name":"left-pad","version":"1.3.0","tarball":"https://example/left-pad.tgz"}
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Local["left-pad@1.3.0"].Name != "left-pad" {
+		t.Fatalf("local migration failed: %#v", state)
+	}
+	if state.Downloaded != nil {
+		t.Fatalf("legacy downloaded should be cleared after migration")
+	}
+}
+
 func TestResolveAliasSpecFromMockRegistry(t *testing.T) {
 	tgz := []byte("real tarball")
 	integrity := sri(tgz)

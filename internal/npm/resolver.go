@@ -6,9 +6,21 @@ import (
 	"sync"
 )
 
+type PeerConflictError struct {
+	Package      string
+	PeerName     string
+	PeerSpec     string
+	FoundVersion string
+}
+
+func (e *PeerConflictError) Error() string {
+	return fmt.Sprintf("%s requires peer %s@%s, but found %s@%s", e.Package, e.PeerName, e.PeerSpec, e.PeerName, e.FoundVersion)
+}
+
 type Resolver struct {
-	Client  *Client
-	Options ResolveOptions
+	Client    *Client
+	Options   ResolveOptions
+	Overrides *Overrides
 
 	mu       sync.Mutex
 	graph    *Graph
@@ -60,22 +72,8 @@ func (r *Resolver) resolveDeps(ctx context.Context, parent *Node, deps map[strin
 }
 
 func (r *Resolver) resolveRequests(ctx context.Context, parent *Node, deps []DependencyRequest) error {
-	var wg sync.WaitGroup
-	errs := make(chan error, len(deps))
 	for _, dep := range deps {
-		dep := dep
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := r.resolveDep(ctx, parent, dep.Name, dep.Spec, dep.Type); err != nil {
-				errs <- err
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
+		if _, err := r.resolveDep(ctx, parent, dep.Name, dep.Spec, dep.Type); err != nil {
 			return err
 		}
 	}
@@ -83,6 +81,12 @@ func (r *Resolver) resolveRequests(ctx context.Context, parent *Node, deps []Dep
 }
 
 func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec string, edgeType EdgeType) (*Node, error) {
+	rawSpec := spec
+	overrideRule := (*OverrideRule)(nil)
+	spec, overrideRule = r.overrideSpec(parent, name, spec)
+	if parent != nil && parent.ID == "root" && overrideRule != nil && spec != rawSpec && !isOverrideReference(overrideRule.Spec) {
+		return nil, &OverrideConflictError{Name: name, RawSpec: rawSpec, Spec: spec}
+	}
 	actualName, wanted, err := parsePackageSpec(name, spec)
 	if err != nil {
 		return nil, err
@@ -103,7 +107,7 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 
 	r.mu.Lock()
 	if node, ok := r.resolved[key]; ok {
-		r.graph.AddDependency(parent, node, name, spec, edgeType)
+		r.graph.AddDependency(parent, node, name, rawSpec, spec, edgeType)
 		r.mu.Unlock()
 		return node, nil
 	}
@@ -112,7 +116,7 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 		<-call.done
 		if call.node != nil {
 			r.mu.Lock()
-			r.graph.AddDependency(parent, call.node, name, spec, edgeType)
+			r.graph.AddDependency(parent, call.node, name, rawSpec, spec, edgeType)
 			r.mu.Unlock()
 		}
 		return call.node, call.err
@@ -121,12 +125,12 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	r.inflight[key] = call
 	r.mu.Unlock()
 
-	node, err := r.resolveManifest(ctx, parent, name, spec, edgeType, actualName, version, pack)
+	node, err := r.resolveManifest(ctx, parent, name, rawSpec, spec, edgeType, actualName, version, pack)
 	r.finishResolve(key, call, node, err)
 	return node, err
 }
 
-func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, depSpec string, edgeType EdgeType, actualName, version string, pack *Packument) (*Node, error) {
+func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, rawSpec, depSpec string, edgeType EdgeType, actualName, version string, pack *Packument) (*Node, error) {
 	manifest, ok := pack.Versions[version]
 	if !ok {
 		return nil, fmt.Errorf("%s@%s missing from packument", actualName, version)
@@ -150,7 +154,7 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, d
 	r.mu.Lock()
 	node := r.graph.AddNode(pkg)
 	r.resolved[pkg.Key()] = node
-	r.graph.AddDependency(parent, node, depName, depSpec, edgeType)
+	r.graph.AddDependency(parent, node, depName, rawSpec, depSpec, edgeType)
 	r.mu.Unlock()
 
 	childDeps := map[string]string{}
@@ -169,13 +173,42 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, d
 	return node, nil
 }
 
+func (r *Resolver) overrideSpec(parent *Node, name, spec string) (string, *OverrideRule) {
+	if r.Overrides == nil {
+		return spec, nil
+	}
+	if override, rule := r.Overrides.ResolveWithRule(parent, name, spec); override != "" {
+		return override, rule
+	}
+	return spec, nil
+}
+
 func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest VersionManifest) error {
+	if r.Options.LegacyPeerDeps {
+		return nil
+	}
 	for name, spec := range manifest.PeerDependencies {
 		optional := manifest.PeerDependenciesMeta[name].Optional
-		if target := r.findPeerSatisfier(node, name, spec); target != nil {
+		target, conflict := r.findPeerTarget(node, name, spec)
+		if target != nil {
 			r.mu.Lock()
 			r.graph.AddPeer(node, target, name, spec, optional, true)
 			r.mu.Unlock()
+			continue
+		}
+		if conflict != nil {
+			r.mu.Lock()
+			r.graph.AddPeer(node, conflict, name, spec, optional, false)
+			r.graph.AddPeerConflict(node, conflict, name, spec)
+			r.mu.Unlock()
+			if !optional || r.Options.StrictPeerDeps {
+				return &PeerConflictError{
+					Package:      node.ID,
+					PeerName:     name,
+					PeerSpec:     spec,
+					FoundVersion: conflict.Version,
+				}
+			}
 			continue
 		}
 		if optional {
@@ -199,18 +232,29 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 	return nil
 }
 
-func (r *Resolver) findPeerSatisfier(node *Node, name, spec string) *Node {
+func (r *Resolver) findPeerTarget(node *Node, name, spec string) (*Node, *Node) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var conflict *Node
 	for cursor := node; cursor != nil; cursor = cursor.Parent {
-		if cursor.Name == name && satisfies(cursor.Version, spec) {
-			return cursor
+		if cursor.Name == name {
+			if satisfies(cursor.Version, spec) {
+				return cursor, nil
+			}
+			if conflict == nil {
+				conflict = cursor
+			}
 		}
-		if edge := cursor.Dependencies[name]; edge != nil && edge.To != nil && satisfies(edge.To.Version, spec) {
-			return edge.To
+		if edge := cursor.Dependencies[name]; edge != nil && edge.To != nil {
+			if satisfies(edge.To.Version, spec) {
+				return edge.To, nil
+			}
+			if conflict == nil {
+				conflict = edge.To
+			}
 		}
 	}
-	return nil
+	return nil, conflict
 }
 
 func (r *Resolver) finishResolve(key string, call *resolveCall, node *Node, err error) {
