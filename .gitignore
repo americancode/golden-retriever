@@ -1,0 +1,10 @@
+.DS_Store
+/bin/
+/dist/
+/golden-retriever
+/.gr/
+/fixtures-output/
+
+# Local npm CLI source reference. Keep this available for implementation
+# comparison, but do not vendor it into this Go project.
+/cli-11.14.0/
