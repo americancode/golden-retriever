@@ -15,9 +15,25 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - `resolve` command prints the resolved package tarball set.
 - Lockfile v2/v3 `packages` import works for `package-lock.json` and `npm-shrinkwrap.json`.
 - `package.json` registry dependency walking works for basic registry semver specs.
+- npm alias specs like `npm:pkg@range` are supported for tarball acquisition.
+- Range support now covers more npm-style cases, including partial versions, hyphen ranges, prerelease ordering, and deprecated-version avoidance.
+- Registry packument requests are coalesced so concurrent requests for the same package share one in-flight fetch.
+- Dependency resolution now resolves independent child dependencies concurrently.
+- Resolved graphs now retain root placement, dependency edges, edge types, and peer dependency edges in addition to the flat tarball set.
+- Non-optional peer dependencies can be auto-placed at the parent location when no ancestor satisfies them.
+- Optional peer dependencies are recorded without auto-installing when unsatisfied.
+- Packument metadata can be cached on disk with `--metadata-cache`.
+- Cached packuments support freshness control with `--metadata-cache-ttl`.
+- Stale cached packuments revalidate with `If-None-Match` / `If-Modified-Since`, and `304 Not Modified` refreshes cache timestamps.
+- `--offline` resolves package inputs using only cached registry metadata.
+- `.npmrc` loading supports default registry, scoped registries, bearer tokens, `_auth`, and username/password auth.
 - Concurrent tarball downloads are implemented.
+- Transient tarball failures retry with backoff.
+- Transient packument metadata failures retry with backoff via `--metadata-retries`.
+- Stale cached packuments are used on transient metadata failures when available.
+- Tarball downloads apply matching `.npmrc` registry auth.
 - A JSON state file tracks downloaded packages for resume/skipping.
-- Tarball integrity verification supports `sha512` SRI and legacy `sha1` shasum.
+- Tarball integrity verification streams data and supports `sha512` SRI, `sha1` SRI, and legacy `sha1` shasum.
 - Tests cover semver basics, lockfile import, mock registry resolution/fetching, state reuse, and opt-in npm parity.
 
 ## Required Outcomes From Initial Prompt
@@ -40,12 +56,12 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Port npm package spec parsing behavior from `npm-package-arg`.
 - Port npm manifest selection behavior from `npm-pick-manifest`.
 - Replace the current minimal semver implementation with npm-compatible semver behavior.
-- Support aliases such as `npm:pkg@version`.
-- Support dist-tags, exact versions, ranges, prereleases, wildcards, hyphen ranges, and OR ranges exactly as npm does.
+- Expand alias handling beyond registry aliases if npm requires it.
+- Continue hardening dist-tags, exact versions, ranges, prereleases, wildcards, hyphen ranges, and OR ranges against npm parity fixtures.
 - Support `overrides`.
-- Support `peerDependencies`.
-- Support `peerDependenciesMeta.optional`.
-- Reproduce npm Arborist peer placement and conflict behavior.
+- Continue hardening `peerDependencies`.
+- Continue hardening `peerDependenciesMeta.optional`.
+- Reproduce npm Arborist peer conflict behavior, peer set grouping, and strict/legacy peer modes.
 - Support `optionalDependencies` with platform and failure semantics matching npm.
 - Support `bundleDependencies` / `bundledDependencies`.
 - Support `devDependencies` inclusion/exclusion modes.
@@ -63,13 +79,12 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## Acquisition Performance Work
 
 - Keep concurrent tarball downloading.
-- Add concurrent packument fetching during dependency resolution.
-- Add request coalescing so duplicate packument requests share one in-flight fetch.
-- Add registry metadata cache on disk.
-- Add ETag / `If-None-Match` support for packuments.
-- Add retry with exponential backoff for transient registry failures.
+- Continue improving concurrent packument fetching during dependency resolution.
+- Add cache pruning and explicit invalidation commands.
+- Continue hardening ETag / `If-None-Match` support for packuments.
+- Continue hardening retry with exponential backoff for transient packument failures.
 - Add rate-limit aware behavior.
-- Stream tarball verification instead of reading full tarballs into memory.
+- Continue streaming tarball verification and add larger-file benchmarks.
 - Avoid redownloading existing valid tarballs even when state is absent.
 - Add configurable output naming strategies.
 - Add summary output with total packages, bytes, downloaded, skipped, failed, and elapsed time.
@@ -94,6 +109,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Compare tarball URL sets against npm-generated `package-lock.json`.
 - Compare resolved package name/version sets against npm.
 - Add fixtures for peer dependencies.
+- Add fixtures for peer dependency conflicts and strict/legacy peer modes.
 - Add fixtures for optional dependencies.
 - Add fixtures for overrides.
 - Add fixtures for aliases.
@@ -109,17 +125,19 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## CLI Work
 
 - Preserve `fetch` and `resolve`.
-- Add `--registry`.
-- Add scoped registry support from `.npmrc`.
-- Add auth token support from `.npmrc` or environment.
+- Continue hardening `--registry`.
+- Expand scoped registry support from `.npmrc`.
+- Expand auth token support from `.npmrc` and environment.
 - Add `--include-dev` and `--include-optional` behavior matching npm.
 - Add `--omit` / `--include` flags matching npm naming.
 - Add `--json` output.
 - Add `--dry-run`.
 - Add `--fail-fast`.
-- Add `--max-retries`.
-- Add `--metadata-cache`.
-- Add `--offline` to use only cached metadata/state.
+- Continue hardening `--max-retries`.
+- Continue hardening `--metadata-cache`.
+- Continue hardening `--metadata-cache-ttl`.
+- Continue hardening `--metadata-retries`.
+- Continue hardening `--offline` for cached metadata/state workflows.
 
 ## Documentation Work
 

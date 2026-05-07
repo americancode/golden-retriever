@@ -13,18 +13,48 @@ func (p Package) Key() string {
 }
 
 type Graph struct {
+	Root     *Node
 	packages map[string]Package
+	nodes    map[string]*Node
 }
 
 func NewGraph() *Graph {
-	return &Graph{packages: map[string]Package{}}
+	root := &Node{
+		ID:           "root",
+		Name:         "",
+		Version:      "",
+		Dependencies: map[string]*Edge{},
+		Peers:        map[string]*Edge{},
+	}
+	return &Graph{
+		Root:     root,
+		packages: map[string]Package{},
+		nodes:    map[string]*Node{"root": root},
+	}
 }
 
 func (g *Graph) Add(pkg Package) {
+	g.AddNode(pkg)
+}
+
+func (g *Graph) AddNode(pkg Package) *Node {
 	if pkg.Name == "" || pkg.Version == "" {
-		return
+		return nil
 	}
 	g.packages[pkg.Key()] = pkg
+	if node, ok := g.nodes[pkg.Key()]; ok {
+		return node
+	}
+	node := &Node{
+		ID:           pkg.Key(),
+		Name:         pkg.Name,
+		Version:      pkg.Version,
+		Package:      pkg,
+		Dependencies: map[string]*Edge{},
+		Peers:        map[string]*Edge{},
+	}
+	g.nodes[node.ID] = node
+	return node
 }
 
 func (g *Graph) Has(key string) bool {
@@ -39,4 +69,82 @@ func (g *Graph) Packages() []Package {
 	}
 	sortPackages(out)
 	return out
+}
+
+func (g *Graph) Nodes() []*Node {
+	out := make([]*Node, 0, len(g.nodes))
+	for _, node := range g.nodes {
+		if node.ID != "root" {
+			out = append(out, node)
+		}
+	}
+	sortNodes(out)
+	return out
+}
+
+func (g *Graph) AddDependency(parent, child *Node, name, spec string, edgeType EdgeType) {
+	if parent == nil || child == nil || edgeType == "" {
+		return
+	}
+	if parent.Dependencies == nil {
+		parent.Dependencies = map[string]*Edge{}
+	}
+	parent.Dependencies[name] = &Edge{
+		From:      parent,
+		To:        child,
+		Name:      name,
+		Spec:      spec,
+		Type:      edgeType,
+		Satisfied: true,
+	}
+	if child.Parent == nil {
+		child.Parent = parent
+	}
+}
+
+func (g *Graph) AddPeer(parent, target *Node, name, spec string, optional bool, satisfied bool) {
+	if parent == nil {
+		return
+	}
+	if parent.Peers == nil {
+		parent.Peers = map[string]*Edge{}
+	}
+	parent.Peers[name] = &Edge{
+		From:         parent,
+		To:           target,
+		Name:         name,
+		Spec:         spec,
+		Type:         EdgePeer,
+		PeerOptional: optional,
+		Satisfied:    satisfied,
+	}
+}
+
+type Node struct {
+	ID           string
+	Name         string
+	Version      string
+	Package      Package
+	Parent       *Node
+	Dependencies map[string]*Edge
+	Peers        map[string]*Edge
+}
+
+type EdgeType string
+
+const (
+	EdgeProd     EdgeType = "prod"
+	EdgeDev      EdgeType = "dev"
+	EdgeOptional EdgeType = "optional"
+	EdgePeer     EdgeType = "peer"
+)
+
+type Edge struct {
+	From         *Node
+	To           *Node
+	Name         string
+	Spec         string
+	Type         EdgeType
+	PeerOptional bool
+	Satisfied    bool
 }

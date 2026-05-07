@@ -10,8 +10,8 @@ import (
 )
 
 type ResolveOptions struct {
-	IncludeDev          bool
-	IncludeOptional     bool
+	IncludeDev         bool
+	IncludeOptional    bool
 	ResolveConcurrency int
 }
 
@@ -50,17 +50,17 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 		return nil, fmt.Errorf("workspaces are not implemented yet")
 	}
 
-	deps := map[string]string{}
-	mergeDeps(deps, root.Dependencies)
+	var deps []DependencyRequest
+	deps = appendDeps(deps, root.Dependencies, EdgeProd)
 	if opts.IncludeDev {
-		mergeDeps(deps, root.DevDependencies)
+		deps = appendDeps(deps, root.DevDependencies, EdgeDev)
 	}
 	if opts.IncludeOptional {
-		mergeDeps(deps, root.OptionalDependencies)
+		deps = appendDeps(deps, root.OptionalDependencies, EdgeOptional)
 	}
 
 	r := &Resolver{Client: client, Options: opts}
-	return r.Resolve(ctx, deps)
+	return r.ResolveRoot(ctx, deps)
 }
 
 func mergeDeps(dst, src map[string]string) {
@@ -69,6 +69,15 @@ func mergeDeps(dst, src map[string]string) {
 			dst[name] = spec
 		}
 	}
+}
+
+func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) []DependencyRequest {
+	for name, spec := range src {
+		if isRegistrySpec(spec) {
+			dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
+		}
+	}
+	return dst
 }
 
 func isRegistrySpec(spec string) bool {

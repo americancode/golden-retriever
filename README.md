@@ -11,6 +11,8 @@ go run ./cmd/golden-retriever fetch \
   --input ./package.json \
   --out ./tgzs \
   --state ./.gr/state.json \
+  --metadata-cache ./.gr/metadata \
+  --metadata-cache-ttl 24h \
   --concurrency 32
 ```
 
@@ -20,6 +22,8 @@ Supported inputs:
 - `package-lock.json` / `npm-shrinkwrap.json`: imports the resolved tarball set directly.
 
 The output directory receives tarballs named as `<escaped-name>-<version>.tgz`; scoped packages are escaped as `@scope+pkg`.
+
+Registry metadata is cached on disk by default under `.gr/metadata`. Fresh entries are used directly; stale entries are revalidated with `ETag` / `Last-Modified` headers. Use `--offline` to resolve `package.json` inputs only from that cache. The CLI reads `~/.npmrc`, a project `.npmrc` next to the input file, and an optional extra file from `--npmrc`; it supports default registries, scoped registries, and common registry auth keys.
 
 ## Test Strategy
 

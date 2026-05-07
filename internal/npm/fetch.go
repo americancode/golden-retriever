@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ type FetchOptions struct {
 	OutDir      string
 	StatePath   string
 	Concurrency int
+	MaxRetries  int
 }
 
 type FetchReport struct {
@@ -49,6 +51,9 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 16
 	}
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 0
+	}
 	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
 		return FetchReport{}, err
 	}
@@ -69,7 +74,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 		go func() {
 			defer wg.Done()
 			for pkg := range jobs {
-				downloaded, err := fetchOne(ctx, client, pkg, opts.OutDir, state, &stateMu)
+				downloaded, err := fetchOne(ctx, client, pkg, opts.OutDir, state, &stateMu, opts.MaxRetries)
 				mu.Lock()
 				if err != nil {
 					report.Failed++
@@ -104,7 +109,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	return report, firstErr
 }
 
-func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, state *State, stateMu *sync.Mutex) (bool, error) {
+func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, state *State, stateMu *sync.Mutex, maxRetries int) (bool, error) {
 	if pkg.Tarball == "" {
 		return false, fmt.Errorf("%s missing tarball URL", pkg.Key())
 	}
@@ -118,7 +123,7 @@ func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, s
 	} else {
 		stateMu.Unlock()
 	}
-	if err := download(ctx, client.HTTPClient, pkg.Tarball, path, pkg); err != nil {
+	if err := downloadWithRetries(ctx, client, pkg.Tarball, path, pkg, maxRetries); err != nil {
 		return false, err
 	}
 	info, err := os.Stat(path)
@@ -136,70 +141,131 @@ func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, s
 	return true, nil
 }
 
-func download(ctx context.Context, httpClient *http.Client, tarball, path string, pkg Package) error {
+func downloadWithRetries(ctx context.Context, client *Client, tarball, path string, pkg Package, maxRetries int) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err := download(ctx, client, tarball, path, pkg)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryable(err) || attempt == maxRetries {
+			break
+		}
+		backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return lastErr
+}
+
+type httpStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e httpStatusError) Error() string {
+	return e.Status
+}
+
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr httpStatusError
+	if ok := errors.As(err, &statusErr); ok {
+		return statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
+	}
+	return true
+}
+
+func download(ctx context.Context, client *Client, tarball, path string, pkg Package) error {
 	tmp := path + ".tmp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarball, nil)
 	if err != nil {
 		return err
 	}
-	res, err := httpClient.Do(req)
+	client.applyAuth(req)
+	res, err := client.HTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return fmt.Errorf("%s: tarball returned %s", pkg.Key(), res.Status)
+		return fmt.Errorf("%s: tarball returned %w", pkg.Key(), httpStatusError{StatusCode: res.StatusCode, Status: res.Status})
 	}
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(f, res.Body)
+	sha512Hash := sha512.New()
+	sha1Hash := sha1.New()
+	writer := io.MultiWriter(f, sha512Hash, sha1Hash)
+	_, copyErr := io.Copy(writer, res.Body)
 	closeErr := f.Close()
 	if copyErr != nil {
+		_ = os.Remove(tmp)
 		return copyErr
 	}
 	if closeErr != nil {
+		_ = os.Remove(tmp)
 		return closeErr
 	}
-	if err := verifyFile(tmp, pkg); err != nil {
+	if err := verifyHashes(sha512Hash.Sum(nil), sha1Hash.Sum(nil), pkg); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)
 }
 
 func verifyFile(path string, pkg Package) error {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
+	sha512Hash := sha512.New()
+	sha1Hash := sha1.New()
+	if _, err := io.Copy(io.MultiWriter(sha512Hash, sha1Hash), f); err != nil {
+		return err
+	}
+	return verifyHashes(sha512Hash.Sum(nil), sha1Hash.Sum(nil), pkg)
+}
+
+func verifyHashes(sha512Sum, sha1Sum []byte, pkg Package) error {
 	if pkg.Integrity != "" {
-		return verifyIntegrity(data, pkg.Integrity)
+		return verifyIntegrity(sha512Sum, sha1Sum, pkg.Integrity)
 	}
 	if pkg.Shasum != "" {
-		sum := sha1.Sum(data)
-		if hex.EncodeToString(sum[:]) != pkg.Shasum {
+		if hex.EncodeToString(sha1Sum) != pkg.Shasum {
 			return fmt.Errorf("%s: sha1 mismatch", pkg.Key())
 		}
 	}
 	return nil
 }
 
-func verifyIntegrity(data []byte, integrity string) error {
+func verifyIntegrity(sha512Sum, sha1Sum []byte, integrity string) error {
 	for _, field := range strings.Fields(integrity) {
 		parts := strings.SplitN(field, "-", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		if parts[0] != "sha512" {
+		var got string
+		switch parts[0] {
+		case "sha512":
+			got = base64.StdEncoding.EncodeToString(sha512Sum)
+		case "sha1":
+			got = base64.StdEncoding.EncodeToString(sha1Sum)
+		default:
 			continue
 		}
-		sum := sha512.Sum512(data)
-		got := base64.StdEncoding.EncodeToString(sum[:])
 		if got == parts[1] {
 			return nil
 		}
-		return fmt.Errorf("sha512 integrity mismatch")
+		return fmt.Errorf("%s integrity mismatch", parts[0])
 	}
 	return nil
 }

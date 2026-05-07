@@ -12,32 +12,62 @@ type Resolver struct {
 
 	mu       sync.Mutex
 	graph    *Graph
-	inflight map[string]bool
+	resolved map[string]*Node
+	inflight map[string]*resolveCall
 	fetchSem chan struct{}
 }
 
+type DependencyRequest struct {
+	Name string
+	Spec string
+	Type EdgeType
+}
+
+type resolveCall struct {
+	done chan struct{}
+	node *Node
+	err  error
+}
+
 func (r *Resolver) Resolve(ctx context.Context, deps map[string]string) (*Graph, error) {
+	requests := make([]DependencyRequest, 0, len(deps))
+	for name, spec := range deps {
+		requests = append(requests, DependencyRequest{Name: name, Spec: spec, Type: EdgeProd})
+	}
+	return r.ResolveRoot(ctx, requests)
+}
+
+func (r *Resolver) ResolveRoot(ctx context.Context, deps []DependencyRequest) (*Graph, error) {
 	r.graph = NewGraph()
-	r.inflight = map[string]bool{}
+	r.resolved = map[string]*Node{}
+	r.inflight = map[string]*resolveCall{}
 	if r.Options.ResolveConcurrency <= 0 {
 		r.Options.ResolveConcurrency = 32
 	}
 	r.fetchSem = make(chan struct{}, r.Options.ResolveConcurrency)
-	if err := r.resolveDeps(ctx, deps); err != nil {
+	if err := r.resolveRequests(ctx, r.graph.Root, deps); err != nil {
 		return nil, err
 	}
 	return r.graph, nil
 }
 
-func (r *Resolver) resolveDeps(ctx context.Context, deps map[string]string) error {
+func (r *Resolver) resolveDeps(ctx context.Context, parent *Node, deps map[string]string, edgeType EdgeType) error {
+	requests := make([]DependencyRequest, 0, len(deps))
+	for name, spec := range deps {
+		requests = append(requests, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
+	}
+	return r.resolveRequests(ctx, parent, requests)
+}
+
+func (r *Resolver) resolveRequests(ctx context.Context, parent *Node, deps []DependencyRequest) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(deps))
-	for name, spec := range deps {
-		name, spec := name, spec
+	for _, dep := range deps {
+		dep := dep
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.resolveDep(ctx, name, spec); err != nil {
+			if _, err := r.resolveDep(ctx, parent, dep.Name, dep.Spec, dep.Type); err != nil {
 				errs <- err
 			}
 		}()
@@ -52,36 +82,54 @@ func (r *Resolver) resolveDeps(ctx context.Context, deps map[string]string) erro
 	return nil
 }
 
-func (r *Resolver) resolveDep(ctx context.Context, name, spec string) error {
+func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec string, edgeType EdgeType) (*Node, error) {
 	actualName, wanted, err := parsePackageSpec(name, spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.acquireFetchSlot(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	pack, err := r.Client.Packument(ctx, actualName)
 	r.releaseFetchSlot()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	version, err := pickVersion(pack, wanted)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	key := actualName + "@" + version
 
 	r.mu.Lock()
-	if r.graph.Has(key) || r.inflight[key] {
+	if node, ok := r.resolved[key]; ok {
+		r.graph.AddDependency(parent, node, name, spec, edgeType)
 		r.mu.Unlock()
-		return nil
+		return node, nil
 	}
-	r.inflight[key] = true
+	if call, ok := r.inflight[key]; ok {
+		r.mu.Unlock()
+		<-call.done
+		if call.node != nil {
+			r.mu.Lock()
+			r.graph.AddDependency(parent, call.node, name, spec, edgeType)
+			r.mu.Unlock()
+		}
+		return call.node, call.err
+	}
+	call := &resolveCall{done: make(chan struct{})}
+	r.inflight[key] = call
 	r.mu.Unlock()
 
+	node, err := r.resolveManifest(ctx, parent, name, spec, edgeType, actualName, version, pack)
+	r.finishResolve(key, call, node, err)
+	return node, err
+}
+
+func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, depSpec string, edgeType EdgeType, actualName, version string, pack *Packument) (*Node, error) {
 	manifest, ok := pack.Versions[version]
 	if !ok {
-		return fmt.Errorf("%s@%s missing from packument", actualName, version)
+		return nil, fmt.Errorf("%s@%s missing from packument", actualName, version)
 	}
 	pkgName := manifest.Name
 	if pkgName == "" {
@@ -92,25 +140,89 @@ func (r *Resolver) resolveDep(ctx context.Context, name, spec string) error {
 		pkgVersion = version
 	}
 
-	r.mu.Lock()
-	r.graph.Add(Package{
+	pkg := Package{
 		Name:      pkgName,
 		Version:   pkgVersion,
 		Tarball:   manifest.Dist.Tarball,
 		Integrity: manifest.Dist.Integrity,
 		Shasum:    manifest.Dist.Shasum,
-	})
+	}
+	r.mu.Lock()
+	node := r.graph.AddNode(pkg)
+	r.resolved[pkg.Key()] = node
+	r.graph.AddDependency(parent, node, depName, depSpec, edgeType)
 	r.mu.Unlock()
 
 	childDeps := map[string]string{}
 	mergeDeps(childDeps, manifest.Dependencies)
 	if r.Options.IncludeOptional {
-		mergeDeps(childDeps, manifest.OptionalDependencies)
+		if err := r.resolveDeps(ctx, node, manifest.OptionalDependencies, EdgeOptional); err != nil {
+			return nil, fmt.Errorf("%s@%s optional dependency: %w", pkgName, pkgVersion, err)
+		}
 	}
-	if err := r.resolveDeps(ctx, childDeps); err != nil {
-		return fmt.Errorf("%s@%s dependency: %w", pkgName, pkgVersion, err)
+	if err := r.resolveDeps(ctx, node, childDeps, EdgeProd); err != nil {
+		return nil, fmt.Errorf("%s@%s dependency: %w", pkgName, pkgVersion, err)
+	}
+	if err := r.resolvePeers(ctx, node, manifest); err != nil {
+		return nil, fmt.Errorf("%s@%s peer dependency: %w", pkgName, pkgVersion, err)
+	}
+	return node, nil
+}
+
+func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest VersionManifest) error {
+	for name, spec := range manifest.PeerDependencies {
+		optional := manifest.PeerDependenciesMeta[name].Optional
+		if target := r.findPeerSatisfier(node, name, spec); target != nil {
+			r.mu.Lock()
+			r.graph.AddPeer(node, target, name, spec, optional, true)
+			r.mu.Unlock()
+			continue
+		}
+		if optional {
+			r.mu.Lock()
+			r.graph.AddPeer(node, nil, name, spec, optional, false)
+			r.mu.Unlock()
+			continue
+		}
+		placement := node.Parent
+		if placement == nil {
+			placement = r.graph.Root
+		}
+		target, err := r.resolveDep(ctx, placement, name, spec, EdgePeer)
+		if err != nil {
+			return err
+		}
+		r.mu.Lock()
+		r.graph.AddPeer(node, target, name, spec, optional, target != nil)
+		r.mu.Unlock()
 	}
 	return nil
+}
+
+func (r *Resolver) findPeerSatisfier(node *Node, name, spec string) *Node {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for cursor := node; cursor != nil; cursor = cursor.Parent {
+		if cursor.Name == name && satisfies(cursor.Version, spec) {
+			return cursor
+		}
+		if edge := cursor.Dependencies[name]; edge != nil && edge.To != nil && satisfies(edge.To.Version, spec) {
+			return edge.To
+		}
+	}
+	return nil
+}
+
+func (r *Resolver) finishResolve(key string, call *resolveCall, node *Node, err error) {
+	r.mu.Lock()
+	if node != nil && err == nil {
+		r.resolved[key] = node
+	}
+	call.node = node
+	call.err = err
+	delete(r.inflight, key)
+	close(call.done)
+	r.mu.Unlock()
 }
 
 func (r *Resolver) acquireFetchSlot(ctx context.Context) error {

@@ -2,6 +2,7 @@ package npm
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/base64"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -136,6 +138,78 @@ func TestResolveAliasSpecFromMockRegistry(t *testing.T) {
 	pkgs := graph.Packages()
 	if len(pkgs) != 1 || pkgs[0].Name != "real" || pkgs[0].Version != "2.0.0" {
 		t.Fatalf("unexpected packages: %#v", pkgs)
+	}
+}
+
+func TestFetchRetriesTransientFailure(t *testing.T) {
+	tgz := []byte("retry tarball")
+	integrity := sri(tgz)
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt64(&hits, 1) == 1 {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		w.Write(tgz)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	report, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{{
+		Name:      "retry",
+		Version:   "1.0.0",
+		Tarball:   srv.URL + "/retry-1.0.0.tgz",
+		Integrity: integrity,
+	}}, FetchOptions{
+		OutDir:      filepath.Join(dir, "tgzs"),
+		StatePath:   filepath.Join(dir, ".gr", "state.json"),
+		Concurrency: 1,
+		MaxRetries:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Downloaded != 1 || atomic.LoadInt64(&hits) != 2 {
+		t.Fatalf("report=%#v hits=%d", report, hits)
+	}
+}
+
+func TestVerifySha1SRI(t *testing.T) {
+	data := []byte("legacy")
+	sum := sha1.Sum(data)
+	pkg := Package{Name: "legacy", Version: "1.0.0", Integrity: "sha1-" + base64.StdEncoding.EncodeToString(sum[:])}
+	if err := verifyHashes(nil, sum[:], pkg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFetchAppliesTarballAuth(t *testing.T) {
+	tgz := []byte("private tarball")
+	integrity := sri(tgz)
+	var authHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		w.Write(tgz)
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.values[nerfDart(srv.URL)+":_authToken"] = "secret"
+	client := NewClientWithConfig(cfg)
+
+	dir := t.TempDir()
+	_, err := FetchAll(context.Background(), client, []Package{{
+		Name: "private", Version: "1.0.0", Tarball: srv.URL + "/private-1.0.0.tgz", Integrity: integrity,
+	}}, FetchOptions{
+		OutDir:      filepath.Join(dir, "tgzs"),
+		StatePath:   filepath.Join(dir, ".gr", "state.json"),
+		Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authHeader != "Bearer secret" {
+		t.Fatalf("auth header = %s", authHeader)
 	}
 }
 

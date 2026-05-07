@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -43,9 +44,15 @@ func fetch(args []string) error {
 	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
 	out := fs.String("out", "tgzs", "target directory for downloaded package tarballs")
 	state := fs.String("state", ".gr/state.json", "persistent state file")
-	registry := fs.String("registry", "https://registry.npmjs.org", "npm registry base URL")
+	registry := fs.String("registry", "", "npm registry base URL override")
+	npmrc := fs.String("npmrc", "", "additional npmrc file to load")
+	metadataCache := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
+	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "packument metadata cache freshness duration; 0 always revalidates")
+	metadataRetries := fs.Int("metadata-retries", 3, "packument metadata retry count for transient failures")
+	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel download count")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
+	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
@@ -56,10 +63,13 @@ func fetch(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	client := npm.NewClient(*registry)
+	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	if err != nil {
+		return err
+	}
 	graph, err := npm.LoadInput(ctx, client, *input, npm.ResolveOptions{
-		IncludeDev:          *includeDev,
-		IncludeOptional:     *includeOptional,
+		IncludeDev:         *includeDev,
+		IncludeOptional:    *includeOptional,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -70,6 +80,7 @@ func fetch(args []string) error {
 		OutDir:      *out,
 		StatePath:   *state,
 		Concurrency: *concurrency,
+		MaxRetries:  *maxRetries,
 	})
 	if err != nil {
 		return err
@@ -82,7 +93,12 @@ func fetch(args []string) error {
 func resolve(args []string) error {
 	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
 	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
-	registry := fs.String("registry", "https://registry.npmjs.org", "npm registry base URL")
+	registry := fs.String("registry", "", "npm registry base URL override")
+	npmrc := fs.String("npmrc", "", "additional npmrc file to load")
+	metadataCache := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
+	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "packument metadata cache freshness duration; 0 always revalidates")
+	metadataRetries := fs.Int("metadata-retries", 3, "packument metadata retry count for transient failures")
+	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
@@ -90,10 +106,13 @@ func resolve(args []string) error {
 		return err
 	}
 
-	client := npm.NewClient(*registry)
+	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	if err != nil {
+		return err
+	}
 	graph, err := npm.LoadInput(context.Background(), client, *input, npm.ResolveOptions{
-		IncludeDev:          *includeDev,
-		IncludeOptional:     *includeOptional,
+		IncludeDev:         *includeDev,
+		IncludeOptional:    *includeOptional,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -103,6 +122,22 @@ func resolve(args []string) error {
 		fmt.Printf("%s@%s %s\n", pkg.Name, pkg.Version, pkg.Tarball)
 	}
 	return nil
+}
+
+func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL time.Duration, metadataRetries int, offline bool) (*npm.Client, error) {
+	cfg, err := npm.DiscoverConfig(filepath.Dir(input), npmrc)
+	if err != nil {
+		return nil, err
+	}
+	if registry != "" {
+		cfg.Registry = registry
+	}
+	client := npm.NewClientWithConfig(cfg)
+	client.CacheDir = metadataCache
+	client.CacheTTL = metadataCacheTTL
+	client.PackumentRetries = metadataRetries
+	client.Offline = offline
+	return client, nil
 }
 
 func usage() {

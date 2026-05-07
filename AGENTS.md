@@ -24,10 +24,12 @@ Use it as the reference for behavior, especially:
 ## Current Architecture
 
 - `cmd/golden-retriever`: CLI entrypoint.
-- `internal/npm/client.go`: npm registry packument client.
+- `internal/npm/client.go`: npm registry packument client, request coalescing, disk metadata cache, ETag revalidation, and packument retry behavior.
+- `internal/npm/config.go`: `.npmrc` registry and auth parsing.
 - `internal/npm/input.go`: input dispatch for package and lock files.
 - `internal/npm/lockfile.go`: lockfile import.
 - `internal/npm/resolver.go`: package.json dependency resolver.
+- `internal/npm/types.go`: resolved graph model, including package nodes, dependency edges, and peer edges.
 - `internal/npm/semver.go`: current minimal semver/range support.
 - `internal/npm/fetch.go`: concurrent tarball downloader, integrity checks, state file.
 - `internal/npm/*_test.go`: unit, mock-registry, and opt-in npm parity tests.
@@ -38,17 +40,18 @@ The implementation is an initial native slice. It does not yet have full npm Arb
 
 Known gaps include:
 
-- Full npm semver behavior.
+- Full npm semver behavior beyond the currently implemented common range forms.
 - Full npm package spec parsing.
 - Peer dependency placement and conflict behavior.
+- Peer dependency conflict behavior, peer set grouping, and strict/legacy peer modes.
 - Overrides.
-- Aliases.
+- Alias edge cases beyond registry aliases like `npm:pkg@range`.
 - Workspaces.
 - Platform/engine filtering.
 - Bundled dependencies.
 - Git, file, link, remote tarball, and hosted Git specs.
 - Full lockfile v1 import.
-- `.npmrc` auth and scoped registry behavior.
+- Full `.npmrc` behavior beyond default registry, scoped registry, and common auth keys.
 
 See `ROADMAP.md` before choosing the next task.
 
@@ -75,12 +78,12 @@ NPM_PARITY=1 go test ./...
 
 ## Implementation Priorities
 
-1. Replace minimal semver/spec parsing with npm-compatible behavior.
-2. Port manifest picking from `npm-pick-manifest`.
-3. Implement Arborist-compatible peer dependency resolution.
+1. Continue hardening semver/spec parsing against npm parity fixtures.
+2. Finish porting manifest picking from `npm-pick-manifest`.
+3. Implement Arborist-compatible peer dependency conflict behavior and strict/legacy peer modes.
 4. Expand parity fixtures and compare against npm-generated lockfiles.
-5. Add disk metadata cache and concurrent packument fetching.
-6. Add `.npmrc` registry/auth support.
+5. Add metadata cache pruning and explicit invalidation commands.
+6. Expand `.npmrc` config compatibility.
 7. Improve state schema and reporting.
 
 ## User Direction To Preserve
