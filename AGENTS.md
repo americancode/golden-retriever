@@ -2,9 +2,9 @@
 
 ## Project Intent
 
-This repository is building `golden-retriever`, a Go CLI for acquiring npm tarballs for air-gapped environments. The goal is to reproduce npm's dependency resolution behavior in Go and make the tarball acquisition path fast, concurrent, target-registry-aware, and integrity-checked.
+This repository is building `golden-retriever`, a Go CLI for acquiring npm tarballs for air-gapped environments and publishing missing package versions to a target npm-compatible registry. The goal is to reproduce npm's dependency resolution behavior in Go and make the acquisition and push path fast, concurrent, target-registry-aware, authenticated, and integrity-checked.
 
-The success workflow is: run this tool against a known `package.json`, acquire every tarball npm would need, push those tarballs into a target npm-compatible registry, configure npm to use that target registry, and have `npm install` complete correctly.
+The success workflow is: run this tool against a known `package.json`, acquire every tarball npm would need, push missing package versions into an authenticated target npm-compatible registry, configure npm to use that target registry, and have `npm install` complete correctly.
 
 Do not turn this into a wrapper around `npm install`. npm may be used in tests as the oracle for parity, but production resolution and fetching should be native Go.
 
@@ -67,7 +67,12 @@ See `ROADMAP.md` before choosing the next task.
 - Use npm parity tests as an oracle, not as production implementation.
 - Keep fast tests independent of the public registry.
 - Keep public-registry/npm tests behind `NPM_PARITY=1`.
-- Preserve target inventory state behavior when changing fetch logic. State exists primarily so the program knows what package versions the target registry already contains and can skip fetching them.
+- Preserve target inventory state behavior when changing fetch or push logic. State exists primarily so the program knows what package versions the target registry already contains and can skip fetching and pushing them.
+- Treat local state as the normal inventory source. Target registry querying is optional and should be used to rebuild or verify state.
+- Design state and metadata cache paths so they work well with GitLab cache. This program is expected to run from GitLab CI.
+- Target registry auth must be non-interactive and compatible with CI variables.
+- Target registry sync and push should run in parallel where practical.
+- Target registry push must support authentication.
 - Preserve tarball integrity verification.
 - Preserve concurrency, but avoid data races in shared state.
 - Do not commit downloaded tarballs, generated binaries, state files, or the npm source reference tree.
@@ -88,11 +93,11 @@ NPM_PARITY=1 go test ./...
 3. Harden overrides against npm parity fixtures, especially full selector semantics.
 4. Implement Arborist-compatible peer set grouping and remaining strict/legacy peer mode edge cases.
 5. Add metadata cache pruning and explicit invalidation commands.
-6. Add target registry push/publish workflow that marks inventory after successful upload.
+6. Add authenticated parallel target registry push/publish workflow that marks inventory after successful upload.
 7. Expand `.npmrc` config compatibility.
 
 ## User Direction To Preserve
 
 The user explicitly wants the Go program to reproduce npm logic, not avoid it because it is hard. Treat npm's source as available reference material and implement the behavior in Go.
 
-The performance goal is acquiring all required `.tgz` files into a target directory as fast as practical, with a persistent target inventory state file and parallel fetching wherever resolution constraints allow it.
+The performance goal is acquiring all required `.tgz` files into a target directory and pushing missing versions to the target registry as fast as practical, with a persistent target inventory state file and parallel network work wherever resolution and registry constraints allow it.

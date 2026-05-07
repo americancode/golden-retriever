@@ -2,9 +2,9 @@
 
 ## Goal
 
-Build a Go CLI that acquires every npm package tarball needed for an air-gapped install. The tool must accept `package.json`, `package-lock.json`, and `npm-shrinkwrap.json`, resolve or import the entire dependency tree, and download all required `.tgz` files into a target directory.
+Build a Go CLI that acquires every npm package tarball needed for an air-gapped install and pushes missing package versions to a target npm-compatible registry. The tool must accept `package.json`, `package-lock.json`, and `npm-shrinkwrap.json`, resolve or import the entire dependency tree, download all required `.tgz` files into a target directory, and publish missing packages to the target registry.
 
-The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. The Go implementation should reproduce npm's resolution behavior natively. The practical success condition is: run this tool against a known `package.json`, push the acquired tarballs to a target npm-compatible registry, configure npm to use that target registry, and have `npm install` complete correctly from that target.
+The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. The Go implementation should reproduce npm's resolution behavior natively. The practical success condition is: run this tool against a known `package.json`, have it acquire and push missing tarballs to an authenticated target npm-compatible registry, configure npm to use that target registry, and have `npm install` complete correctly from that target.
 
 ## Current State
 
@@ -37,9 +37,12 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Stale cached packuments are used on transient metadata failures when available.
 - Tarball downloads apply matching `.npmrc` registry auth.
 - A JSON state file tracks target registry inventory separately from local downloaded tarballs.
+- The state file is the primary inventory source and is intended to be reused from CI cache, such as GitLab cache.
 - `fetch` skips packages marked as present in the target registry.
 - `state sync-target` resolves an input package set, queries a target registry, and marks package versions already present in `state.target`.
 - `state mark-target` can mark a package/version as already present in the target registry.
+- Target registry sync should run in parallel where possible.
+- Target registry push/publish is required, authenticated, parallel where possible, and must update `state.target` after successful publication.
 - Tarball integrity verification streams data and supports `sha512` SRI, `sha1` SRI, and legacy `sha1` shasum.
 - Tests cover semver basics, lockfile import, mock registry resolution/fetching, state reuse, and opt-in npm parity.
 
@@ -48,12 +51,16 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Accept `package.json` as input.
 - Accept npm lockfiles as input.
 - Pull npm package tarballs into a target directory.
+- Push missing package versions to a target npm-compatible registry.
 - Build the whole dependency tree, including sub-dependencies, not only root dependencies.
 - Ensure every package pulled matches what npm would pull.
 - Build a test framework using npm for parity checks.
 - Make package acquisition very efficient.
 - Download as much as possible in parallel.
-- Maintain a persistent state file tracking what package versions are already present in the target registry, so they are not fetched again.
+- Maintain a persistent local state file tracking what package versions are already present in the target registry, so they are not fetched or pushed again.
+- Use local state as the normal source of truth; optionally query the target registry to rebuild or verify state.
+- Support GitLab cache use for the local state and metadata cache.
+- Run as a GitLab CI job with non-interactive registry authentication from CI variables.
 - Reference npm CLI source code as the guide.
 - Implement the resolver in Go rather than shelling out to npm.
 - Optimize for acquiring all `.tgz` files, not for creating `node_modules`.
@@ -103,10 +110,16 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 
 - Continue versioning the state file schema.
 - Treat target registry inventory as the primary state model.
+- Treat locally maintained state as the normal source of truth.
+- Support CI cache workflows, especially GitLab cache, for state and metadata cache reuse.
+- Document and test GitLab CI cache layout for `.gr/state.json`, `.gr/metadata`, and downloaded tarballs when useful.
 - Track package name, version, resolved URL, integrity, shasum, output path, size, and timestamps.
 - Track packument metadata cache keys separately from downloaded tarballs.
 - Continue hardening target registry query/sync, including registry-specific auth and retry behavior.
-- Add push/publish workflow that marks target inventory after successful upload.
+- Keep target registry query/sync optional for rebuilding or verifying state.
+- Add authenticated push/publish workflow that marks target inventory after successful upload.
+- Run target state rebuild/sync in parallel where possible.
+- Ensure all target registry operations work non-interactively in GitLab CI.
 - Track failures with retry counts and last error.
 - Validate state against existing files at startup.
 - Add `state inspect` or similar command if useful.
@@ -135,6 +148,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## CLI Work
 
 - Preserve `fetch` and `resolve`.
+- Add `push` or `publish` command for authenticated parallel target registry publication.
+- Add combined workflow command if useful: sync state, fetch missing tarballs, push missing tarballs, update state.
 - Continue hardening `--registry`.
 - Expand scoped registry support from `.npmrc`.
 - Expand auth token support from `.npmrc` and environment.
@@ -152,6 +167,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## Documentation Work
 
 - Document supported inputs.
+- Document GitLab CI usage, cache keys, expected variables, and `.npmrc` auth examples.
 - Document current parity limitations.
 - Document state file format.
 - Document air-gap workflow.
