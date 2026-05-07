@@ -48,26 +48,18 @@ The expected production trigger is a GitLab CI pipeline. The state file and meta
 Typical flow:
 
 ```sh
-# Optional: rebuild/verify target inventory from the registry.
-go run ./cmd/golden-retriever state sync-target \
+go run ./cmd/golden-retriever mirror \
   --input package.json \
   --state .gr/state.json \
   --metadata-cache .gr/metadata \
-  --target-registry "$NPM_TARGET_REGISTRY"
-
-go run ./cmd/golden-retriever fetch \
-  --input package.json \
-  --state .gr/state.json \
-  --metadata-cache .gr/metadata \
-  --out .gr/tgzs
-
-# Planned: authenticated parallel push that updates state.target.
-go run ./cmd/golden-retriever push \
-  --state .gr/state.json \
-  --target-registry "$NPM_TARGET_REGISTRY"
+  --out .gr/tgzs \
+  --target-registry "$NPM_TARGET_REGISTRY" \
+  --sync-target
 ```
 
 Authentication should come from CI variables via `.npmrc` or environment expansion, for example an auth token scoped to the target registry.
+
+`mirror` is the CI-oriented command: it resolves the input once, optionally refreshes target-present state with `--sync-target`, fetches only tarballs still needed locally, publishes missing package versions to the target registry in parallel, and updates `state.target` after successful publishes. For fully cached normal runs, omit `--sync-target` and rely on the cached `.gr/state.json`.
 
 ## Test Strategy
 

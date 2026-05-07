@@ -25,7 +25,7 @@ Use it as the reference for behavior, especially:
 
 ## Current Architecture
 
-- `cmd/golden-retriever`: CLI entrypoint.
+- `cmd/golden-retriever`: CLI entrypoint, including `fetch`, `resolve`, `state`, `push`/`publish`, and the CI-oriented `mirror` workflow.
 - `internal/npm/client.go`: npm registry packument client, request coalescing, disk metadata cache, ETag revalidation, and packument retry behavior.
 - `internal/npm/config.go`: `.npmrc` registry and auth parsing.
 - `internal/npm/input.go`: input dispatch for package and lock files.
@@ -36,6 +36,7 @@ Use it as the reference for behavior, especially:
 - `internal/npm/semver.go`: current minimal semver/range support.
 - `internal/npm/fetch.go`: concurrent tarball downloader, integrity checks, state file.
 - `internal/npm/target.go`: target registry inventory sync.
+- `internal/npm/publish.go`: authenticated npm publish-compatible tarball push and target inventory marking.
 - `internal/npm/*_test.go`: unit, mock-registry, and opt-in npm parity tests.
 
 ## Current Limitations
@@ -93,7 +94,7 @@ NPM_PARITY=1 go test ./...
 3. Harden overrides against npm parity fixtures, especially full selector semantics.
 4. Implement Arborist-compatible peer set grouping and remaining strict/legacy peer mode edge cases.
 5. Add metadata cache pruning and explicit invalidation commands.
-6. Add authenticated parallel target registry push/publish workflow that marks inventory after successful upload.
+6. Harden authenticated parallel target registry push/publish workflow against real registries.
 7. Expand `.npmrc` config compatibility.
 
 ## User Direction To Preserve

@@ -42,7 +42,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - `state sync-target` resolves an input package set, queries a target registry, and marks package versions already present in `state.target`.
 - `state mark-target` can mark a package/version as already present in the target registry.
 - Target registry sync should run in parallel where possible.
-- Target registry push/publish is required, authenticated, parallel where possible, and must update `state.target` after successful publication.
+- `push` publishes locally fetched tarballs missing from the target registry, runs in parallel, authenticates through `.npmrc`/CI credentials, and updates `state.target` after successful publication.
 - Tarball integrity verification streams data and supports `sha512` SRI, `sha1` SRI, and legacy `sha1` shasum.
 - Tests cover semver basics, lockfile import, mock registry resolution/fetching, state reuse, and opt-in npm parity.
 
@@ -117,7 +117,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Track packument metadata cache keys separately from downloaded tarballs.
 - Continue hardening target registry query/sync, including registry-specific auth and retry behavior.
 - Keep target registry query/sync optional for rebuilding or verifying state.
-- Add authenticated push/publish workflow that marks target inventory after successful upload.
+- Continue hardening authenticated push/publish workflow against real target registries.
 - Run target state rebuild/sync in parallel where possible.
 - Ensure all target registry operations work non-interactively in GitLab CI.
 - Track failures with retry counts and last error.
@@ -148,8 +148,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## CLI Work
 
 - Preserve `fetch` and `resolve`.
-- Add `push` or `publish` command for authenticated parallel target registry publication.
-- Add combined workflow command if useful: sync state, fetch missing tarballs, push missing tarballs, update state.
+- Continue hardening `push` command for authenticated parallel target registry publication.
+- `mirror` command added for the combined CI workflow: resolve once, optionally sync target state, fetch missing tarballs, push missing tarballs, and update state.
 - Continue hardening `--registry`.
 - Expand scoped registry support from `.npmrc`.
 - Expand auth token support from `.npmrc` and environment.

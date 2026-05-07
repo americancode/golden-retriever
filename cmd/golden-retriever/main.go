@@ -28,6 +28,10 @@ func run(args []string) error {
 	switch args[0] {
 	case "fetch":
 		return fetch(args[1:])
+	case "mirror":
+		return mirror(args[1:])
+	case "push", "publish":
+		return push(args[1:])
 	case "resolve":
 		return resolve(args[1:])
 	case "state":
@@ -39,6 +43,161 @@ func run(args []string) error {
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func mirror(args []string) error {
+	fs := flag.NewFlagSet("mirror", flag.ExitOnError)
+	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
+	out := fs.String("out", ".gr/tgzs", "target directory for downloaded package tarballs")
+	statePath := fs.String("state", ".gr/state.json", "state inventory file")
+	registry := fs.String("registry", "", "source npm registry base URL override")
+	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
+	npmrc := fs.String("npmrc", "", "additional npmrc file to load")
+	targetNPMRC := fs.String("target-npmrc", "", "additional npmrc file for target registry auth")
+	metadataCache := fs.String("metadata-cache", ".gr/metadata", "source packument metadata cache directory")
+	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "source packument metadata cache freshness duration; 0 always revalidates")
+	metadataRetries := fs.Int("metadata-retries", 3, "source packument metadata retry count for transient failures")
+	offline := fs.Bool("offline", false, "resolve using only cached source registry metadata")
+	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
+	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
+	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
+	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
+	syncTarget := fs.Bool("sync-target", false, "query target registry first and rebuild target-present state for the resolved package set")
+	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
+	fetchConcurrency := fs.Int("fetch-concurrency", max(8, runtime.NumCPU()*4), "parallel tarball download count")
+	targetConcurrency := fs.Int("target-concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
+	pushConcurrency := fs.Int("push-concurrency", max(4, runtime.NumCPU()*2), "parallel target registry publish count")
+	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
+	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
+	access := fs.String("access", "public", "npm package access value")
+	timeout := fs.Duration("timeout", 30*time.Minute, "workflow timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *targetRegistry == "" {
+		return fmt.Errorf("missing --target-registry")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	if err != nil {
+		return err
+	}
+	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
+		IncludeDev:         *includeDev,
+		IncludeOptional:    *includeOptional,
+		LegacyPeerDeps:     *legacyPeerDeps,
+		StrictPeerDeps:     *strictPeerDeps,
+		ResolveConcurrency: *resolveConcurrency,
+	})
+	if err != nil {
+		return err
+	}
+
+	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries, false)
+	if err != nil {
+		return err
+	}
+	targetClient.UseStaleOnFailure = false
+
+	if *syncTarget {
+		state, err := npm.LoadState(*statePath)
+		if err != nil {
+			return err
+		}
+		syncReport, err := npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
+			Concurrency: *targetConcurrency,
+			Source:      *targetRegistry,
+		})
+		if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
+			err = saveErr
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Printf("target_sync packages=%d present=%d missing=%d failed=%d state=%s target=%s\n",
+			len(graph.Packages()), syncReport.Present, syncReport.Missing, syncReport.Failed, *statePath, *targetRegistry)
+	}
+
+	fetchReport, err := npm.FetchAll(ctx, sourceClient, graph.Packages(), npm.FetchOptions{
+		OutDir:      *out,
+		StatePath:   *statePath,
+		Concurrency: *fetchConcurrency,
+		MaxRetries:  *maxRetries,
+	})
+	if err != nil {
+		return err
+	}
+
+	state, err := npm.LoadState(*statePath)
+	if err != nil {
+		return err
+	}
+	pushReport, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
+		Concurrency: *pushConcurrency,
+		Source:      *targetRegistry,
+		Tag:         *tag,
+		Access:      *access,
+	})
+	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
+		err = saveErr
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("mirror packages=%d downloaded=%d local_skipped=%d target_skipped=%d fetch_failed=%d pushed=%d already_present=%d push_skipped=%d push_failed=%d out=%s state=%s target=%s\n",
+		len(graph.Packages()), fetchReport.Downloaded, fetchReport.Skipped, fetchReport.TargetSkipped, fetchReport.Failed,
+		pushReport.Pushed, pushReport.Present, pushReport.Skipped, pushReport.Failed, *out, *statePath, *targetRegistry)
+	return nil
+}
+
+func push(args []string) error {
+	fs := flag.NewFlagSet("push", flag.ExitOnError)
+	input := fs.String("input", "package.json", "package.json path used for project npmrc discovery")
+	statePath := fs.String("state", ".gr/state.json", "state inventory file")
+	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
+	npmrc := fs.String("npmrc", "", "additional npmrc file for target registry auth")
+	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel target registry publish count")
+	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
+	access := fs.String("access", "public", "npm package access value")
+	timeout := fs.Duration("timeout", 10*time.Minute, "network timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *targetRegistry == "" {
+		return fmt.Errorf("missing --target-registry")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	state, err := npm.LoadState(*statePath)
+	if err != nil {
+		return err
+	}
+	targetClient, err := newClient(*input, *targetRegistry, *npmrc, "", 0, 3, false)
+	if err != nil {
+		return err
+	}
+	targetClient.UseStaleOnFailure = false
+	report, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
+		Concurrency: *concurrency,
+		Source:      *targetRegistry,
+		Tag:         *tag,
+		Access:      *access,
+	})
+	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
+		err = saveErr
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pushed=%d already_present=%d skipped=%d failed=%d state=%s target=%s\n",
+		report.Pushed, report.Present, report.Skipped, report.Failed, *statePath, *targetRegistry)
+	return nil
 }
 
 func fetch(args []string) error {
@@ -288,6 +447,8 @@ func usage() {
 
 Commands:
   fetch     resolve and download every package tarball
+  mirror    resolve, optionally sync target state, fetch tarballs, and push missing packages
+  push      publish local tarballs missing from target registry
   resolve   print the resolved package tarball set
   state     manage target registry inventory state
 
