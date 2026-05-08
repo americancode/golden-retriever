@@ -45,6 +45,55 @@ func TestPickVersionRanges(t *testing.T) {
 	}
 }
 
+func TestPickVersionResolutionFixtures(t *testing.T) {
+	pack := &Packument{
+		Name: "fixture",
+		DistTags: map[string]string{
+			"latest": "2.1.0",
+			"next":   "3.0.0-beta.1",
+		},
+		Versions: map[string]VersionManifest{
+			"1.0.0":        {},
+			"1.2.3":        {},
+			"1.9.0":        {},
+			"2.0.0":        {},
+			"2.1.0":        {},
+			"3.0.0-beta.1": {},
+		},
+	}
+
+	tests := []struct {
+		name string
+		spec string
+		want string
+	}{
+		{name: "dist-tag", spec: "latest", want: "2.1.0"},
+		{name: "exact-version", spec: "2.0.0", want: "2.0.0"},
+		{name: "range", spec: "^1.2.0", want: "1.9.0"},
+		{name: "prerelease", spec: ">=3.0.0-beta <4", want: "3.0.0-beta.1"},
+		{name: "hyphen-range", spec: "1.0.0 - 1.2.3", want: "1.2.3"},
+		{name: "or-range", spec: "^1.2.0 || >=2.0.0", want: "2.1.0"},
+		{name: "comparator-whitespace", spec: " < 2.0.0  ||  >= 2.1.0 ", want: "2.1.0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pickVersion(pack, tc.spec)
+			if err != nil {
+				t.Fatalf("pickVersion(%q) err = %v", tc.spec, err)
+			}
+			if got != tc.want {
+				t.Fatalf("pickVersion(%q) = %s want %s", tc.spec, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("conflicting-ranges", func(t *testing.T) {
+		if got, ok := pickVersionSatisfyingAll(pack, []string{">=1.0.0 <2.0.0", ">=2.0.0"}, ResolveOptions{}); ok {
+			t.Fatalf("pickVersionSatisfyingAll(conflicting) = %s, want no match", got)
+		}
+	})
+}
+
 func TestParsePackageSpecMatchesNPARegistryAliases(t *testing.T) {
 	tests := []struct {
 		spec       string

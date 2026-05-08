@@ -20,7 +20,7 @@
 - [x] Port npm manifest selection behavior from `npm-pick-manifest` for default tags, before-time, exact versions, dist-tags, deprecated and engine sorting, staged versions, policy restrictions, avoid, and avoid-strict fallback.
 - [x] Harden semver behavior for npm dependency resolution: strict version identity, build metadata normalization, prerelease gating, partial and wildcard comparators, hyphen ranges, OR ranges, caret and tilde ranges, comparator ranges, invalid range rejection, and range intersection fixtures.
 - [x] Expand alias handling with npm-compatible registry alias parsing/validation (including whitespace/error parity) and explicit non-registry alias rejection fixtures.
-- [ ] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
+- [x] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
 - [ ] Continue hardening `overrides` selector semantics beyond current version-qualified range intersection coverage.
 - [ ] Add override semantic conflict detection for incomparable override sets with intersecting or disjoint replacement ranges.
 - [ ] Expand override fixtures for cyclic chains and peer-conflict fixes.
