@@ -113,6 +113,53 @@ func TestLoadLockfileAncientDependenciesOnly(t *testing.T) {
 	}
 }
 
+func TestLoadLockfileAncientVersionZeroWithFromFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 0,
+  "dependencies": {
+    "from-only": {
+      "from": "from-only@1.2.3",
+      "integrity": "sha512-from-only"
+    },
+    "legacy-url-from": {
+      "from": "https://registry.npmjs.org/legacy-url-from/-/legacy-url-from-2.3.4.tgz"
+    },
+    "legacy-nested": {
+      "version": "0.1.0",
+      "dependencies": {
+        "nested-from": {
+          "from": "nested-from@3.4.5"
+        }
+      }
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("from-only@1.2.3") || !graph.Has("legacy-url-from@2.3.4") || !graph.Has("legacy-nested@0.1.0") || !graph.Has("nested-from@3.4.5") {
+		t.Fatalf("ancient v0 lockfile entries with from fallback not imported: %#v", graph.Packages())
+	}
+	got := map[string]Package{}
+	for _, pkg := range graph.Packages() {
+		got[pkg.Key()] = pkg
+	}
+	if got["from-only@1.2.3"].Tarball != "https://registry.npmjs.org/from-only/-/from-only-1.2.3.tgz" {
+		t.Fatalf("from-only tarball = %s", got["from-only@1.2.3"].Tarball)
+	}
+	if got["legacy-url-from@2.3.4"].Tarball != "https://registry.npmjs.org/legacy-url-from/-/legacy-url-from-2.3.4.tgz" {
+		t.Fatalf("legacy-url-from tarball = %s", got["legacy-url-from@2.3.4"].Tarball)
+	}
+}
+
 func TestLoadInputDirectoryPrioritizesShrinkwrap(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
@@ -180,6 +227,44 @@ func TestLoadInputLegacyShrinkwrapPeerCase(t *testing.T) {
 	}
 }
 
+func TestLoadInputLegacyShrinkwrapBundledEdgeCases(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "npm-shrinkwrap.json"), []byte(`{
+  "name": "root",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "legacy-wrapper": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-wrapper/-/legacy-wrapper-1.0.0.tgz",
+      "dependencies": {
+        "legacy-bundled-child": {
+          "version": "1.0.0",
+          "bundled": true,
+          "resolved": "https://registry.npmjs.org/legacy-bundled-child/-/legacy-bundled-child-1.0.0.tgz"
+        },
+        "legacy-shrinkwrapped-child": {
+          "version": "2.0.0",
+          "resolved": "https://registry.npmjs.org/legacy-shrinkwrapped-child/-/legacy-shrinkwrapped-child-2.0.0.tgz"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), dir, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("legacy-wrapper@1.0.0") || !graph.Has("legacy-shrinkwrapped-child@2.0.0") {
+		t.Fatalf("legacy shrinkwrapped packages should import wrapper and non-bundled children: %#v", graph.Packages())
+	}
+	if graph.Has("legacy-bundled-child@1.0.0") {
+		t.Fatalf("legacy bundled child should not be acquired as registry tarball: %#v", graph.Packages())
+	}
+}
+
 func TestLoadInputDirectoryIgnoresHiddenLockfile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"root","version":"1.0.0"}`), 0o644); err != nil {
@@ -207,6 +292,82 @@ func TestLoadInputDirectoryIgnoresHiddenLockfile(t *testing.T) {
 	}
 	if graph.Has("hidden@1.0.0") || len(graph.Packages()) != 0 {
 		t.Fatalf("hidden installed-tree lockfile should not affect input resolution: %#v", graph.Packages())
+	}
+}
+
+func TestLoadInputUsesYarnLockForIncompleteLockMetadata(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/left-pad": {}
+  },
+  "dependencies": {
+    "left-pad": {}
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "yarn.lock"), []byte(`left-pad@^1.3.0:
+  version "1.3.0"
+  resolved "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz#abc"
+  integrity sha512-yarn-left-pad
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), dir, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("left-pad@1.3.0") {
+		t.Fatalf("expected yarn.lock to supply missing lock metadata: %#v", graph.Packages())
+	}
+	pkgs := graph.Packages()
+	if len(pkgs) != 1 {
+		t.Fatalf("unexpected packages: %#v", pkgs)
+	}
+	if pkgs[0].Tarball != "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz" {
+		t.Fatalf("left-pad tarball = %s", pkgs[0].Tarball)
+	}
+	if pkgs[0].Integrity != "sha512-yarn-left-pad" {
+		t.Fatalf("left-pad integrity = %s", pkgs[0].Integrity)
+	}
+}
+
+func TestLoadLockfilePathUsesSiblingYarnLockForIncompleteMetadata(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(lockPath, []byte(`{
+  "name": "root",
+  "dependencies": {
+    "@scope/pkg": {
+      "from": "@scope/pkg@^2.0.0"
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "yarn.lock"), []byte(`"@scope/pkg@^2.0.0":
+  version "2.1.0"
+  resolved "https://registry.npmjs.org/@scope/pkg/-/pkg-2.1.0.tgz"
+  integrity sha512-yarn-scope
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), lockPath, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("@scope/pkg@2.1.0") {
+		t.Fatalf("expected sibling yarn.lock to enrich direct lockfile input: %#v", graph.Packages())
+	}
+	pkg := graph.Packages()[0]
+	if pkg.Tarball != "https://registry.npmjs.org/@scope/pkg/-/pkg-2.1.0.tgz" || pkg.Integrity != "sha512-yarn-scope" {
+		t.Fatalf("unexpected enriched package: %#v", pkg)
 	}
 }
 
@@ -252,6 +413,38 @@ func TestLoadLockfileDerivesMissingResolvedForRegistryPackages(t *testing.T) {
 	}
 	if got["@scope/b@2.0.0"].Integrity != "sha512-b" {
 		t.Fatalf("integrity not preserved: %#v", got["@scope/b@2.0.0"])
+	}
+}
+
+func TestLoadLockfileDerivesMissingVersionFromResolved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/no-version": {
+      "resolved": "https://registry.npmjs.org/no-version/-/no-version-4.5.6.tgz",
+      "integrity": "sha512-no-version"
+    }
+  },
+  "dependencies": {
+    "legacy-no-version": {
+      "resolved": "https://registry.npmjs.org/legacy-no-version/-/legacy-no-version-7.8.9.tgz"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("no-version@4.5.6") || !graph.Has("legacy-no-version@7.8.9") {
+		t.Fatalf("missing-version entries should derive semver from resolved URL: %#v", graph.Packages())
 	}
 }
 
@@ -484,6 +677,51 @@ func TestLoadLockfileSkipsLocalAndGitResolvedEntries(t *testing.T) {
 	}
 }
 
+func TestLoadLockfileNormalizesIncompleteResolvedForms(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/protocol-relative": {
+      "version": "1.0.0",
+      "resolved": "//registry.npmjs.org/protocol-relative/-/protocol-relative-1.0.0.tgz"
+    },
+    "node_modules/root-relative": {
+      "version": "2.0.0",
+      "resolved": "/root-relative/-/root-relative-2.0.0.tgz"
+    },
+    "node_modules/bare-host": {
+      "version": "3.0.0",
+      "resolved": "registry.npmjs.org/bare-host/-/bare-host-3.0.0.tgz"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Package{}
+	for _, pkg := range graph.Packages() {
+		got[pkg.Key()] = pkg
+	}
+	if got["protocol-relative@1.0.0"].Tarball != "https://registry.npmjs.org/protocol-relative/-/protocol-relative-1.0.0.tgz" {
+		t.Fatalf("protocol-relative tarball = %s", got["protocol-relative@1.0.0"].Tarball)
+	}
+	if got["root-relative@2.0.0"].Tarball != "https://registry.npmjs.org/root-relative/-/root-relative-2.0.0.tgz" {
+		t.Fatalf("root-relative tarball = %s", got["root-relative@2.0.0"].Tarball)
+	}
+	if got["bare-host@3.0.0"].Tarball != "https://registry.npmjs.org/bare-host/-/bare-host-3.0.0.tgz" {
+		t.Fatalf("bare-host tarball = %s", got["bare-host@3.0.0"].Tarball)
+	}
+}
+
 func TestLoadLockfileSkipsNonSemverVersionEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package-lock.json")
@@ -569,6 +807,89 @@ func TestLoadLockfileImportsAliasPackageByManifestName(t *testing.T) {
 	}
 	if pkgs[0].Tarball != "https://registry.npmjs.org/real-package/-/real-package-1.2.3.tgz" {
 		t.Fatalf("alias tarball = %s", pkgs[0].Tarball)
+	}
+}
+
+func TestLoadLockfileMirrorsOptionalPlatformPackagesAcrossHosts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/normal": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/normal/-/normal-1.0.0.tgz"
+    },
+    "node_modules/platform-linux-x64": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/platform-linux-x64/-/platform-linux-x64-1.0.0.tgz",
+      "optional": true,
+      "os": ["linux"],
+      "cpu": ["x64"]
+    },
+    "node_modules/platform-darwin-arm64": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/platform-darwin-arm64/-/platform-darwin-arm64-1.0.0.tgz",
+      "optional": true,
+      "os": ["darwin"],
+      "cpu": ["arm64"]
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"normal@1.0.0",
+		"platform-linux-x64@1.0.0",
+		"platform-darwin-arm64@1.0.0",
+	} {
+		if !graph.Has(key) {
+			t.Fatalf("lockfile mirror should include optional platform tarball %s: %#v", key, graph.Packages())
+		}
+	}
+}
+
+func TestLoadLockfileMirrorsLegacyOptionalPlatformDependencies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "legacy-platform-linux": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-platform-linux/-/legacy-platform-linux-1.0.0.tgz",
+      "optional": true,
+      "os": ["linux"],
+      "cpu": ["x64"]
+    },
+    "legacy-platform-win": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-platform-win/-/legacy-platform-win-1.0.0.tgz",
+      "optional": true,
+      "os": ["win32"],
+      "cpu": ["x64"]
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("legacy-platform-linux@1.0.0") || !graph.Has("legacy-platform-win@1.0.0") {
+		t.Fatalf("legacy lockfile optional platform packages should be mirrored regardless host platform: %#v", graph.Packages())
 	}
 }
 

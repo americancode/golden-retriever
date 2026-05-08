@@ -3,6 +3,7 @@ package npm
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 )
@@ -109,19 +110,26 @@ func (r *Resolver) resolveOptionalRequests(ctx context.Context, parent *Node, de
 
 func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec string, edgeType EdgeType) (*Node, error) {
 	rawSpec := spec
+	r.tracef("resolve start parent=%s dep=%s spec=%s type=%s", nodeID(parent), name, rawSpec, edgeType)
 	overrideRule := (*OverrideRule)(nil)
 	spec, overrideRule = r.overrideSpec(parent, name, spec)
+	if spec != rawSpec {
+		r.tracef("override applied dep=%s raw=%s effective=%s", name, rawSpec, spec)
+	}
 	if parent != nil && parent.ID == "root" && overrideRule != nil && spec != rawSpec && !isOverrideReference(overrideRule.Spec) {
 		return nil, &OverrideConflictError{Name: name, RawSpec: rawSpec, Spec: spec}
 	}
 	actualName, wanted, err := parsePackageSpec(name, spec)
 	if err != nil {
+		r.tracef("parse spec failed dep=%s spec=%s err=%v", name, spec, err)
 		return nil, err
 	}
+	r.tracef("parsed dep=%s actual=%s wanted=%s", name, actualName, wanted)
 	if edgeType != EdgePeer {
 		if preferred, ok, err := r.resolvePreferredAncestorDependency(ctx, parent, name, wanted); err != nil {
 			return nil, err
 		} else if ok {
+			r.tracef("reuse preferred ancestor dep=%s version=%s parent=%s", name, preferred.Version, nodeID(parent))
 			r.mu.Lock()
 			r.graph.AddDependency(parent, preferred, name, rawSpec, spec, edgeType)
 			r.mu.Unlock()
@@ -130,6 +138,7 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	}
 	if canReuseExistingForSpec(wanted) {
 		if existing := r.findReusableSatisfyingNode(parent, actualName, wanted, edgeType); existing != nil {
+			r.tracef("reuse existing dep=%s version=%s parent=%s", name, existing.Version, nodeID(parent))
 			r.mu.Lock()
 			r.graph.AddDependency(parent, existing, name, rawSpec, spec, edgeType)
 			r.mu.Unlock()
@@ -145,13 +154,22 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 		return nil, err
 	}
 	version, err := pickVersionWithOptions(pack, wanted, r.Options)
+	if err != nil && isRemoteTarballSpec(wanted) {
+		if matched, ok := pickVersionByTarball(pack, wanted); ok {
+			version = matched
+			err = nil
+		}
+	}
 	if err != nil {
+		r.tracef("pick version failed dep=%s wanted=%s err=%v", actualName, wanted, err)
 		return nil, err
 	}
+	r.tracef("pick version dep=%s wanted=%s selected=%s", actualName, wanted, version)
 	key := actualName + "@" + version
 
 	r.mu.Lock()
 	if node, ok := r.resolved[key]; ok {
+		r.tracef("reuse resolved node=%s for dep=%s parent=%s", key, name, nodeID(parent))
 		r.graph.AddDependency(parent, node, name, rawSpec, spec, edgeType)
 		r.mu.Unlock()
 		return node, nil
@@ -171,6 +189,9 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	r.mu.Unlock()
 
 	node, err := r.resolveManifest(ctx, parent, name, rawSpec, spec, edgeType, actualName, version, pack)
+	if err == nil && node != nil {
+		r.tracef("resolved node=%s for dep=%s parent=%s", node.ID, name, nodeID(parent))
+	}
 	r.finishResolve(key, call, node, err)
 	return node, err
 }
@@ -311,6 +332,9 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 
 func canReuseExistingForSpec(spec string) bool {
 	spec = strings.TrimSpace(spec)
+	if isRemoteTarballSpec(spec) {
+		return false
+	}
 	return spec != "" && spec != "latest" && !registryTagLike(spec)
 }
 
@@ -333,6 +357,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 		optional := manifest.PeerDependenciesMeta[name].Optional
 		target, conflict := r.findPeerTarget(node, name, spec)
 		if target != nil {
+			r.tracef("peer satisfied package=%s peer=%s spec=%s via=%s", node.ID, name, spec, target.ID)
 			r.mu.Lock()
 			r.graph.AddPeer(node, target, name, spec, optional, true)
 			r.mu.Unlock()
@@ -340,6 +365,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 		}
 		if optional {
 			if existing := r.findExistingSatisfyingNode(name, spec); existing != nil {
+				r.tracef("optional peer satisfied by existing package=%s peer=%s via=%s", node.ID, name, existing.ID)
 				r.mu.Lock()
 				r.graph.AddPeer(node, existing, name, spec, optional, true)
 				r.mu.Unlock()
@@ -361,6 +387,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 				r.graph.AddPeerConflict(node, conflict, name, spec)
 			}
 			r.mu.Unlock()
+			r.tracef("peer conflict package=%s peer=%s spec=%s found=%s strict=%v optional=%v", node.ID, name, spec, conflict.Version, r.Options.StrictPeerDeps, optional)
 			if r.Options.StrictPeerDeps {
 				return &PeerConflictError{
 					Package:      node.ID,
@@ -372,6 +399,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 			continue
 		}
 		if optional {
+			r.tracef("optional peer unresolved package=%s peer=%s spec=%s", node.ID, name, spec)
 			r.mu.Lock()
 			r.graph.AddPeer(node, nil, name, spec, optional, false)
 			r.mu.Unlock()
@@ -391,11 +419,28 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 		if err != nil {
 			return err
 		}
+		if target != nil {
+			r.tracef("peer resolved package=%s peer=%s spec=%s via=%s", node.ID, name, spec, target.ID)
+		}
 		r.mu.Lock()
 		r.graph.AddPeer(node, target, name, spec, optional, target != nil)
 		r.mu.Unlock()
 	}
 	return nil
+}
+
+func (r *Resolver) tracef(format string, args ...any) {
+	if os.Getenv("GR_TRACE_RESOLUTION") != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[resolver] "+format+"\n", args...)
+}
+
+func nodeID(node *Node) string {
+	if node == nil {
+		return "<nil>"
+	}
+	return node.ID
 }
 
 func (r *Resolver) resolvePreferredPeer(ctx context.Context, node, placement *Node, name, spec string) (*Node, error) {
@@ -428,11 +473,34 @@ func (r *Resolver) resolvePreferredAncestorDependency(ctx context.Context, paren
 		if err != nil {
 			return nil, false, err
 		}
-		if target != nil && satisfies(target.Version, wanted) {
+		if target != nil && nodeSatisfiesWanted(target, wanted) {
 			return target, true, nil
 		}
 	}
 	return nil, false, nil
+}
+
+func nodeSatisfiesWanted(node *Node, wanted string) bool {
+	if node == nil {
+		return false
+	}
+	if isRemoteTarballSpec(wanted) {
+		return tarballURLsMatch(node.Package.Tarball, wanted)
+	}
+	return satisfies(node.Version, wanted)
+}
+
+func pickVersionByTarball(pack *Packument, tarballURL string) (string, bool) {
+	for version, manifest := range pack.Versions {
+		if tarballURLsMatch(manifest.Dist.Tarball, tarballURL) {
+			return version, true
+		}
+	}
+	return "", false
+}
+
+func tarballURLsMatch(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 func (r *Resolver) preferredDependency(owner *Node, name string) (DependencyRequest, bool) {
@@ -514,7 +582,7 @@ func normalizeInstallStrategy(raw string) string {
 	case "hoisted", "nested", "shallow":
 		return strings.ToLower(strings.TrimSpace(raw))
 	default:
-		return "nested"
+		return "hoisted"
 	}
 }
 
@@ -599,7 +667,14 @@ func (r *Resolver) tryResolveCombinedPeerSet(ctx context.Context, node *Node, na
 	}
 	r.mu.Lock()
 	placementEdge := placement.Dependencies[name]
-	canReplace := placementEdge != nil && placementEdge.Type == EdgePeer && placementEdge.To == conflict
+	canReplace := true
+	if placementEdge != nil && placementEdge.To != conflict {
+		canReplace = false
+	}
+	if placementEdge != nil && placementEdge.Type != EdgePeer && placementEdge.To == conflict {
+		// Do not replace explicitly declared root/ancestor dependencies with peer reconciliation.
+		canReplace = false
+	}
 	combined := []string{spec}
 	for _, candidate := range r.graph.nodes {
 		if candidate == nil || candidate == node {
@@ -610,6 +685,7 @@ func (r *Resolver) tryResolveCombinedPeerSet(ctx context.Context, node *Node, na
 		}
 	}
 	r.mu.Unlock()
+	r.tracef("peer combined-check package=%s peer=%s spec=%s canReplace=%v conflict=%s combined=%v", node.ID, name, spec, canReplace, nodeID(conflict), combined)
 	if !canReplace || len(combined) < 2 {
 		return nil, false, nil
 	}
@@ -627,6 +703,7 @@ func (r *Resolver) tryResolveCombinedPeerSet(ctx context.Context, node *Node, na
 		return nil, false, err
 	}
 	version, ok := pickVersionSatisfyingAll(pack, combined, r.Options)
+	r.tracef("peer combined-pick peer=%s combined=%v selected=%s ok=%v conflict=%s", name, combined, version, ok, conflict.Version)
 	if !ok || version == conflict.Version {
 		return nil, false, nil
 	}
@@ -639,12 +716,20 @@ func (r *Resolver) tryResolveCombinedPeerSet(ctx context.Context, node *Node, na
 		return target, target != nil, nil
 	}
 	r.mu.Lock()
+	rewired := 0
 	for _, candidate := range r.graph.nodes {
+		if dep := candidate.Dependencies[name]; dep != nil && dep.Type == EdgePeer && dep.To == conflict && satisfies(target.Version, dep.Spec) {
+			dep.To = target
+			dep.Satisfied = true
+			rewired++
+		}
 		if peer := candidate.Peers[name]; peer != nil && peer.To == conflict && satisfies(target.Version, peer.Spec) {
 			peer.To = target
 			peer.Satisfied = true
+			rewired++
 		}
 	}
+	r.tracef("peer combined-rewire peer=%s from=%s to=%s rewired=%d", name, nodeID(conflict), nodeID(target), rewired)
 	r.removeUnreferencedNodeLocked(conflict)
 	r.mu.Unlock()
 	return target, true, nil
@@ -657,18 +742,62 @@ func (r *Resolver) removeUnreferencedNodeLocked(node *Node) {
 	for _, candidate := range r.graph.nodes {
 		for _, edge := range candidate.Dependencies {
 			if edge != nil && edge.To == node {
+				r.tracef("remove-unref keep node=%s referenced-by dependency from=%s edge=%s type=%s", node.ID, nodeID(candidate), edge.Name, edge.Type)
 				return
 			}
 		}
 		for _, edge := range candidate.Peers {
 			if edge != nil && edge.To == node {
+				r.tracef("remove-unref keep node=%s referenced-by peer from=%s edge=%s spec=%s", node.ID, nodeID(candidate), edge.Name, edge.Spec)
 				return
 			}
 		}
 	}
+	r.tracef("remove-unref delete node=%s", node.ID)
 	delete(r.graph.nodes, node.ID)
 	delete(r.graph.packages, node.Package.Key())
 	delete(r.resolved, node.ID)
+	r.pruneUnreachableNodesLocked()
+}
+
+func (r *Resolver) pruneUnreachableNodesLocked() {
+	if r.graph == nil || r.graph.Root == nil {
+		return
+	}
+	reachable := map[string]bool{"root": true}
+	stack := []*Node{r.graph.Root}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		cur := stack[last]
+		stack = stack[:last]
+		if cur == nil {
+			continue
+		}
+		for _, edge := range cur.Dependencies {
+			if edge == nil || edge.To == nil || reachable[edge.To.ID] {
+				continue
+			}
+			reachable[edge.To.ID] = true
+			stack = append(stack, edge.To)
+		}
+		for _, edge := range cur.Peers {
+			if edge == nil || edge.To == nil || reachable[edge.To.ID] {
+				continue
+			}
+			reachable[edge.To.ID] = true
+			stack = append(stack, edge.To)
+		}
+	}
+	for id, node := range r.graph.nodes {
+		if id == "root" || reachable[id] {
+			continue
+		}
+		delete(r.graph.nodes, id)
+		if node != nil {
+			delete(r.graph.packages, node.Package.Key())
+		}
+		delete(r.resolved, id)
+	}
 }
 
 func (r *Resolver) finishResolve(key string, call *resolveCall, node *Node, err error) {

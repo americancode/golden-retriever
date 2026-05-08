@@ -802,3 +802,13 @@ func TestParsePackageSpecAliasWithoutSpecDefaultsToWildcard(t *testing.T) {
 		t.Fatalf("got %s %s, want real *", name, spec)
 	}
 }
+
+func TestSatisfiesOrCaretRangeExcludesNextMajor(t *testing.T) {
+	spec := "^7.0.0 || ^8.0.0 || ^9.0.0"
+	if !satisfies("9.39.4", spec) {
+		t.Fatalf("expected 9.39.4 to satisfy %q", spec)
+	}
+	if satisfies("10.3.0", spec) {
+		t.Fatalf("expected 10.3.0 to NOT satisfy %q", spec)
+	}
+}

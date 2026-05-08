@@ -432,6 +432,84 @@ func TestFetchRetriesTransientFailure(t *testing.T) {
 	}
 }
 
+func TestFetchContinuesAfterTarballFailureAndDownloadsRemaining(t *testing.T) {
+	okTGZ := []byte("ok tarball")
+	okIntegrity := sri(okTGZ)
+	var okHits int64
+	var failHits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok-1.0.0.tgz":
+			atomic.AddInt64(&okHits, 1)
+			w.Write(okTGZ)
+		case "/fail-1.0.0.tgz":
+			atomic.AddInt64(&failHits, 1)
+			http.Error(w, "missing", http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, ".gr", "state.json")
+	report, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{
+		{Name: "ok", Version: "1.0.0", Tarball: srv.URL + "/ok-1.0.0.tgz", Integrity: okIntegrity},
+		{Name: "fail", Version: "1.0.0", Tarball: srv.URL + "/fail-1.0.0.tgz"},
+	}, FetchOptions{
+		OutDir:      filepath.Join(dir, "tgzs"),
+		StatePath:   statePath,
+		Concurrency: 2,
+		MaxRetries:  2,
+	})
+	if err == nil {
+		t.Fatalf("expected mixed fetch run to return error for failed package")
+	}
+	if report.Downloaded != 1 || report.Failed != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if atomic.LoadInt64(&okHits) != 1 || atomic.LoadInt64(&failHits) != 1 {
+		t.Fatalf("unexpected hit counts ok=%d fail=%d", okHits, failHits)
+	}
+	state, loadErr := LoadState(statePath)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state.Local["ok@1.0.0"].Path == "" {
+		t.Fatalf("successful download should be recorded in state: %#v", state.Local)
+	}
+	if state.Failures["fail@1.0.0"].Attempts != 1 {
+		t.Fatalf("failed tarball should be recorded once for non-retryable 404: %#v", state.Failures)
+	}
+}
+
+func TestFetchDoesNotRetryNonRetryableTarballFailure(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	_, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{{
+		Name:    "missing",
+		Version: "1.0.0",
+		Tarball: srv.URL + "/missing-1.0.0.tgz",
+	}}, FetchOptions{
+		OutDir:      filepath.Join(dir, "tgzs"),
+		StatePath:   filepath.Join(dir, ".gr", "state.json"),
+		Concurrency: 1,
+		MaxRetries:  5,
+	})
+	if err == nil {
+		t.Fatalf("expected fetch failure for 404 tarball")
+	}
+	if atomic.LoadInt64(&hits) != 1 {
+		t.Fatalf("non-retryable 404 should be attempted once, hits=%d", hits)
+	}
+}
+
 func TestVerifySha1SRI(t *testing.T) {
 	data := []byte("legacy")
 	sum := sha1.Sum(data)

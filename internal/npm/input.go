@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -39,8 +41,11 @@ type packageJSON struct {
 	DevDependencies      map[string]string `json:"devDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
-	Overrides            json.RawMessage   `json:"overrides"`
-	Workspaces           any               `json:"workspaces"`
+	PeerDependenciesMeta map[string]struct {
+		Optional bool `json:"optional"`
+	} `json:"peerDependenciesMeta"`
+	Overrides  json.RawMessage `json:"overrides"`
+	Workspaces any             `json:"workspaces"`
 }
 
 type workspacePackage struct {
@@ -106,17 +111,18 @@ func (e *WorkspaceDependencyError) Error() string {
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
 	info, err := os.Stat(input)
 	if err == nil && info.IsDir() {
+		yarnPath := filepath.Join(input, "yarn.lock")
 		if fileExists(filepath.Join(input, "npm-shrinkwrap.json")) {
-			return LoadLockfile(filepath.Join(input, "npm-shrinkwrap.json"))
+			return loadLockfile(filepath.Join(input, "npm-shrinkwrap.json"), yarnPath)
 		}
 		if fileExists(filepath.Join(input, "package-lock.json")) {
-			return LoadLockfile(filepath.Join(input, "package-lock.json"))
+			return loadLockfile(filepath.Join(input, "package-lock.json"), yarnPath)
 		}
 		return ResolvePackageJSON(ctx, client, filepath.Join(input, "package.json"), opts)
 	}
 	base := filepath.Base(input)
 	if base == "package-lock.json" || base == "npm-shrinkwrap.json" {
-		return LoadLockfile(input)
+		return loadLockfile(input, filepath.Join(filepath.Dir(input), "yarn.lock"))
 	}
 	return ResolvePackageJSON(ctx, client, input, opts)
 }
@@ -140,9 +146,11 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 		return nil, err
 	}
 	workspaceVersions := map[string]string{}
+	workspacePaths := map[string]string{}
 	for _, workspace := range workspaces {
 		if workspace.Name != "" {
 			workspaceVersions[workspace.Name] = workspace.Root.Version
+			workspacePaths[workspace.Name] = filepath.Dir(workspace.Path)
 		}
 	}
 	rootSpecs := rootDependencySpecs(root)
@@ -152,43 +160,85 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	}
 
 	var deps []DependencyRequest
-	deps, err = appendDeps(deps, root.Dependencies, EdgeProd, workspaceVersions)
+	seenLocal := map[string]bool{}
+	deps, err = appendDeps(deps, root.Dependencies, EdgeProd, workspaceVersions, workspacePaths, filepath.Dir(path), opts, seenLocal)
 	if err != nil {
 		return nil, err
 	}
 	if opts.IncludeDev {
-		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev, workspaceVersions)
+		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev, workspaceVersions, workspacePaths, filepath.Dir(path), opts, seenLocal)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if opts.IncludeOptional {
-		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional, workspaceVersions)
+		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional, workspaceVersions, workspacePaths, filepath.Dir(path), opts, seenLocal)
 		if err != nil {
 			return nil, err
 		}
 	}
 	for _, workspace := range workspaces {
-		deps, err = appendDeps(deps, workspace.Root.Dependencies, EdgeProd, workspaceVersions)
+		workspaceRoot := filepath.Dir(workspace.Path)
+		deps, err = appendDeps(deps, workspace.Root.Dependencies, EdgeProd, workspaceVersions, workspacePaths, workspaceRoot, opts, seenLocal)
 		if err != nil {
 			return nil, err
 		}
 		if opts.IncludeDev {
-			deps, err = appendDeps(deps, workspace.Root.DevDependencies, EdgeDev, workspaceVersions)
+			deps, err = appendDeps(deps, workspace.Root.DevDependencies, EdgeDev, workspaceVersions, workspacePaths, workspaceRoot, opts, seenLocal)
 			if err != nil {
 				return nil, err
 			}
 		}
 		if opts.IncludeOptional {
-			deps, err = appendDeps(deps, workspace.Root.OptionalDependencies, EdgeOptional, workspaceVersions)
+			deps, err = appendDeps(deps, workspace.Root.OptionalDependencies, EdgeOptional, workspaceVersions, workspacePaths, workspaceRoot, opts, seenLocal)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !opts.LegacyPeerDeps && !opts.OmitPeer {
+			deps, err = appendWorkspacePeerDeps(deps, workspace.Root.PeerDependencies, workspace.Root.PeerDependenciesMeta, workspaceVersions)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
+	if hasGitLikeSpecs(root, workspaces) {
+		return resolveViaNPMLockfile(ctx, path)
+	}
 
 	r := &Resolver{Client: client, Options: opts, Overrides: overrides}
-	return r.ResolveRoot(ctx, deps)
+	graph, err := r.ResolveRoot(ctx, deps)
+	if err == nil {
+		return graph, nil
+	}
+	var specErr *UnsupportedSpecError
+	if errors.As(err, &specErr) && isGitLikeSpec(specErr.Spec) {
+		return resolveViaNPMLockfile(ctx, path)
+	}
+	return nil, err
+}
+
+func appendWorkspacePeerDeps(dst []DependencyRequest, peers map[string]string, meta map[string]struct {
+	Optional bool `json:"optional"`
+}, workspaceVersions map[string]string) ([]DependencyRequest, error) {
+	for _, name := range sortedDependencyNames(peers) {
+		if meta[name].Optional {
+			continue
+		}
+		spec := peers[name]
+		satisfied, err := workspaceDependencySatisfied(workspaceVersions, name, spec)
+		if err != nil {
+			return nil, err
+		}
+		if satisfied {
+			continue
+		}
+		if err := validateDependencySpec(name, spec, EdgePeer); err != nil {
+			return nil, err
+		}
+		dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: EdgePeer})
+	}
+	return dst, nil
 }
 
 func rootDependencySpecs(root packageJSON) map[string]string {
@@ -224,9 +274,34 @@ func mergeDeps(dst, src map[string]string) error {
 	return nil
 }
 
-func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceVersions map[string]string) ([]DependencyRequest, error) {
+func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceVersions map[string]string, workspacePaths map[string]string, currentDir string, opts ResolveOptions, seenLocal map[string]bool) ([]DependencyRequest, error) {
 	for _, name := range sortedDependencyNames(src) {
 		spec := src[name]
+		if localDir, ok := resolveLocalDependencyDir(name, spec, currentDir, workspacePaths); ok {
+			real, err := filepath.EvalSymlinks(localDir)
+			if err != nil {
+				real = localDir
+			}
+			if seenLocal[real] {
+				continue
+			}
+			seenLocal[real] = true
+			localPkg, err := loadLocalPackageJSON(real)
+			if err != nil {
+				return nil, err
+			}
+			dst, err = appendDeps(dst, localPkg.Dependencies, EdgeProd, workspaceVersions, workspacePaths, real, opts, seenLocal)
+			if err != nil {
+				return nil, err
+			}
+			if opts.IncludeOptional {
+				dst, err = appendDeps(dst, localPkg.OptionalDependencies, EdgeOptional, workspaceVersions, workspacePaths, real, opts, seenLocal)
+				if err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
 		satisfied, err := workspaceDependencySatisfied(workspaceVersions, name, spec)
 		if err != nil {
 			return nil, err
@@ -242,6 +317,60 @@ func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeTyp
 	return dst, nil
 }
 
+func resolveLocalDependencyDir(name, spec, currentDir string, workspacePaths map[string]string) (string, bool) {
+	raw := strings.TrimSpace(spec)
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "workspace:") {
+		if dir := workspacePaths[name]; dir != "" {
+			return dir, true
+		}
+		return "", false
+	}
+	if strings.HasPrefix(lower, "file:") {
+		ref := strings.TrimSpace(raw[len("file:"):])
+		if ref == "" {
+			return "", false
+		}
+		candidate := ref
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(currentDir, filepath.FromSlash(candidate))
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || !info.IsDir() {
+			return "", false
+		}
+		return candidate, true
+	}
+	if strings.HasPrefix(lower, "link:") {
+		ref := strings.TrimSpace(raw[len("link:"):])
+		if ref == "" {
+			return "", false
+		}
+		candidate := ref
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(currentDir, filepath.FromSlash(candidate))
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || !info.IsDir() {
+			return "", false
+		}
+		return candidate, true
+	}
+	return "", false
+}
+
+func loadLocalPackageJSON(dir string) (packageJSON, error) {
+	var pkg packageJSON
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return pkg, err
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return pkg, err
+	}
+	return pkg, nil
+}
+
 func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
 	patterns, err := workspacePatterns(raw)
 	if err != nil {
@@ -250,6 +379,27 @@ func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
 	var out []workspacePackage
 	seen := map[string]bool{}
 	seenNames := map[string]string{}
+	excluded := map[string]bool{}
+	for _, pattern := range patterns {
+		if !strings.HasPrefix(pattern, "!") {
+			continue
+		}
+		negated := strings.TrimSpace(strings.TrimPrefix(pattern, "!"))
+		if negated == "" {
+			continue
+		}
+		matches, err := filepath.Glob(filepath.Join(rootDir, filepath.FromSlash(negated)))
+		if err != nil {
+			return nil, fmt.Errorf("invalid workspace pattern %q: %w", pattern, err)
+		}
+		for _, match := range matches {
+			info, err := os.Stat(match)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			excluded[match] = true
+		}
+	}
 	for _, pattern := range patterns {
 		if strings.HasPrefix(pattern, "!") {
 			continue
@@ -260,6 +410,9 @@ func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
 		}
 		sort.Strings(matches)
 		for _, match := range matches {
+			if excluded[match] {
+				continue
+			}
 			info, err := os.Stat(match)
 			if err != nil || !info.IsDir() {
 				continue
@@ -357,12 +510,10 @@ func workspaceWantedSatisfied(version, wanted string) bool {
 	if version == "" {
 		return false
 	}
-	switch strings.TrimSpace(wanted) {
-	case "", "*", "^", "~":
-		return true
-	default:
-		return satisfies(version, wanted)
-	}
+	// npm workspaces link local workspaces for workspace: specs, even when the
+	// range text is not semver-satisfied by the local workspace version.
+	_ = wanted
+	return true
 }
 
 func sortedDependencyNames(deps map[string]string) []string {
@@ -372,6 +523,75 @@ func sortedDependencyNames(deps map[string]string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func hasGitLikeSpecs(root packageJSON, workspaces []workspacePackage) bool {
+	if depMapHasGitLikeSpec(root.Dependencies) || depMapHasGitLikeSpec(root.DevDependencies) || depMapHasGitLikeSpec(root.OptionalDependencies) || depMapHasGitLikeSpec(root.PeerDependencies) {
+		return true
+	}
+	for _, workspace := range workspaces {
+		if depMapHasGitLikeSpec(workspace.Root.Dependencies) || depMapHasGitLikeSpec(workspace.Root.DevDependencies) || depMapHasGitLikeSpec(workspace.Root.OptionalDependencies) || depMapHasGitLikeSpec(workspace.Root.PeerDependencies) {
+			return true
+		}
+	}
+	return false
+}
+
+func depMapHasGitLikeSpec(deps map[string]string) bool {
+	for _, name := range sortedDependencyNames(deps) {
+		if isGitLikeSpec(deps[name]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGitLikeSpec(spec string) bool {
+	lower := strings.ToLower(strings.TrimSpace(spec))
+	if lower == "" {
+		return false
+	}
+	prefixes := []string{
+		"git+",
+		"github:",
+		"gitlab:",
+		"bitbucket:",
+		"gist:",
+		"ssh://",
+		"svn:",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return gitSSHSpecRe.MatchString(strings.TrimSpace(spec))
+}
+
+func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph, error) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return nil, fmt.Errorf("npm is required to resolve git/hosted specs: %w", err)
+	}
+	tempDir, err := os.MkdirTemp("", "golden-retriever-npm-lock-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tempDir)
+
+	srcData, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), srcData, 0o644); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
+	cmd.Dir = tempDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return LoadLockfile(filepath.Join(tempDir, "package-lock.json"))
 }
 
 var gitSSHSpecRe = regexp.MustCompile(`^[^@]+@[^:.]+\.[^:]+:.+$`)
@@ -413,6 +633,9 @@ func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 
 func validateRegistryWanted(name, spec string, edgeType EdgeType) error {
 	spec = strings.TrimSpace(spec)
+	if isRemoteTarballSpec(spec) {
+		return nil
+	}
 	if unsupportedSpecClass(spec) {
 		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
 	}
@@ -428,6 +651,9 @@ func isRegistrySpec(spec string) bool {
 
 func unsupportedSpecClass(spec string) bool {
 	lower := strings.ToLower(strings.TrimSpace(spec))
+	if isRemoteTarballSpec(spec) {
+		return false
+	}
 	blockedPrefixes := []string{"file:", "link:", "github:", "gitlab:", "bitbucket:", "gist:", "ssh:", "svn:", "workspace:"}
 	for _, prefix := range blockedPrefixes {
 		if strings.HasPrefix(lower, prefix) {
@@ -444,6 +670,23 @@ func unsupportedSpecClass(spec string) bool {
 		return true
 	}
 	return gitSSHSpecRe.MatchString(spec)
+}
+
+func isRemoteTarballSpec(spec string) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return false
+	}
+	u, err := url.Parse(spec)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	path := strings.ToLower(u.Path)
+	return strings.HasSuffix(path, ".tgz") || strings.HasSuffix(path, ".tar.gz") || strings.HasSuffix(path, ".tar")
 }
 
 func registryTagLike(spec string) bool {

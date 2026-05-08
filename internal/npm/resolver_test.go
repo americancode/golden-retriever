@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"testing"
 )
 
@@ -201,6 +202,36 @@ func TestResolverInstallStrategyShallowUsesRootDependency(t *testing.T) {
 	edge := c.Dependencies["shared"]
 	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
 		t.Fatalf("shallow strategy should place transitive dep from root request when available: %#v", edge)
+	}
+}
+
+func TestResolverInstallStrategyHoistedMatchesDefaultPlacement(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	defaultResolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	defaultGraph, err := defaultResolver.Resolve(context.Background(), map[string]string{
+		"novelty-a": "1.0.0",
+		"novelty-c": "1.0.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hoistedResolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, InstallStrategy: "hoisted"}}
+	hoistedGraph, err := hoistedResolver.Resolve(context.Background(), map[string]string{
+		"novelty-a": "1.0.0",
+		"novelty-c": "1.0.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalPackageKeys(defaultGraph.Packages(), hoistedGraph.Packages()) {
+		t.Fatalf("hoisted strategy should match default placement package set default=%#v hoisted=%#v", defaultGraph.Packages(), hoistedGraph.Packages())
+	}
+	c := findNode(t, hoistedGraph, "novelty-c")
+	edge := c.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("hoisted strategy should reuse novelty-a transitive placement at shared@1.2.0: %#v", edge)
 	}
 }
 
@@ -684,6 +715,51 @@ func TestResolverOptionalPeerPrefersExistingSatisfyingNode(t *testing.T) {
 	}
 }
 
+func TestResolverOptionalPeerPrefersHighestExistingSatisfyingNodeWithoutNewInstall(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared-peer", Spec: "1.2.0", Type: EdgeProd},
+		{Name: "optional-existing-range-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "optional-existing-range-peer-plugin")
+	peer := plugin.Peers["shared-peer"]
+	if peer == nil || !peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("optional peer should bind to existing satisfying shared-peer@1.2.0, got %#v", peer)
+	}
+	if graph.Has("shared-peer@1.3.0") {
+		t.Fatalf("optional existing-node preference should not introduce newer shared-peer@1.3.0: %#v", graph.Packages())
+	}
+}
+
+func TestResolverOptionalPeerUpperBoundPrefersCompatibleExistingNode(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared-peer", Spec: "1.3.0", Type: EdgeProd},
+		{Name: "peer-provider", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "optional-existing-upper-bound-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "optional-existing-upper-bound-peer-plugin")
+	peer := plugin.Peers["shared-peer"]
+	if peer == nil || !peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("optional peer with upper bound should bind to existing compatible shared-peer@1.2.0, got %#v", peer)
+	}
+	if len(graph.PeerConflicts) != 0 {
+		t.Fatalf("optional existing-node preference should not record conflicts: %#v", graph.PeerConflicts)
+	}
+}
+
 func TestResolverReconcilesPreviouslyMissingOptionalPeer(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
@@ -758,6 +834,9 @@ func TestResolverSkipsBundledDependenciesAliasField(t *testing.T) {
 	if graph.Has("bundled@1.0.0") {
 		t.Fatalf("bundled dependency should not be resolved as a separate tarball: %#v", graph.Packages())
 	}
+	if !graph.Has("loose@1.0.0") {
+		t.Fatalf("legacy bundledDependencies fixture should keep non-bundled dependency tarballs: %#v", graph.Packages())
+	}
 }
 
 func TestResolverSkipsAllDependenciesWhenBundleDependenciesIsTrue(t *testing.T) {
@@ -771,6 +850,136 @@ func TestResolverSkipsAllDependenciesWhenBundleDependenciesIsTrue(t *testing.T) 
 	}
 	if graph.Has("bundled@1.0.0") || graph.Has("loose@1.0.0") {
 		t.Fatalf("bundleDependencies true should skip child dependency tarballs: %#v", graph.Packages())
+	}
+}
+
+func TestResolverBundleMetadataPrefersBundleDependenciesOverBundledDependencies(t *testing.T) {
+	srv := bundleRegistryFullMetadata(t, `"bundleDependencies": ["bundled"], "bundledDependencies": ["alt-bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("bundled@1.0.0") {
+		t.Fatalf("bundleDependencies should take precedence and skip bundled: %#v", graph.Packages())
+	}
+	if !graph.Has("alt-bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("non-bundled deps should still resolve when only bundleDependencies names are skipped: %#v", graph.Packages())
+	}
+}
+
+func TestResolverBundleMetadataUsesBundledDependenciesWhenBundleDependenciesFalse(t *testing.T) {
+	srv := bundleRegistryFullMetadata(t, `"bundleDependencies": false, "bundledDependencies": ["alt-bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("alt-bundled@1.0.0") {
+		t.Fatalf("bundledDependencies should be applied when bundleDependencies is false: %#v", graph.Packages())
+	}
+	if !graph.Has("bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("other dependencies should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverLegacyBundledDependenciesTrueSkipsAllDependencies(t *testing.T) {
+	srv := bundleRegistryFullMetadata(t, `"bundledDependencies": true`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("bundled@1.0.0") || graph.Has("alt-bundled@1.0.0") || graph.Has("loose@1.0.0") {
+		t.Fatalf("legacy bundledDependencies=true should skip all child tarballs: %#v", graph.Packages())
+	}
+}
+
+func TestResolverLegacyBundledDependenciesFallbackWhenBundleDependenciesEmpty(t *testing.T) {
+	srv := bundleRegistryFullMetadata(t, `"bundleDependencies": [], "bundledDependencies": ["alt-bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("alt-bundled@1.0.0") {
+		t.Fatalf("bundledDependencies should apply when bundleDependencies is empty: %#v", graph.Packages())
+	}
+	if !graph.Has("bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("non-bundled dependencies should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverLegacyBundledDependenciesFallbackWhenBundleDependenciesNull(t *testing.T) {
+	srv := bundleRegistryFullMetadata(t, `"bundleDependencies": null, "bundledDependencies": ["alt-bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("alt-bundled@1.0.0") {
+		t.Fatalf("bundledDependencies should apply when bundleDependencies is null: %#v", graph.Packages())
+	}
+	if !graph.Has("bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("non-bundled dependencies should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONRootBundleDependenciesDoesNotSuppressRootDependencyResolution(t *testing.T) {
+	srv := bundleRegistry(t, `"bundleDependencies": ["bundled"]`)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "name": "root-bundler",
+  "version": "1.0.0",
+  "dependencies": {"bundled": "1.0.0", "loose": "1.0.0"},
+  "bundleDependencies": ["bundled"]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("root bundleDependencies metadata should not suppress dependency resolution: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONRootBundleDependenciesTrueDoesNotSuppressRootDependencyResolution(t *testing.T) {
+	srv := bundleRegistry(t, `"bundleDependencies": true`)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "name": "root-bundler",
+  "version": "1.0.0",
+  "dependencies": {"bundled": "1.0.0", "loose": "1.0.0"},
+  "bundleDependencies": true
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("bundled@1.0.0") || !graph.Has("loose@1.0.0") {
+		t.Fatalf("root bundleDependencies=true should not suppress dependency resolution: %#v", graph.Packages())
 	}
 }
 
@@ -937,6 +1146,40 @@ func TestResolverSkipsOmittedPeerPlatformMismatch(t *testing.T) {
 	}
 	if graph.Has("incompatible@1.0.0") {
 		t.Fatalf("omitted peer dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONCombinedOmitDevOptionalPeer(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"plugin": "1.0.0"},
+  "devDependencies": {"host": "1.2.0"},
+  "optionalDependencies": {"optional-plugin": "1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+		IncludeDev:      false,
+		IncludeOptional: false,
+		OmitPeer:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("plugin@1.0.0") {
+		t.Fatalf("prod dependency should resolve: %#v", graph.Packages())
+	}
+	if graph.Has("host@1.2.0") || graph.Has("optional-plugin@1.0.0") {
+		t.Fatalf("dev and optional dependencies should be omitted: %#v", graph.Packages())
+	}
+	plugin := findNode(t, graph, "plugin")
+	if len(plugin.Peers) != 0 {
+		t.Fatalf("peer dependencies should be omitted: %#v", plugin.Peers)
 	}
 }
 
@@ -1185,6 +1428,93 @@ func TestResolverSkipsOmittedPeerEngineMismatch(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONEngineOmitIncludeInteractions(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	t.Run("omit dev optional and peer avoids engine failure", func(t *testing.T) {
+		dir := t.TempDir()
+		input := filepath.Join(dir, "package.json")
+		if err := os.WriteFile(input, []byte(`{
+  "dependencies":{"engine-peer-plugin":"1.0.0"},
+  "devDependencies":{"engine-package":"1.0.0"},
+  "optionalDependencies":{"engine-package":"1.0.0"}
+}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+			IncludeDev:      false,
+			IncludeOptional: false,
+			OmitPeer:        true,
+			EngineStrict:    true,
+			NodeVersion:     "12.18.4",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !graph.Has("engine-peer-plugin@1.0.0") {
+			t.Fatalf("prod dependency should resolve: %#v", graph.Packages())
+		}
+		if graph.Has("engine-package@1.0.0") {
+			t.Fatalf("omitted dependency classes should not resolve engine-package: %#v", graph.Packages())
+		}
+	})
+
+	t.Run("include dev triggers strict engine failure", func(t *testing.T) {
+		dir := t.TempDir()
+		input := filepath.Join(dir, "package.json")
+		if err := os.WriteFile(input, []byte(`{"devDependencies":{"engine-package":"1.0.0"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+			IncludeDev:   true,
+			EngineStrict: true,
+			NodeVersion:  "12.18.4",
+		})
+		var engineErr *PackageEngineError
+		if !errors.As(err, &engineErr) {
+			t.Fatalf("got %v, want PackageEngineError", err)
+		}
+	})
+
+	t.Run("include optional keeps strict mode but skips optional engine mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		input := filepath.Join(dir, "package.json")
+		if err := os.WriteFile(input, []byte(`{"optionalDependencies":{"engine-package":"1.0.0"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+			IncludeOptional: true,
+			EngineStrict:    true,
+			NodeVersion:     "12.18.4",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if graph.Has("engine-package@1.0.0") {
+			t.Fatalf("optional engine mismatch should be skipped: %#v", graph.Packages())
+		}
+	})
+
+	t.Run("include peer triggers strict engine failure", func(t *testing.T) {
+		dir := t.TempDir()
+		input := filepath.Join(dir, "package.json")
+		if err := os.WriteFile(input, []byte(`{"dependencies":{"engine-peer-plugin":"1.0.0"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+			IncludeOptional: true,
+			OmitPeer:        false,
+			EngineStrict:    true,
+			NodeVersion:     "12.18.4",
+		})
+		var engineErr *PackageEngineError
+		if !errors.As(err, &engineErr) {
+			t.Fatalf("got %v, want PackageEngineError", err)
+		}
+	})
+}
+
 func TestResolverSkipsMissingOptionalDependency(t *testing.T) {
 	srv := optionalFailureRegistry(t)
 	defer srv.Close()
@@ -1288,19 +1618,67 @@ func TestResolverOptionalFailureKeepsSharedNodeReferencedBySuccessfulOptionalSet
 	}
 }
 
-func TestResolvePackageJSONErrorsOnUnsupportedRootSpec(t *testing.T) {
+func TestResolvePackageJSONSupportsRootFileSpecLocalDir(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
 	dir := t.TempDir()
-	input := filepath.Join(dir, "package.json")
-	if err := os.WriteFile(input, []byte(`{"dependencies":{"local":"file:../local"}}`), 0o644); err != nil {
+	localDir := filepath.Join(dir, "local")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
-	var specErr *UnsupportedSpecError
-	if !errors.As(err, &specErr) {
-		t.Fatalf("got %v, want UnsupportedSpecError", err)
+	if err := os.WriteFile(filepath.Join(localDir, "package.json"), []byte(`{
+  "name":"local",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if specErr.Name != "local" || specErr.Spec != "file:../local" || specErr.Type != "prod" {
-		t.Fatalf("unexpected spec error: %#v", specErr)
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"local":"file:./local"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("local@1.0.0") {
+		t.Fatalf("file dependency should stay local and not fetch local package tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") {
+		t.Fatalf("local file dependency transitive registry deps should resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONSupportsRootLinkSpecLocalDir(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	localDir := filepath.Join(dir, "local")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "package.json"), []byte(`{
+  "name":"local",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"local":"link:./local"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("local@1.0.0") {
+		t.Fatalf("link dependency should stay local and not fetch local package tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") {
+		t.Fatalf("local link dependency transitive registry deps should resolve: %#v", graph.Packages())
 	}
 }
 
@@ -1435,18 +1813,12 @@ func TestResolvePackageJSONErrorsOnUnsupportedAliasTargetSpec(t *testing.T) {
 
 func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 	tests := map[string]string{
-		"workspace":  "workspace:*",
-		"link":       "link:../local",
-		"git":        "git+https://github.com/acme/pkg.git",
-		"git-scheme": "git+foo:bar",
-		"hosted":     "github:acme/pkg",
-		"gist":       "gist:acme/1234",
-		"ssh-url":    "ssh://git@github.com/acme/pkg.git",
-		"tarball":    "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
-		"scheme":     "foo:bar",
-		"directory":  "../local",
-		"home-dir":   "~/local",
-		"windows":    "C:\\local\\pkg",
+		"workspace": "workspace:*",
+		"link":      "link:../local",
+		"scheme":    "foo:bar",
+		"directory": "../local",
+		"home-dir":  "~/local",
+		"windows":   "C:\\local\\pkg",
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1464,6 +1836,53 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 				t.Fatalf("unexpected spec error: %#v", specErr)
 			}
 		})
+	}
+}
+
+func TestIsGitLikeSpec(t *testing.T) {
+	yes := []string{
+		"git+https://github.com/acme/pkg.git",
+		"github:acme/pkg",
+		"gitlab:acme/pkg",
+		"bitbucket:acme/pkg",
+		"gist:acme/1234",
+		"ssh://git@github.com/acme/pkg.git",
+		"svn://svn.example.test/repo",
+		"git@github.com:acme/pkg.git",
+	}
+	for _, spec := range yes {
+		if !isGitLikeSpec(spec) {
+			t.Fatalf("expected git-like spec: %q", spec)
+		}
+	}
+	no := []string{"^1.0.0", "latest", "file:./local", "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz"}
+	for _, spec := range no {
+		if isGitLikeSpec(spec) {
+			t.Fatalf("did not expect git-like spec: %q", spec)
+		}
+	}
+}
+
+func TestResolvePackageJSONSupportsRemoteTarballSpec(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	spec := srv.URL + "/consumer/-/consumer-1.0.0.tgz"
+	if err := os.WriteFile(input, []byte(fmt.Sprintf(`{"dependencies":{"consumer":%q}}`, spec)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("consumer@1.0.0") || !graph.Has("shared@1.3.0") {
+		t.Fatalf("remote tarball dependency should resolve package and transitive deps: %#v", graph.Packages())
+	}
+	consumer := findNode(t, graph, "consumer")
+	if consumer.Package.Tarball != spec {
+		t.Fatalf("consumer tarball=%q want %q", consumer.Package.Tarball, spec)
 	}
 }
 
@@ -1584,7 +2003,7 @@ func TestResolvePackageJSONUsesVersionedWorkspaceWhenSatisfied(t *testing.T) {
 	}
 }
 
-func TestResolvePackageJSONErrorsOnUnsatisfiedVersionedWorkspace(t *testing.T) {
+func TestResolvePackageJSONUsesWorkspaceProtocolEvenWhenVersionTextUnsatisfied(t *testing.T) {
 	dir := t.TempDir()
 	workspaceDir := filepath.Join(dir, "packages", "app")
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
@@ -1604,13 +2023,12 @@ func TestResolvePackageJSONErrorsOnUnsatisfiedVersionedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
-	var workspaceErr *WorkspaceDependencyError
-	if !errors.As(err, &workspaceErr) {
-		t.Fatalf("got %v, want WorkspaceDependencyError", err)
+	graph, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatalf("got %v, want nil", err)
 	}
-	if workspaceErr.Name != "app" || workspaceErr.Spec != "workspace:^2.0.0" || workspaceErr.Version != "1.2.0" {
-		t.Fatalf("unexpected workspace error: %#v", workspaceErr)
+	if graph.Has("app@1.2.0") {
+		t.Fatalf("workspace protocol should not fetch workspace package from registry: %#v", graph.Packages())
 	}
 }
 
@@ -1646,6 +2064,162 @@ func TestResolvePackageJSONFetchesRegistryWhenWorkspaceVersionUnsatisfied(t *tes
 	}
 }
 
+func TestResolvePackageJSONSupportsRootFileLinkToWorkspace(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"file:packages/app"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("app@1.0.0") {
+		t.Fatalf("workspace app should be linked locally, not fetched from registry: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") {
+		t.Fatalf("workspace external deps should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONAppliesOverridesToWorkspaceDependencies(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:*"},
+  "overrides":{"shared":"2.1.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared@1.3.0") || !graph.Has("shared@2.1.0") {
+		t.Fatalf("workspace dependency override should force shared@2.1.0: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONHandlesConflictingWorkspaceDevDependencies(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceADir := filepath.Join(dir, "packages", "a")
+	workspaceBDir := filepath.Join(dir, "packages", "b")
+	if err := os.MkdirAll(workspaceADir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspaceBDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceADir, "package.json"), []byte(`{
+  "name":"a",
+  "version":"1.0.0",
+  "devDependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceBDir, "package.json"), []byte(`{
+  "name":"b",
+  "version":"1.0.0",
+  "devDependencies":{"consumer-two":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("shared@1.3.0") || !graph.Has("shared@2.1.0") {
+		t.Fatalf("conflicting workspace dev deps should retain both shared versions: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONSupportsWorkspaceSpecificPeerSets(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceADir := filepath.Join(dir, "packages", "a")
+	workspaceBDir := filepath.Join(dir, "packages", "b")
+	if err := os.MkdirAll(workspaceADir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspaceBDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceADir, "package.json"), []byte(`{
+  "name":"a",
+  "version":"1.0.0",
+  "peerDependencies":{"host":"^1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceBDir, "package.json"), []byte(`{
+  "name":"b",
+  "version":"1.0.0",
+  "peerDependencies":{"host":"^2.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("host@1.2.0") || !graph.Has("host@2.0.0") {
+		t.Fatalf("workspace-specific peer sets should resolve both host versions: %#v", graph.Packages())
+	}
+}
+
 func TestResolvePackageJSONRejectsDuplicateWorkspaceNames(t *testing.T) {
 	dir := t.TempDir()
 	for _, workspace := range []string{"a", "b"} {
@@ -1669,6 +2243,120 @@ func TestResolvePackageJSONRejectsDuplicateWorkspaceNames(t *testing.T) {
 	}
 	if dupErr.Name != "dup" || dupErr.First == "" || dupErr.Other == "" {
 		t.Fatalf("unexpected duplicate workspace error: %#v", dupErr)
+	}
+}
+
+func TestResolvePackageJSONResolvesWorkspacePeerDependencies(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:*"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0",
+  "peerDependencies":{"host":"^1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("host@1.2.0") {
+		t.Fatalf("workspace peer dependency should resolve host@1.2.0: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONSkipsOptionalWorkspacePeerDependencies(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:*"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0",
+  "peerDependencies":{"host":"^1.0.0"},
+  "peerDependenciesMeta":{"host":{"optional":true}}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("host@1.2.0") || graph.Has("host@2.0.0") {
+		t.Fatalf("optional workspace peer dependency should be skipped: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONRespectsWorkspaceNegatedGlobPatterns(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	includeDir := filepath.Join(dir, "packages", "include")
+	excludeDir := filepath.Join(dir, "packages", "exclude")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(excludeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*","!packages/exclude"],
+  "dependencies":{"include":"workspace:*"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "package.json"), []byte(`{
+  "name":"include",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excludeDir, "package.json"), []byte(`{
+  "name":"exclude",
+  "version":"1.0.0",
+  "dependencies":{"consumer-two":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("consumer@1.0.0") {
+		t.Fatalf("included workspace dependency should resolve: %#v", graph.Packages())
+	}
+	if graph.Has("consumer-two@1.0.0") {
+		t.Fatalf("excluded workspace dependency should not resolve: %#v", graph.Packages())
 	}
 }
 
@@ -2074,6 +2762,34 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"shared-peer": "1.2.0"},
       "peerDependenciesMeta": {"shared-peer": {"optional": true}},
       "dist": {"tarball": "%s/optional-existing-peer-plugin/-/optional-existing-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-existing-range-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "optional-existing-range-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-existing-range-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "^1.0.0"},
+      "peerDependenciesMeta": {"shared-peer": {"optional": true}},
+      "dist": {"tarball": "%s/optional-existing-range-peer-plugin/-/optional-existing-range-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-existing-upper-bound-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "optional-existing-upper-bound-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-existing-upper-bound-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": ">=1.0.0 <1.3.0"},
+      "peerDependenciesMeta": {"shared-peer": {"optional": true}},
+      "dist": {"tarball": "%s/optional-existing-upper-bound-peer-plugin/-/optional-existing-upper-bound-peer-plugin-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -2701,6 +3417,66 @@ func bundleRegistry(t *testing.T, bundleField string) *httptest.Server {
 	}))
 }
 
+func bundleRegistryFullMetadata(t *testing.T, bundleFields string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name": "parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "parent",
+      "version": "1.0.0",
+      "dependencies": {"bundled": "1.0.0", "alt-bundled": "1.0.0", "loose": "1.0.0"},
+      %s,
+      "dist": {"tarball": "%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, bundleFields, serverURL(r))
+		case "/bundled":
+			fmt.Fprintf(w, `{
+  "name": "bundled",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "bundled",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/bundled/-/bundled-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/alt-bundled":
+			fmt.Fprintf(w, `{
+  "name": "alt-bundled",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "alt-bundled",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/alt-bundled/-/alt-bundled-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/loose":
+			fmt.Fprintf(w, `{
+  "name": "loose",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "loose",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/loose/-/loose-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
 func dedupeRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2794,4 +3570,26 @@ func findNode(t *testing.T, graph *Graph, name string) *Node {
 	}
 	t.Fatalf("node %s not found", name)
 	return nil
+}
+
+func equalPackageKeys(a, b []Package) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	keysA := make([]string, 0, len(a))
+	keysB := make([]string, 0, len(b))
+	for _, pkg := range a {
+		keysA = append(keysA, pkg.Key())
+	}
+	for _, pkg := range b {
+		keysB = append(keysB, pkg.Key())
+	}
+	sort.Strings(keysA)
+	sort.Strings(keysB)
+	for i := range keysA {
+		if keysA[i] != keysB[i] {
+			return false
+		}
+	}
+	return true
 }

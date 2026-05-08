@@ -35,6 +35,29 @@ func TestDependencySelectionRejectsUnknownTypes(t *testing.T) {
 	}
 }
 
+func TestDependencySelectionIncludeRestoresDisabledDefaults(t *testing.T) {
+	set, err := dependencySelection(false, false, "", "dev,optional,peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.includeDev || !set.includeOptional || set.omitPeer {
+		t.Fatalf("include should enable dev/optional and clear peer omit: %#v", set)
+	}
+}
+
+func TestDependencySelectionHandlesWhitespaceAndDuplicates(t *testing.T) {
+	set, err := dependencySelection(true, true, " dev,\noptional,\tpeer,peer ", " optional, peer , optional ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.includeDev {
+		t.Fatalf("dev should remain omitted: %#v", set)
+	}
+	if !set.includeOptional || set.omitPeer {
+		t.Fatalf("include should re-enable optional and peer despite duplicates/whitespace: %#v", set)
+	}
+}
+
 func TestParseBefore(t *testing.T) {
 	before, err := parseBefore("2024-02-15T00:00:00Z")
 	if err != nil {

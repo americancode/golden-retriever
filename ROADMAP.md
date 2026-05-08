@@ -14,49 +14,6 @@
 - [ ] Keep npm CLI 11.14.0 in `cli-11.14.0` as the local behavioral reference.
 - [ ] Prove parity with npm using automated npm-backed tests where practical.
 
-## Resolution Parity TODOs
-
-- [x] Port npm package spec parsing behavior from `npm-package-arg` for registry specs, aliases, tag/version/range classification, unsupported URL schemes, and explicit non-registry rejection.
-- [x] Port npm manifest selection behavior from `npm-pick-manifest` for default tags, before-time, exact versions, dist-tags, deprecated and engine sorting, staged versions, policy restrictions, avoid, and avoid-strict fallback.
-- [x] Harden semver behavior for npm dependency resolution: strict version identity, build metadata normalization, prerelease gating, partial and wildcard comparators, hyphen ranges, OR ranges, caret and tilde ranges, comparator ranges, invalid range rejection, and range intersection fixtures.
-- [x] Expand alias handling with npm-compatible registry alias parsing/validation (including whitespace/error parity) and explicit non-registry alias rejection fixtures.
-- [x] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
-- [x] Continue hardening `overrides` selector semantics beyond current version-qualified range intersection coverage.
-- [x] Add override semantic conflict detection for incomparable override sets with intersecting or disjoint replacement ranges.
-- [x] Expand override fixtures for cyclic chains and peer-conflict fixes.
-- [x] Decide whether alias, directory, file, and git override specs stay rejected or become supported.
-- [x] Continue hardening `peerDependencies` placement beyond current root and ancestor dependency preference coverage.
-- [x] Match npm lockfile behavior for peer conflicts that npm records as warnings but this resolver currently rejects.
-- [x] Continue hardening `peerDependenciesMeta.optional`.
-- [x] Expand peer fixtures for nested peers, unresolvable peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
-- [x] Expand peer optional re-resolution fixtures for npm issues like #8726.
-- [ ] Expand peer optional existing-node preference fixtures for npm issues like #9249.
-- [x] Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
-- [ ] Expand optional failure coverage for tarball download failures.
-- [ ] Match npm lockfile behavior for optional platform packages so all registry tarballs needed by a lockfile are mirrored, not only the current host platform.
-- [ ] Expand bundled dependency parity for complete metadata.
-- [ ] Expand bundled dependency parity for legacy bundling fixtures.
-- [ ] Expand bundled dependency parity for root bundler cases.
-- [ ] Finish npm `--omit` / `--include` edge cases.
-- [ ] Expand workspace support beyond basic package discovery, external dependency traversal, and versioned local workspace specs.
-- [ ] Add npm-backed parity fixtures for satisfied and unsatisfied versioned `workspace:` specs.
-- [ ] Expand workspace fixtures for root links, workspace overrides, conflicting workspace dev deps, and workspace-specific peer sets.
-- [ ] Support or explicitly reject `file:` specs with parity fixtures.
-- [ ] Support or explicitly reject `link:` specs with parity fixtures.
-- [ ] Support or explicitly reject remote tarball URL specs with parity fixtures.
-- [ ] Support or explicitly reject Git, GitHub, hosted Git, SSH, and SVN specs with parity fixtures.
-- [ ] Expand platform filter parity fixtures for root and transitive packages.
-- [ ] Expand platform filter parity fixtures for `os`, `cpu`, and `libc` combinations.
-- [ ] Finish remaining `engines` omit/include interactions.
-- [ ] Expand deprecation metadata parity fixtures.
-- [ ] Finish ancient lockfile edge cases.
-- [ ] Expand incomplete lock metadata behavior beyond current missing-resolved and local/git skip coverage.
-- [ ] Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
-- [ ] Add yarn.lock influence where npm would use it for absent or incomplete lock metadata.
-- [x] Model remaining npm config that affects resolution, especially `install-strategy`.
-- [ ] Add default placement, nested placement, and legacy bundling fixtures.
-- [x] Add explicit request placement fixtures where selected package versions change.
-
 ## Acquisition TODOs
 
 - [ ] Continue improving concurrent packument fetching while preserving deterministic npm-compatible output.
@@ -98,6 +55,7 @@
 - [ ] Add platform-filtered package parity fixtures.
 - [ ] Add CPU combination parity fixtures.
 - [ ] Add real npm package parity cases that have historically broken resolution.
+- [ ] Add a regression parity fixture for Angular real-world delta (assert exact package set parity vs npm lockfile, including `conventional-commits-filter@5.0.0` and no extra toolchain subtree).
 
 ## Registry/Auth TODOs
 
