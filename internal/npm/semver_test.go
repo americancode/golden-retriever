@@ -1,6 +1,7 @@
 package npm
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -84,6 +85,28 @@ func TestParsePackageSpecRejectsNonRegistryAliases(t *testing.T) {
 		t.Run(spec, func(t *testing.T) {
 			if _, _, err := parsePackageSpec("alias", spec); err == nil {
 				t.Fatalf("parsePackageSpec(%q) = nil, want error", spec)
+			}
+		})
+	}
+}
+
+func TestParsePackageSpecAliasWhitespaceParity(t *testing.T) {
+	tests := []struct {
+		spec string
+		want string
+	}{
+		{spec: "npm: foo@^1.0.0", want: `invalid package name " foo"`},
+		{spec: "npm:foo @^1.0.0", want: `invalid package name "foo "`},
+		{spec: "npm:foo ", want: "aliases must have a name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.spec, func(t *testing.T) {
+			err := validateDependencySpec("alias", tc.spec, EdgeProd)
+			if err == nil {
+				t.Fatalf("validateDependencySpec(%q) = nil, want error", tc.spec)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("validateDependencySpec(%q) err = %v, want substring %q", tc.spec, err, tc.want)
 			}
 		})
 	}
@@ -558,6 +581,82 @@ func TestTildePartialRangesMatchNpmSemver(t *testing.T) {
 		{"1.2.3", "~>1.2.0", true},
 		{"1.2.9", "~> 1.2.0", true},
 		{"1.3.0", "~>1.2.0", false},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestWildcardComparatorRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"1.2.3", ">1.x", false},
+		{"2.0.0", ">1.x", true},
+		{"1.2.3", ">=1.x", true},
+		{"0.9.9", "<1.x", true},
+		{"1.0.0", "<1.x", false},
+		{"1.9.9", "<=1.x", true},
+		{"2.0.0", "<=1.x", false},
+		{"1.2.3", ">1.2.x", false},
+		{"1.3.0", ">1.2.x", true},
+		{"1.1.9", "<1.2.x", true},
+		{"1.2.0", "<1.2.x", false},
+		{"1.2.9", "<=1.2.x", true},
+		{"1.3.0", "<=1.2.x", false},
+		{"1.2.3", "=1.2.x", true},
+		{"1.3.0", "=1.2.x", false},
+		{"1.2.3", ">x", false},
+		{"1.2.3", "<x", false},
+		{"1.2.3", ">=x", true},
+		{"1.2.3", "<=x", true},
+		{"1.2.3", "=x", true},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestComparatorBuildMetadataIgnoredLikeNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"1.2.3", "1.2.3+build", true},
+		{"1.2.3+other", "1.2.3+build", true},
+		{"1.2.4", "1.2.3+build", false},
+		{"1.2.3", ">=1.2.3+build", true},
+		{"1.2.4", ">=1.2.3+build", true},
+		{"1.2.3", "<=1.2.3+build", true},
+		{"1.2.4", "<=1.2.3+build", false},
+		{"1.2.3", ">1.2.3+build", false},
+		{"1.2.4", ">1.2.3+build", true},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestGTEZeroComparatorMatchesNpmSemverWildcard(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"1.2.3", ">=0.0.0", true},
+		{"1.2.3-beta.1", ">=0.0.0", false},
+		{"1.2.3", ">=0.0.0-0", true},
+		{"1.2.3-beta.1", ">=0.0.0-0", false},
+		{"0.0.0-beta.1", ">=0.0.0-0", true},
 	}
 	for _, tc := range tests {
 		if got := satisfies(tc.version, tc.spec); got != tc.want {

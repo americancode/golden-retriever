@@ -26,7 +26,6 @@ var (
 )
 
 func parsePackageSpec(depName, spec string) (string, string, error) {
-	spec = strings.TrimSpace(spec)
 	if !strings.HasPrefix(strings.ToLower(spec), "npm:") {
 		return depName, spec, nil
 	}
@@ -39,6 +38,10 @@ func parsePackageSpec(depName, spec string) (string, string, error) {
 		return "", "", &nonRegistryAliasError{DepName: depName}
 	}
 	if name == "" {
+		trimmedWanted := strings.TrimSpace(wanted)
+		if trimmedWanted != "" && validPackageName(trimmedWanted) {
+			return "", "", fmt.Errorf("%s: aliases must have a name", depName)
+		}
 		if registryTagLike(wanted) && !validTagName(wanted) {
 			return "", "", &InvalidTagNameError{Name: depName, Spec: spec}
 		}
@@ -54,7 +57,6 @@ func parsePackageSpec(depName, spec string) (string, string, error) {
 }
 
 func parseRegistryPackageArg(arg string) (string, string, bool, error) {
-	arg = strings.TrimSpace(arg)
 	if strings.HasPrefix(strings.ToLower(arg), "npm:") {
 		return "", "", false, fmt.Errorf("nested aliases not supported")
 	}
@@ -536,6 +538,9 @@ func validRangeDisjunct(spec string) bool {
 		return true
 	}
 	for _, part := range parts {
+		if isGTEZeroComparator(part) {
+			continue
+		}
 		if !validRangeComparator(part) {
 			return false
 		}
@@ -714,6 +719,9 @@ func satisfiesOne(version, spec string) bool {
 		return true
 	}
 	spec = strings.ReplaceAll(spec, " ", "")
+	if isGTEZeroComparator(spec) {
+		return true
+	}
 	if strings.HasPrefix(spec, "^") {
 		return satisfiesCaret(version, strings.TrimPrefix(spec, "^"))
 	}
@@ -776,12 +784,16 @@ func comparatorTarget(spec string) string {
 }
 
 func compareOp(version, op, target string) bool {
+	target = stripBuildMetadata(target)
 	if m := partialRe.FindStringSubmatch(strings.TrimSpace(target)); m != nil && !validPartialMatch(m) {
 		return false
 	}
 	if bounds, ok := partialComparatorBounds(target); ok {
 		switch op {
 		case ">=":
+			if bounds.wildcardMajor {
+				return true
+			}
 			return compareVersion(version, bounds.lower) >= 0
 		case ">":
 			if !bounds.hasUpper {
@@ -789,8 +801,14 @@ func compareOp(version, op, target string) bool {
 			}
 			return compareVersion(version, bounds.upper) >= 0
 		case "<":
+			if bounds.wildcardMajor {
+				return false
+			}
 			return compareVersion(version, bounds.lower) < 0
 		case "<=":
+			if bounds.wildcardMajor {
+				return true
+			}
 			if !bounds.hasUpper {
 				return true
 			}
@@ -819,9 +837,10 @@ func compareOp(version, op, target string) bool {
 }
 
 type partialBounds struct {
-	lower    string
-	upper    string
-	hasUpper bool
+	lower         string
+	upper         string
+	hasUpper      bool
+	wildcardMajor bool
 }
 
 func partialComparatorBounds(target string) (partialBounds, bool) {
@@ -836,7 +855,7 @@ func partialComparatorBounds(target string) (partialBounds, bool) {
 		return partialBounds{}, false
 	}
 	if isWild(m[1]) {
-		return partialBounds{lower: "0.0.0"}, true
+		return partialBounds{lower: "0.0.0", wildcardMajor: true}, true
 	}
 	major := atoi(m[1])
 	if m[2] == "" || isWild(m[2]) {
@@ -919,6 +938,18 @@ func satisfiesWildcard(version, spec string) bool {
 		return false
 	}
 	return true
+}
+
+func stripBuildMetadata(spec string) string {
+	if plus := strings.Index(spec, "+"); plus >= 0 {
+		return spec[:plus]
+	}
+	return spec
+}
+
+func isGTEZeroComparator(spec string) bool {
+	spec = strings.TrimSpace(strings.ReplaceAll(spec, " ", ""))
+	return spec == ">=0.0.0"
 }
 
 func normalizePartial(spec string) npmVersion {

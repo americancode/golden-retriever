@@ -378,35 +378,36 @@ var windowsDriveSpecRe = regexp.MustCompile(`^[a-zA-Z]:`)
 var npaURLSpecRe = regexp.MustCompile(`^(?i:(?:git\+)?[a-z]+:)`)
 
 func validateDependencySpec(name, spec string, edgeType EdgeType) error {
+	rawSpec := spec
 	spec = strings.TrimSpace(spec)
 	if !validPackageName(name) {
-		return &InvalidPackageNameError{Name: name, Spec: spec}
+		return &InvalidPackageNameError{Name: name, Spec: rawSpec}
 	}
 	if spec == "" {
-		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+		return &UnsupportedSpecError{Name: name, Spec: rawSpec, Type: string(edgeType)}
 	}
-	if strings.HasPrefix(strings.ToLower(spec), "npm:") {
-		aliasTarget := strings.TrimSpace(spec[len("npm:"):])
+	if strings.HasPrefix(strings.ToLower(rawSpec), "npm:") {
+		aliasTarget := rawSpec[len("npm:"):]
 		if strings.HasPrefix(strings.ToLower(aliasTarget), "npm:") {
-			return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+			return &UnsupportedSpecError{Name: name, Spec: rawSpec, Type: string(edgeType)}
 		}
-		actual, wanted, err := parsePackageSpec(name, spec)
+		actual, wanted, err := parsePackageSpec(name, rawSpec)
 		if err != nil {
 			var aliasErr *nonRegistryAliasError
 			if errors.As(err, &aliasErr) {
-				return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+				return &UnsupportedSpecError{Name: name, Spec: rawSpec, Type: string(edgeType)}
 			}
 			return err
 		}
 		if !validPackageName(actual) {
 			if unsupportedSpecClass(aliasTarget) {
-				return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+				return &UnsupportedSpecError{Name: name, Spec: rawSpec, Type: string(edgeType)}
 			}
-			return &InvalidPackageNameError{Name: actual, Spec: spec}
+			return &InvalidPackageNameError{Name: actual, Spec: rawSpec}
 		}
 		return validateRegistryWanted(actual, wanted, edgeType)
 	}
-	return validateRegistryWanted(name, spec, edgeType)
+	return validateRegistryWanted(name, rawSpec, edgeType)
 }
 
 func validateRegistryWanted(name, spec string, edgeType EdgeType) error {
