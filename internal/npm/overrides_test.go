@@ -150,6 +150,36 @@ func TestOverridesResolveWithRangeIntersectingSelector(t *testing.T) {
 	}
 }
 
+func TestOverridesVersionQualifiedSelectorMatchesTagSpec(t *testing.T) {
+	overrides, err := ParseOverrides(json.RawMessage(`{
+  "dep@^1.0.0": "3.0.0"
+}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, rule := overrides.ResolveWithRule(nil, "dep", "latest")
+	if spec != "3.0.0" || rule == nil || rule.Target.Spec != "^1.0.0" {
+		t.Fatalf("tag spec should match version-qualified override selector, got spec=%q rule=%#v", spec, rule)
+	}
+}
+
+func TestOverridesVersionQualifiedSelectorMatchesAliasSubSpec(t *testing.T) {
+	overrides, err := ParseOverrides(json.RawMessage(`{
+  "dep@^1.0.0": "3.0.0"
+}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, rule := overrides.ResolveWithRule(nil, "dep", "npm:real-dep@^1.2.0")
+	if spec != "3.0.0" || rule == nil || rule.Target.Spec != "^1.0.0" {
+		t.Fatalf("alias semver spec should match version-qualified override selector, got spec=%q rule=%#v", spec, rule)
+	}
+	spec, rule = overrides.ResolveWithRule(nil, "dep", "npm:real-dep@^2.0.0")
+	if spec != "" || rule != nil {
+		t.Fatalf("disjoint alias semver spec should not match selector, got spec=%q rule=%#v", spec, rule)
+	}
+}
+
 func TestResolverMatchesVersionQualifiedOverrideByRangeIntersection(t *testing.T) {
 	srv := overrideRegistry(t)
 	defer srv.Close()
@@ -473,6 +503,46 @@ func TestResolverRejectsUnsupportedOverrideSpecs(t *testing.T) {
 				t.Fatalf("unexpected spec error: %#v", specErr)
 			}
 		})
+	}
+}
+
+func TestParseOverridesDetectsSemanticConflictForIncomparableSets(t *testing.T) {
+	_, err := ParseOverrides(json.RawMessage(`{
+  "react": {"loose-envify": "1.2.0"},
+  "react-dom": {"loose-envify": "2.0.0"}
+}`), nil)
+	var conflict *OverrideSemanticConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("got %v, want OverrideSemanticConflictError", err)
+	}
+	if conflict.Name != "loose-envify" {
+		t.Fatalf("unexpected conflict: %#v", conflict)
+	}
+}
+
+func TestParseOverridesAllowsIncomparableSetsWithIntersectingRanges(t *testing.T) {
+	overrides, err := ParseOverrides(json.RawMessage(`{
+  "react": {"loose-envify": "^1.2.0"},
+  "react-dom": {"loose-envify": "~1.2.3"}
+}`), nil)
+	if err != nil {
+		t.Fatalf("ParseOverrides = %v, want nil", err)
+	}
+	if overrides == nil {
+		t.Fatalf("expected overrides to be parsed")
+	}
+}
+
+func TestParseOverridesAllowsIncomparableSetsWithSelectorDisjointness(t *testing.T) {
+	overrides, err := ParseOverrides(json.RawMessage(`{
+  "react": {"loose-envify@^1.0.0": "1.2.0"},
+  "react-dom": {"loose-envify@^2.0.0": "2.0.0"}
+}`), nil)
+	if err != nil {
+		t.Fatalf("ParseOverrides = %v, want nil", err)
+	}
+	if overrides == nil {
+		t.Fatalf("expected overrides to be parsed")
 	}
 }
 

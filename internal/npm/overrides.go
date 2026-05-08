@@ -27,6 +27,16 @@ func (e *OverrideConflictError) Error() string {
 	return fmt.Sprintf("override for %s@%s conflicts with direct dependency", e.Name, e.RawSpec)
 }
 
+type OverrideSemanticConflictError struct {
+	Name   string
+	First  string
+	Second string
+}
+
+func (e *OverrideSemanticConflictError) Error() string {
+	return fmt.Sprintf("incomparable override sets for %s have conflicting replacement ranges %q and %q", e.Name, e.First, e.Second)
+}
+
 type OverrideSelector struct {
 	Name string
 	Spec string
@@ -51,6 +61,9 @@ func ParseOverrides(raw json.RawMessage, rootSpecs map[string]string) (*Override
 	if err := overrides.validateRootConflicts(); err != nil {
 		return nil, err
 	}
+	if err := overrides.validateSemanticConflicts(); err != nil {
+		return nil, err
+	}
 	if len(overrides.rules) == 0 {
 		return nil, nil
 	}
@@ -73,6 +86,76 @@ func (o *Overrides) validateRootConflicts() error {
 		}
 	}
 	return nil
+}
+
+func (o *Overrides) validateSemanticConflicts() error {
+	for i := 0; i < len(o.rules); i++ {
+		left := o.rules[i]
+		for j := i + 1; j < len(o.rules); j++ {
+			right := o.rules[j]
+			if left.Target.Name != right.Target.Name {
+				continue
+			}
+			if !ancestorChainsIncomparable(left.Ancestors, right.Ancestors) {
+				continue
+			}
+			if !targetSelectorsCanOverlap(left.Target.Spec, right.Target.Spec) {
+				continue
+			}
+			if !replacementRangesConflict(left.Spec, right.Spec) {
+				continue
+			}
+			return &OverrideSemanticConflictError{
+				Name:   left.Target.Name,
+				First:  left.Spec,
+				Second: right.Spec,
+			}
+		}
+	}
+	return nil
+}
+
+func ancestorChainsIncomparable(left, right []OverrideSelector) bool {
+	return !ancestorPrefixMatch(left, right) && !ancestorPrefixMatch(right, left)
+}
+
+func ancestorPrefixMatch(prefix, chain []OverrideSelector) bool {
+	if len(prefix) > len(chain) {
+		return false
+	}
+	for i := range prefix {
+		if prefix[i].Name != chain[i].Name {
+			return false
+		}
+		if !targetSelectorsCanOverlap(prefix[i].Spec, chain[i].Spec) {
+			return false
+		}
+	}
+	return true
+}
+
+func targetSelectorsCanOverlap(left, right string) bool {
+	if left == "" || right == "" {
+		return true
+	}
+	leftRange, leftOK := overrideSelectorSemverComparable(left)
+	rightRange, rightOK := overrideSelectorSemverComparable(right)
+	if leftOK && rightOK {
+		return rangeIntersects(leftRange, rightRange)
+	}
+	return true
+}
+
+func replacementRangesConflict(left, right string) bool {
+	if isOverrideReference(left) || isOverrideReference(right) {
+		return false
+	}
+	leftRange, leftOK := overrideSelectorSemverComparable(left)
+	rightRange, rightOK := overrideSelectorSemverComparable(right)
+	if !leftOK || !rightOK {
+		return false
+	}
+	return !rangeIntersects(leftRange, rightRange)
 }
 
 func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any) error {
@@ -248,10 +331,43 @@ func selectorSpecMatches(candidate, selector string) bool {
 	if candidate == selector {
 		return true
 	}
-	if rangeIntersects(candidate, selector) {
+	candidateSpec, candidateSemver := overrideSelectorSemverComparable(candidate)
+	selectorSpec, selectorSemver := overrideSelectorSemverComparable(selector)
+	if candidateSemver && selectorSemver {
+		if rangeIntersects(candidateSpec, selectorSpec) {
+			return true
+		}
+		if satisfies(candidateSpec, selectorSpec) {
+			return true
+		}
+	}
+	// npm arborist treats non-semver edge specs (tags/file/git/aliases without
+	// semver ranges) as matching once the package name matches.
+	if !candidateSemver {
 		return true
 	}
-	return satisfies(candidate, selector)
+	return false
+}
+
+func overrideSelectorSemverComparable(spec string) (string, bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", false
+	}
+	if strings.HasPrefix(strings.ToLower(spec), "npm:") {
+		_, wanted, err := parsePackageSpec("override", spec)
+		if err != nil {
+			return "", false
+		}
+		spec = strings.TrimSpace(wanted)
+	}
+	if spec == "" || registryTagLike(spec) {
+		return "", false
+	}
+	if validRangeSpec(spec) {
+		return spec, true
+	}
+	return "", false
 }
 
 func matchAncestors(parent *Node, ancestors []OverrideSelector) bool {
