@@ -94,10 +94,19 @@ func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any
 		}
 
 		selector := parseOverrideSelector(key)
+		if !validPackageName(selector.Name) {
+			return &InvalidPackageNameError{Name: selector.Name, Spec: key}
+		}
+		if selector.Spec != "" && unsupportedSpecClass(selector.Spec) {
+			return &UnsupportedSpecError{Name: selector.Name, Spec: selector.Spec, Type: "override"}
+		}
 		switch typed := value.(type) {
 		case string:
 			if typed == "" {
 				typed = "*"
+			}
+			if !isOverrideReference(typed) && unsupportedSpecClass(typed) {
+				return &UnsupportedSpecError{Name: selector.Name, Spec: typed, Type: "override"}
 			}
 			o.addRule(ancestors, selector, typed)
 		case map[string]any:
@@ -112,6 +121,9 @@ func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any
 				}
 				if spec == "" {
 					spec = "*"
+				}
+				if !isOverrideReference(spec) && unsupportedSpecClass(spec) {
+					return &UnsupportedSpecError{Name: selector.Name, Spec: spec, Type: "override"}
 				}
 				o.addRule(ancestors, selector, spec)
 			}
@@ -245,17 +257,19 @@ func matchAncestors(parent *Node, ancestors []OverrideSelector) bool {
 	}
 	cursor := parent
 	for i := len(ancestors) - 1; i >= 0; i-- {
-		if cursor == nil || cursor.ID == "root" {
-			return false
-		}
 		selector := ancestors[i]
-		if cursor.Name != selector.Name {
+		matched := false
+		for cursor != nil && cursor.ID != "root" {
+			if cursor.Name == selector.Name && (selector.Spec == "" || satisfies(cursor.Version, selector.Spec)) {
+				matched = true
+				cursor = cursor.Parent
+				break
+			}
+			cursor = cursor.Parent
+		}
+		if !matched {
 			return false
 		}
-		if selector.Spec != "" && !satisfies(cursor.Version, selector.Spec) {
-			return false
-		}
-		cursor = cursor.Parent
 	}
 	return true
 }

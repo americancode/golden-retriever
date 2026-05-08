@@ -3,6 +3,7 @@ package npm
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 )
@@ -52,8 +53,9 @@ func platformCompatible(manifest VersionManifest, opts ResolveOptions) (bool, *P
 	if !matchesPlatformList(cpuValue, manifest.CPU) {
 		return false, &PackagePlatformError{Package: pkg, Field: "cpu", Value: cpuValue, Allowed: manifest.CPU}
 	}
-	if opts.Libc != "" && !matchesPlatformList(opts.Libc, manifest.Libc) {
-		return false, &PackagePlatformError{Package: pkg, Field: "libc", Value: opts.Libc, Allowed: manifest.Libc}
+	libcValue := effectiveLibc(runtime.GOOS, opts.Libc)
+	if libcValue != "" && !matchesPlatformList(libcValue, manifest.Libc) {
+		return false, &PackagePlatformError{Package: pkg, Field: "libc", Value: libcValue, Allowed: manifest.Libc}
 	}
 	return true, nil
 }
@@ -109,4 +111,49 @@ func npmCPU(goarch string) string {
 	default:
 		return goarch
 	}
+}
+
+func effectiveLibc(goos, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if goos != "linux" {
+		return ""
+	}
+	return detectLinuxLibc()
+}
+
+func detectLinuxLibc() string {
+	for _, path := range []string{"/usr/bin/ldd", "/bin/ldd"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if libc := classifyLibcOutput(string(data)); libc != "" {
+			return libc
+		}
+	}
+	if entries, err := os.ReadDir("/lib"); err == nil {
+		for _, entry := range entries {
+			name := strings.ToLower(entry.Name())
+			if strings.Contains(name, "musl") {
+				return "musl"
+			}
+			if strings.Contains(name, "libc.so.6") {
+				return "glibc"
+			}
+		}
+	}
+	return ""
+}
+
+func classifyLibcOutput(output string) string {
+	output = strings.ToLower(output)
+	if strings.Contains(output, "musl") {
+		return "musl"
+	}
+	if strings.Contains(output, "glibc") || strings.Contains(output, "gnu libc") || strings.Contains(output, "free software foundation") {
+		return "glibc"
+	}
+	return ""
 }

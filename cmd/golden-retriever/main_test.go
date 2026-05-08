@@ -80,3 +80,28 @@ func TestPrintEngineWarnings(t *testing.T) {
 		t.Fatalf("unexpected warning output: %q", got)
 	}
 }
+
+func TestPrintDeprecationWarnings(t *testing.T) {
+	graph := npm.NewGraph()
+	graph.AddDeprecationWarning(npm.Package{Name: "deprecated-package", Version: "1.0.0"}, "use maintained-package instead")
+
+	oldStderr := os.Stderr
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = write
+	defer func() { os.Stderr = oldStderr }()
+	printDeprecationWarnings(graph)
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "warn deprecated package=deprecated-package@1.0.0 message=use maintained-package instead") {
+		t.Fatalf("unexpected warning output: %q", got)
+	}
+}

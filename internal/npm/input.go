@@ -77,6 +77,16 @@ func (e *UnsupportedWorkspacesError) Error() string {
 	return "workspaces are not implemented yet"
 }
 
+type DuplicateWorkspaceError struct {
+	Name  string
+	First string
+	Other string
+}
+
+func (e *DuplicateWorkspaceError) Error() string {
+	return fmt.Sprintf("duplicate workspace package %q at %s and %s", e.Name, e.First, e.Other)
+}
+
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
 	info, err := os.Stat(input)
 	if err == nil && info.IsDir() {
@@ -113,10 +123,10 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	if err != nil {
 		return nil, err
 	}
-	workspaceNames := map[string]bool{}
+	workspaceVersions := map[string]string{}
 	for _, workspace := range workspaces {
 		if workspace.Name != "" {
-			workspaceNames[workspace.Name] = true
+			workspaceVersions[workspace.Name] = workspace.Root.Version
 		}
 	}
 	rootSpecs := rootDependencySpecs(root)
@@ -126,35 +136,35 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	}
 
 	var deps []DependencyRequest
-	deps, err = appendDeps(deps, root.Dependencies, EdgeProd, workspaceNames)
+	deps, err = appendDeps(deps, root.Dependencies, EdgeProd, workspaceVersions)
 	if err != nil {
 		return nil, err
 	}
 	if opts.IncludeDev {
-		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev, workspaceNames)
+		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev, workspaceVersions)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if opts.IncludeOptional {
-		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional, workspaceNames)
+		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional, workspaceVersions)
 		if err != nil {
 			return nil, err
 		}
 	}
 	for _, workspace := range workspaces {
-		deps, err = appendDeps(deps, workspace.Root.Dependencies, EdgeProd, workspaceNames)
+		deps, err = appendDeps(deps, workspace.Root.Dependencies, EdgeProd, workspaceVersions)
 		if err != nil {
 			return nil, err
 		}
 		if opts.IncludeDev {
-			deps, err = appendDeps(deps, workspace.Root.DevDependencies, EdgeDev, workspaceNames)
+			deps, err = appendDeps(deps, workspace.Root.DevDependencies, EdgeDev, workspaceVersions)
 			if err != nil {
 				return nil, err
 			}
 		}
 		if opts.IncludeOptional {
-			deps, err = appendDeps(deps, workspace.Root.OptionalDependencies, EdgeOptional, workspaceNames)
+			deps, err = appendDeps(deps, workspace.Root.OptionalDependencies, EdgeOptional, workspaceVersions)
 			if err != nil {
 				return nil, err
 			}
@@ -198,10 +208,10 @@ func mergeDeps(dst, src map[string]string) error {
 	return nil
 }
 
-func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceNames map[string]bool) ([]DependencyRequest, error) {
+func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceVersions map[string]string) ([]DependencyRequest, error) {
 	for _, name := range sortedDependencyNames(src) {
 		spec := src[name]
-		if workspaceNames[name] && isWorkspaceReference(spec) {
+		if workspaceDependencySatisfied(workspaceVersions, name, spec) {
 			continue
 		}
 		if err := validateDependencySpec(name, spec, edgeType); err != nil {
@@ -219,7 +229,11 @@ func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
 	}
 	var out []workspacePackage
 	seen := map[string]bool{}
+	seenNames := map[string]string{}
 	for _, pattern := range patterns {
+		if strings.HasPrefix(pattern, "!") {
+			continue
+		}
 		matches, err := filepath.Glob(filepath.Join(rootDir, filepath.FromSlash(pattern)))
 		if err != nil {
 			return nil, fmt.Errorf("invalid workspace pattern %q: %w", pattern, err)
@@ -242,7 +256,11 @@ func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
 			if pkg.Name == "" || seen[pkgPath] {
 				continue
 			}
+			if first := seenNames[pkg.Name]; first != "" {
+				return nil, &DuplicateWorkspaceError{Name: pkg.Name, First: first, Other: pkgPath}
+			}
 			seen[pkgPath] = true
+			seenNames[pkg.Name] = pkgPath
 			out = append(out, workspacePackage{Name: pkg.Name, Root: pkg, Path: pkgPath})
 		}
 	}
@@ -288,6 +306,17 @@ func workspacePatterns(raw any) ([]string, error) {
 func isWorkspaceReference(spec string) bool {
 	spec = strings.TrimSpace(strings.ToLower(spec))
 	return spec == "" || strings.HasPrefix(spec, "workspace:") || strings.HasPrefix(spec, "file:") || strings.HasPrefix(spec, "link:")
+}
+
+func workspaceDependencySatisfied(workspaceVersions map[string]string, name, spec string) bool {
+	version, ok := workspaceVersions[name]
+	if !ok {
+		return false
+	}
+	if isWorkspaceReference(spec) {
+		return true
+	}
+	return version != "" && satisfies(version, spec)
 }
 
 func sortedDependencyNames(deps map[string]string) []string {

@@ -1,5 +1,7 @@
 package npm
 
+import "fmt"
+
 type Package struct {
 	Name      string
 	Version   string
@@ -13,11 +15,12 @@ func (p Package) Key() string {
 }
 
 type Graph struct {
-	Root           *Node
-	PeerConflicts  []PeerConflict
-	EngineWarnings []*PackageEngineError
-	packages       map[string]Package
-	nodes          map[string]*Node
+	Root                *Node
+	PeerConflicts       []PeerConflict
+	EngineWarnings      []*PackageEngineError
+	DeprecationWarnings []PackageDeprecationWarning
+	packages            map[string]Package
+	nodes               map[string]*Node
 }
 
 func NewGraph() *Graph {
@@ -141,6 +144,21 @@ func (g *Graph) AddEngineWarning(warning *PackageEngineError) {
 		return
 	}
 	g.EngineWarnings = append(g.EngineWarnings, warning)
+}
+
+type PackageDeprecationWarning struct {
+	Package string `json:"package"`
+	Message string `json:"message"`
+}
+
+func (g *Graph) AddDeprecationWarning(pkg Package, deprecated any) {
+	if deprecated == nil {
+		return
+	}
+	g.DeprecationWarnings = append(g.DeprecationWarnings, PackageDeprecationWarning{
+		Package: pkg.Key(),
+		Message: fmt.Sprint(deprecated),
+	})
 }
 
 func clonePackages(in map[string]Package) map[string]Package {

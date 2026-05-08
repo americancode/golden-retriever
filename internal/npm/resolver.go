@@ -163,6 +163,7 @@ type resolverSnapshot struct {
 	peersByID      map[string]map[string]*Edge
 	peerConflicts  []PeerConflict
 	engineWarnings []*PackageEngineError
+	deprecations   []PackageDeprecationWarning
 }
 
 type graphSnapshot struct {
@@ -184,6 +185,7 @@ func (r *Resolver) snapshot() resolverSnapshot {
 		peersByID:      map[string]map[string]*Edge{},
 		peerConflicts:  append([]PeerConflict(nil), r.graph.PeerConflicts...),
 		engineWarnings: append([]*PackageEngineError(nil), r.graph.EngineWarnings...),
+		deprecations:   append([]PackageDeprecationWarning(nil), r.graph.DeprecationWarnings...),
 	}
 	for id, node := range r.graph.nodes {
 		s.parentByID[id] = node.Parent
@@ -200,6 +202,7 @@ func (r *Resolver) restore(s resolverSnapshot) {
 	r.graph.nodes = s.graph.nodes
 	r.graph.PeerConflicts = s.peerConflicts
 	r.graph.EngineWarnings = s.engineWarnings
+	r.graph.DeprecationWarnings = s.deprecations
 	r.resolved = s.resolved
 	for id, node := range r.graph.nodes {
 		node.Parent = s.parentByID[id]
@@ -250,6 +253,7 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 	node := r.graph.AddNode(pkg)
 	r.resolved[pkg.Key()] = node
 	r.graph.AddDependency(parent, node, depName, rawSpec, depSpec, edgeType)
+	r.graph.AddDeprecationWarning(pkg, manifest.Deprecated)
 	r.mu.Unlock()
 
 	childDeps := map[string]string{}
@@ -296,6 +300,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 		return nil
 	}
 	for name, spec := range manifest.PeerDependencies {
+		spec, _ = r.overrideSpec(node, name, spec)
 		optional := manifest.PeerDependenciesMeta[name].Optional
 		target, conflict := r.findPeerTarget(node, name, spec)
 		if target != nil {

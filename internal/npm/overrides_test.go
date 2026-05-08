@@ -347,6 +347,124 @@ func TestResolverCoercesEmptyOverrideObjectToWildcard(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsInvalidOverrideSelector(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"app": "1.0.0"},
+  "overrides": {"github:npm/cli": "1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var nameErr *InvalidPackageNameError
+	if !errors.As(err, &nameErr) {
+		t.Fatalf("got %v, want InvalidPackageNameError", err)
+	}
+}
+
+func TestResolverRejectsUnsupportedOverrideSpecs(t *testing.T) {
+	tests := map[string]string{
+		"selector-file": `{"app@file:../app":{"dep":"1.0.0"}}`,
+		"value-file":    `{"dep":"file:../dep"}`,
+		"value-git":     `{"dep":"github:org/dep"}`,
+		"self-file":     `{"app":{".":"file:../app"}}`,
+	}
+	for name, overrides := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "package.json")
+			if err := os.WriteFile(input, []byte(fmt.Sprintf(`{
+  "dependencies": {"app": "1.0.0"},
+  "overrides": %s
+}`, overrides)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+			var specErr *UnsupportedSpecError
+			if !errors.As(err, &specErr) {
+				t.Fatalf("got %v, want UnsupportedSpecError", err)
+			}
+			if specErr.Type != "override" {
+				t.Fatalf("unexpected spec error: %#v", specErr)
+			}
+		})
+	}
+}
+
+func TestResolverAppliesOverrideInsideCyclicDependencyChain(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"cycle-foo": "1.0.1"},
+  "overrides": {"cycle-foo": {"cycle-foo": "2.0.0"}}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("cycle-foo@1.0.1") || !graph.Has("cycle-bar@1.0.1") || !graph.Has("cycle-baz@1.0.1") || !graph.Has("cycle-foo@2.0.0") {
+		t.Fatalf("cyclic override tree not resolved: %#v", graph.Packages())
+	}
+	rootFoo := graph.Root.Dependencies["cycle-foo"].To
+	barEdge := rootFoo.Dependencies["cycle-bar"]
+	if barEdge == nil || barEdge.To.Version != "1.0.1" {
+		t.Fatalf("cycle-foo should depend on cycle-bar@1.0.1: %#v", barEdge)
+	}
+	bazEdge := barEdge.To.Dependencies["cycle-baz"]
+	if bazEdge == nil || bazEdge.To.Version != "1.0.1" {
+		t.Fatalf("cycle-bar should depend on cycle-baz@1.0.1: %#v", bazEdge)
+	}
+	fooEdge := bazEdge.To.Dependencies["cycle-foo"]
+	if fooEdge == nil || fooEdge.To.Version != "2.0.0" || fooEdge.Spec != "2.0.0" {
+		t.Fatalf("cycle-baz should be overridden to cycle-foo@2.0.0: %#v", fooEdge)
+	}
+}
+
+func TestResolverOverrideFixesPeerConflict(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "peer-a", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "peer-d", Spec: "2.0.0", Type: EdgeProd},
+	})
+	var conflict *PeerConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("got %v, want PeerConflictError before override", err)
+	}
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"peer-a": "1.0.0", "peer-d": "2.0.0"},
+  "overrides": {"peer-a": {"peer-b": "2.0.0"}}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("peer-a@1.0.0") || !graph.Has("peer-b@2.0.0") || !graph.Has("peer-c@2.0.0") || !graph.Has("peer-d@2.0.0") {
+		t.Fatalf("override should resolve peer conflict to the b@2/c@2 set: %#v", graph.Packages())
+	}
+	peerA := findNode(t, graph, "peer-a")
+	edge := peerA.Peers["peer-b"]
+	if edge == nil || !edge.Satisfied || edge.To == nil || edge.To.Version != "2.0.0" || edge.Spec != "2.0.0" {
+		t.Fatalf("peer-a peer should be overridden to peer-b@2.0.0: %#v", edge)
+	}
+}
+
 func overrideRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +548,117 @@ func overrideRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r), serverURL(r), serverURL(r))
+		case "/cycle-foo":
+			fmt.Fprintf(w, `{
+  "name": "cycle-foo",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.0.1": {
+      "name": "cycle-foo",
+      "version": "1.0.1",
+      "dependencies": {"cycle-bar": "1.0.1"},
+      "dist": {"tarball": "%s/cycle-foo/-/cycle-foo-1.0.1.tgz"}
+    },
+    "2.0.0": {
+      "name": "cycle-foo",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/cycle-foo/-/cycle-foo-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		case "/cycle-bar":
+			fmt.Fprintf(w, `{
+  "name": "cycle-bar",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.0.1": {
+      "name": "cycle-bar",
+      "version": "1.0.1",
+      "dependencies": {"cycle-baz": "1.0.1"},
+      "dist": {"tarball": "%s/cycle-bar/-/cycle-bar-1.0.1.tgz"}
+    },
+    "2.0.0": {
+      "name": "cycle-bar",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/cycle-bar/-/cycle-bar-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		case "/cycle-baz":
+			fmt.Fprintf(w, `{
+  "name": "cycle-baz",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.0.1": {
+      "name": "cycle-baz",
+      "version": "1.0.1",
+      "dependencies": {"cycle-foo": "1.0.1"},
+      "dist": {"tarball": "%s/cycle-baz/-/cycle-baz-1.0.1.tgz"}
+    },
+    "2.0.0": {
+      "name": "cycle-baz",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/cycle-baz/-/cycle-baz-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		case "/peer-a":
+			fmt.Fprintf(w, `{
+  "name": "peer-a",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "peer-a",
+      "version": "1.0.0",
+      "peerDependencies": {"peer-b": "1.0.0"},
+      "dist": {"tarball": "%s/peer-a/-/peer-a-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/peer-b":
+			fmt.Fprintf(w, `{
+  "name": "peer-b",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "peer-b",
+      "version": "1.0.0",
+      "peerDependencies": {"peer-c": "2.0.0"},
+      "dist": {"tarball": "%s/peer-b/-/peer-b-1.0.0.tgz"}
+    },
+    "2.0.0": {
+      "name": "peer-b",
+      "version": "2.0.0",
+      "peerDependencies": {"peer-c": "2.0.0"},
+      "dist": {"tarball": "%s/peer-b/-/peer-b-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		case "/peer-c":
+			fmt.Fprintf(w, `{
+  "name": "peer-c",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "2.0.0": {
+      "name": "peer-c",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/peer-c/-/peer-c-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/peer-d":
+			fmt.Fprintf(w, `{
+  "name": "peer-d",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "2.0.0": {
+      "name": "peer-d",
+      "version": "2.0.0",
+      "peerDependencies": {"peer-b": "2.0.0"},
+      "dist": {"tarball": "%s/peer-d/-/peer-d-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}

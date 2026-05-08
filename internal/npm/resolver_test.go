@@ -529,6 +529,29 @@ func TestResolverSkipsOmittedPeerPlatformMismatch(t *testing.T) {
 	}
 }
 
+func TestClassifyLibcOutput(t *testing.T) {
+	tests := map[string]string{
+		"musl libc (x86_64)":                          "musl",
+		"ldd (Ubuntu GLIBC 2.39-0ubuntu8.4) 2.39":     "glibc",
+		"Copyright (C) 2024 Free Software Foundation": "glibc",
+		"not a libc marker":                           "",
+	}
+	for input, want := range tests {
+		if got := classifyLibcOutput(input); got != want {
+			t.Fatalf("classifyLibcOutput(%q) = %q want %q", input, got, want)
+		}
+	}
+}
+
+func TestEffectiveLibcHonorsExplicitValue(t *testing.T) {
+	if got := effectiveLibc("linux", "musl"); got != "musl" {
+		t.Fatalf("explicit libc = %q want musl", got)
+	}
+	if got := effectiveLibc("darwin", ""); got != "" {
+		t.Fatalf("non-linux auto libc = %q want empty", got)
+	}
+}
+
 func TestResolverErrorsOnEngineMismatchWhenStrict(t *testing.T) {
 	srv := engineRegistry(t)
 	defer srv.Close()
@@ -605,6 +628,47 @@ func TestResolverPrefersEngineCompatibleRangeVersion(t *testing.T) {
 	}
 	if graph.Has("engine-range-package@1.2.0") {
 		t.Fatalf("engine-incompatible latest should not be selected: %#v", graph.Packages())
+	}
+}
+
+func TestResolverRecordsDeprecationWarningForSelectedPackage(t *testing.T) {
+	srv := deprecationRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"deprecated-package": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("deprecated-package@1.0.0") {
+		t.Fatalf("deprecated package should still resolve when explicitly selected: %#v", graph.Packages())
+	}
+	if len(graph.DeprecationWarnings) != 1 {
+		t.Fatalf("expected one deprecation warning, got %#v", graph.DeprecationWarnings)
+	}
+	warning := graph.DeprecationWarnings[0]
+	if warning.Package != "deprecated-package@1.0.0" || warning.Message != "use maintained-package instead" {
+		t.Fatalf("unexpected deprecation warning: %#v", warning)
+	}
+}
+
+func TestResolverAvoidsDeprecatedRangeVersionWhenPossible(t *testing.T) {
+	srv := deprecationRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"deprecated-range-package": "^1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("deprecated-range-package@1.1.0") {
+		t.Fatalf("deprecated range candidate should be avoided when a non-deprecated version satisfies: %#v", graph.Packages())
+	}
+	if !graph.Has("deprecated-range-package@1.0.0") {
+		t.Fatalf("expected non-deprecated fallback: %#v", graph.Packages())
+	}
+	if len(graph.DeprecationWarnings) != 0 {
+		t.Fatalf("non-deprecated fallback should not warn: %#v", graph.DeprecationWarnings)
 	}
 }
 
@@ -962,6 +1026,100 @@ func TestResolvePackageJSONIncludesWorkspaceExternalDependencies(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONUsesWorkspaceWhenVersionSatisfied(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":{"packages":["packages/*"]},
+  "dependencies":{"app":"^1.0.0","consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.2.0",
+  "dependencies":{"consumer-two":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("app@1.2.0") {
+		t.Fatalf("satisfied workspace dependency should not fetch registry app tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") || !graph.Has("consumer-two@1.0.0") {
+		t.Fatalf("root and workspace external dependencies should resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONFetchesRegistryWhenWorkspaceVersionUnsatisfied(t *testing.T) {
+	srv := workspaceRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"^2.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("app@2.0.0") {
+		t.Fatalf("unsatisfied workspace dependency should fetch registry app@2.0.0: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONRejectsDuplicateWorkspaceNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, workspace := range []string{"a", "b"} {
+		workspaceDir := filepath.Join(dir, "packages", workspace)
+		if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{"name":"dup","version":"1.0.0"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"workspaces":["packages/*"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var dupErr *DuplicateWorkspaceError
+	if !errors.As(err, &dupErr) {
+		t.Fatalf("got %v, want DuplicateWorkspaceError", err)
+	}
+	if dupErr.Name != "dup" || dupErr.First == "" || dupErr.Other == "" {
+		t.Fatalf("unexpected duplicate workspace error: %#v", dupErr)
+	}
+}
+
 func TestResolverErrorsOnUnsupportedProdTransitiveSpec(t *testing.T) {
 	srv := unsupportedSpecRegistry(t)
 	defer srv.Close()
@@ -1248,6 +1406,28 @@ func peerRegistry(t *testing.T) *httptest.Server {
 	}))
 }
 
+func workspaceRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app":
+			fmt.Fprintf(w, `{
+  "name": "app",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "2.0.0": {
+      "name": "app",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/app/-/app-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
 func unsupportedSpecRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1485,6 +1665,47 @@ func engineRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func deprecationRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/deprecated-package":
+			fmt.Fprintf(w, `{
+  "name": "deprecated-package",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "deprecated-package",
+      "version": "1.0.0",
+      "deprecated": "use maintained-package instead",
+      "dist": {"tarball": "%s/deprecated-package/-/deprecated-package-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/deprecated-range-package":
+			fmt.Fprintf(w, `{
+  "name": "deprecated-range-package",
+  "dist-tags": {"latest": "1.1.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "deprecated-range-package",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/deprecated-range-package/-/deprecated-range-package-1.0.0.tgz"}
+    },
+    "1.1.0": {
+      "name": "deprecated-range-package",
+      "version": "1.1.0",
+      "deprecated": "bad version",
+      "dist": {"tarball": "%s/deprecated-range-package/-/deprecated-range-package-1.1.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}

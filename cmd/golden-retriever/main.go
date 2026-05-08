@@ -182,6 +182,7 @@ func mirror(args []string) error {
 	}
 	if !*jsonOut {
 		printEngineWarnings(graph)
+		printDeprecationWarnings(graph)
 	}
 
 	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries, false)
@@ -243,19 +244,21 @@ func mirror(args []string) error {
 
 	if *jsonOut {
 		return printJSON(struct {
-			Command        string                    `json:"command"`
-			Packages       int                       `json:"packages"`
-			Fetch          npm.FetchReport           `json:"fetch"`
-			Push           npm.PublishReport         `json:"push"`
-			TargetSync     npm.SyncTargetReport      `json:"targetSync,omitempty"`
-			TargetSynced   bool                      `json:"targetSynced"`
-			Out            string                    `json:"out"`
-			State          string                    `json:"state"`
-			TargetRegistry string                    `json:"targetRegistry"`
-			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
+			Command             string                          `json:"command"`
+			Packages            int                             `json:"packages"`
+			Fetch               npm.FetchReport                 `json:"fetch"`
+			Push                npm.PublishReport               `json:"push"`
+			TargetSync          npm.SyncTargetReport            `json:"targetSync,omitempty"`
+			TargetSynced        bool                            `json:"targetSynced"`
+			Out                 string                          `json:"out"`
+			State               string                          `json:"state"`
+			TargetRegistry      string                          `json:"targetRegistry"`
+			EngineWarnings      []*npm.PackageEngineError       `json:"engineWarnings,omitempty"`
+			DeprecationWarnings []npm.PackageDeprecationWarning `json:"deprecationWarnings,omitempty"`
 		}{
 			Command: "mirror", Packages: len(graph.Packages()), Fetch: fetchReport, Push: pushReport,
-			TargetSync: syncReport, TargetSynced: *syncTarget, Out: *out, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings,
+			TargetSync: syncReport, TargetSynced: *syncTarget, Out: *out, State: *statePath, TargetRegistry: *targetRegistry,
+			EngineWarnings: graph.EngineWarnings, DeprecationWarnings: graph.DeprecationWarnings,
 		})
 	}
 	fmt.Printf("mirror packages=%d downloaded=%d downloaded_bytes=%d local_skipped=%d target_skipped=%d fetch_failed=%d fetch_elapsed=%s pushed=%d already_present=%d push_skipped=%d push_failed=%d out=%s state=%s target=%s\n",
@@ -384,6 +387,7 @@ func fetch(args []string) error {
 	}
 	if !*jsonOut {
 		printEngineWarnings(graph)
+		printDeprecationWarnings(graph)
 	}
 
 	report, err := npm.FetchAll(ctx, client, graph.Packages(), npm.FetchOptions{
@@ -398,13 +402,14 @@ func fetch(args []string) error {
 	}
 	if *jsonOut {
 		return printJSON(struct {
-			Command        string                    `json:"command"`
-			Packages       int                       `json:"packages"`
-			Fetch          npm.FetchReport           `json:"fetch"`
-			Out            string                    `json:"out"`
-			State          string                    `json:"state"`
-			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
-		}{Command: "fetch", Packages: len(graph.Packages()), Fetch: report, Out: *out, State: *state, EngineWarnings: graph.EngineWarnings})
+			Command             string                          `json:"command"`
+			Packages            int                             `json:"packages"`
+			Fetch               npm.FetchReport                 `json:"fetch"`
+			Out                 string                          `json:"out"`
+			State               string                          `json:"state"`
+			EngineWarnings      []*npm.PackageEngineError       `json:"engineWarnings,omitempty"`
+			DeprecationWarnings []npm.PackageDeprecationWarning `json:"deprecationWarnings,omitempty"`
+		}{Command: "fetch", Packages: len(graph.Packages()), Fetch: report, Out: *out, State: *state, EngineWarnings: graph.EngineWarnings, DeprecationWarnings: graph.DeprecationWarnings})
 	}
 	fmt.Printf("packages=%d downloaded=%d downloaded_bytes=%d local_skipped=%d target_skipped=%d failed=%d elapsed=%s out=%s state=%s\n",
 		len(graph.Packages()), report.Downloaded, report.DownloadedBytes, report.Skipped, report.TargetSkipped, report.Failed, report.Elapsed, *out, *state)
@@ -463,6 +468,7 @@ func resolve(args []string) error {
 		return err
 	}
 	printEngineWarnings(graph)
+	printDeprecationWarnings(graph)
 	for _, pkg := range graph.Packages() {
 		fmt.Printf("%s@%s %s\n", pkg.Name, pkg.Version, pkg.Tarball)
 	}
@@ -596,6 +602,7 @@ func stateSyncTarget(args []string) error {
 	}
 	if !*jsonOut {
 		printEngineWarnings(graph)
+		printDeprecationWarnings(graph)
 	}
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
@@ -619,13 +626,14 @@ func stateSyncTarget(args []string) error {
 	}
 	if *jsonOut {
 		return printJSON(struct {
-			Command        string                    `json:"command"`
-			Packages       int                       `json:"packages"`
-			TargetSync     npm.SyncTargetReport      `json:"targetSync"`
-			State          string                    `json:"state"`
-			TargetRegistry string                    `json:"targetRegistry"`
-			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
-		}{Command: "state sync-target", Packages: len(graph.Packages()), TargetSync: report, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings})
+			Command             string                          `json:"command"`
+			Packages            int                             `json:"packages"`
+			TargetSync          npm.SyncTargetReport            `json:"targetSync"`
+			State               string                          `json:"state"`
+			TargetRegistry      string                          `json:"targetRegistry"`
+			EngineWarnings      []*npm.PackageEngineError       `json:"engineWarnings,omitempty"`
+			DeprecationWarnings []npm.PackageDeprecationWarning `json:"deprecationWarnings,omitempty"`
+		}{Command: "state sync-target", Packages: len(graph.Packages()), TargetSync: report, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings, DeprecationWarnings: graph.DeprecationWarnings})
 	}
 	fmt.Printf("packages=%d target_present=%d target_missing=%d failed=%d elapsed=%s state=%s target=%s\n",
 		len(graph.Packages()), report.Present, report.Missing, report.Failed, report.Elapsed, *statePath, *targetRegistry)
@@ -803,6 +811,15 @@ func printEngineWarnings(graph *npm.Graph) {
 		}
 		fmt.Fprintf(os.Stderr, "warn EBADENGINE package=%s required=%s@%s current=%s\n",
 			warning.Package, warning.Engine, warning.Wanted, warning.Current)
+	}
+}
+
+func printDeprecationWarnings(graph *npm.Graph) {
+	if graph == nil {
+		return
+	}
+	for _, warning := range graph.DeprecationWarnings {
+		fmt.Fprintf(os.Stderr, "warn deprecated package=%s message=%s\n", warning.Package, warning.Message)
 	}
 }
 
