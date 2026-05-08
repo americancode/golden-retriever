@@ -75,14 +75,18 @@ func LoadLockfile(path string) (*Graph, error) {
 	g := NewGraph()
 	if len(lock.Packages) > 0 {
 		for loc, pkg := range lock.Packages {
-			if loc == "" || pkg.Version == "" || pkg.Resolved == "" {
+			if loc == "" || pkg.Version == "" {
 				continue
 			}
 			name := pkg.Name
 			if name == "" {
 				name = nameFromNodeModulesPath(loc)
 			}
-			g.Add(Package{Name: name, Version: pkg.Version, Tarball: pkg.Resolved, Integrity: pkg.Integrity})
+			resolved := pkg.Resolved
+			if resolved == "" {
+				resolved = defaultTarballURL(name, pkg.Version)
+			}
+			g.Add(Package{Name: name, Version: pkg.Version, Tarball: resolved, Integrity: pkg.Integrity})
 		}
 		return g, nil
 	}
@@ -94,12 +98,29 @@ func LoadLockfile(path string) (*Graph, error) {
 }
 
 func walkLockDependency(g *Graph, name string, pkg lockPackage) {
-	if pkg.Version != "" && pkg.Resolved != "" {
-		g.Add(Package{Name: name, Version: pkg.Version, Tarball: pkg.Resolved, Integrity: pkg.Integrity})
+	if pkg.Version != "" {
+		resolved := pkg.Resolved
+		if resolved == "" {
+			resolved = defaultTarballURL(name, pkg.Version)
+		}
+		g.Add(Package{Name: name, Version: pkg.Version, Tarball: resolved, Integrity: pkg.Integrity})
 	}
 	for childName, child := range pkg.NestedDependencies {
 		walkLockDependency(g, childName, child)
 	}
+}
+
+func defaultTarballURL(name, version string) string {
+	if name == "" || version == "" {
+		return ""
+	}
+	baseName := name
+	if strings.HasPrefix(name, "@") {
+		if _, after, ok := strings.Cut(name, "/"); ok {
+			baseName = after
+		}
+	}
+	return DefaultRegistry + "/" + name + "/-/" + baseName + "-" + version + ".tgz"
 }
 
 func nameFromNodeModulesPath(path string) string {

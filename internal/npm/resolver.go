@@ -235,7 +235,9 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 	r.mu.Unlock()
 
 	childDeps := map[string]string{}
-	mergeDeps(childDeps, manifest.Dependencies)
+	if err := mergeDeps(childDeps, manifest.Dependencies); err != nil {
+		return nil, err
+	}
 	bundled := bundledDependencyNames(manifest)
 	childDeps = filterBundledDependencies(childDeps, bundled)
 	if r.Options.IncludeOptional {

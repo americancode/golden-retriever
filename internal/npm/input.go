@@ -3,6 +3,7 @@ package npm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,16 @@ type packageJSON struct {
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 	Overrides            json.RawMessage   `json:"overrides"`
 	Workspaces           any               `json:"workspaces"`
+}
+
+type UnsupportedSpecError struct {
+	Name string
+	Spec string
+	Type string
+}
+
+func (e *UnsupportedSpecError) Error() string {
+	return fmt.Sprintf("%s dependency %s uses unsupported spec %q", e.Type, e.Name, e.Spec)
 }
 
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
@@ -73,12 +84,21 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	}
 
 	var deps []DependencyRequest
-	deps = appendDeps(deps, root.Dependencies, EdgeProd)
+	deps, err = appendDeps(deps, root.Dependencies, EdgeProd)
+	if err != nil {
+		return nil, err
+	}
 	if opts.IncludeDev {
-		deps = appendDeps(deps, root.DevDependencies, EdgeDev)
+		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if opts.IncludeOptional {
-		deps = appendDeps(deps, root.OptionalDependencies, EdgeOptional)
+		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	r := &Resolver{Client: client, Options: opts, Overrides: overrides}
@@ -103,21 +123,26 @@ func rootDependencySpecs(root packageJSON) map[string]string {
 	return specs
 }
 
-func mergeDeps(dst, src map[string]string) {
+func mergeDeps(dst, src map[string]string) error {
 	for name, spec := range src {
 		if isRegistrySpec(spec) {
 			dst[name] = spec
+			continue
 		}
+		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(EdgeProd)}
 	}
+	return nil
 }
 
-func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) []DependencyRequest {
+func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) ([]DependencyRequest, error) {
 	for name, spec := range src {
 		if isRegistrySpec(spec) {
 			dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
+			continue
 		}
+		return nil, &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
 	}
-	return dst
+	return dst, nil
 }
 
 func isRegistrySpec(spec string) bool {
@@ -135,4 +160,9 @@ func isRegistrySpec(spec string) bool {
 		}
 	}
 	return true
+}
+
+func isUnsupportedSpec(err error) bool {
+	var specErr *UnsupportedSpecError
+	return errors.As(err, &specErr)
 }

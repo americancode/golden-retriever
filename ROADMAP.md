@@ -15,6 +15,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - `resolve` command prints the resolved package tarball set.
 - Lockfile v1 nested dependency import and v2/v3 `packages` import work for `package-lock.json` and `npm-shrinkwrap.json`.
 - Directory inputs prioritize `npm-shrinkwrap.json` over `package-lock.json`, then fall back to `package.json`.
+- Lockfile imports derive default registry tarball URLs for registry package entries that omit `resolved`, while preserving integrity metadata.
+- `package.json` inputs now fail explicitly on unsupported dependency specs such as `file:`, `link:`, git, hosted git, tarball URL, and `workspace:` specs instead of silently omitting them.
 - `package.json` registry dependency walking works for basic registry semver specs.
 - npm alias specs like `npm:pkg@range` are supported for tarball acquisition.
 - Range support now covers more npm-style cases, including partial versions, hyphen ranges, prerelease ordering, and deprecated-version avoidance.
@@ -87,8 +89,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Expand bundled dependency parity for complete metadata, legacy bundling fixtures, and root bundler cases.
 - Finish npm `--omit` / `--include` parity edge cases, including engine/platform check interactions.
 - Support `workspaces`.
-- Support `workspace:` specs if needed for package tree inputs.
-- Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs, or explicitly report unsupported specs with parity tests.
+- Support `workspace:` specs if needed for package tree inputs, or keep explicit unsupported errors with parity tests.
+- Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs where required, or continue hardening explicit unsupported errors with parity tests.
 - Add `libc` platform filtering.
 - Finish `engines` handling for warning/report behavior and omit/include interactions.
 - Support deprecation metadata handling where npm uses it for selection or warnings.
@@ -175,8 +177,8 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 
 - Lockfile and shrinkwrap parity from `workspaces/arborist/test/shrinkwrap.js` and `spec-from-lock.js`:
   - Expand ancient lockfile shapes beyond current v1/v2/v3 import coverage.
-  - Handle package entries missing `dependencies`, `resolved`, or `integrity`.
-  - Preserve/derive integrity when lock metadata only has one of `resolved` or `integrity`.
+  - Handle package entries missing `dependencies` or `integrity`.
+  - Expand lock metadata derivation when entries only have one of `resolved` or `integrity`, especially non-default registries.
   - Ignore malformed lockfiles or fail deterministically according to npm-compatible input mode.
   - Resolve from lock metadata for aliased packages and scoped packages.
   - Decide and test whether hidden lockfiles under `node_modules/.package-lock.json` are intentionally unsupported.

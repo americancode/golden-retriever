@@ -112,3 +112,48 @@ func TestLoadInputDirectoryPrioritizesShrinkwrap(t *testing.T) {
 		t.Fatalf("directory input should prioritize shrinkwrap: %#v", graph.Packages())
 	}
 }
+
+func TestLoadLockfileDerivesMissingResolvedForRegistryPackages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/a": {
+      "version": "1.0.0",
+      "integrity": "sha512-a"
+    },
+    "node_modules/@scope/b": {
+      "version": "2.0.0",
+      "integrity": "sha512-b"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs := graph.Packages()
+	if len(pkgs) != 2 {
+		t.Fatalf("got %d packages, want 2: %#v", len(pkgs), pkgs)
+	}
+	got := map[string]Package{}
+	for _, pkg := range pkgs {
+		got[pkg.Key()] = pkg
+	}
+	if got["a@1.0.0"].Tarball != "https://registry.npmjs.org/a/-/a-1.0.0.tgz" {
+		t.Fatalf("a tarball = %s", got["a@1.0.0"].Tarball)
+	}
+	if got["@scope/b@2.0.0"].Tarball != "https://registry.npmjs.org/@scope/b/-/b-2.0.0.tgz" {
+		t.Fatalf("scoped tarball = %s", got["@scope/b@2.0.0"].Tarball)
+	}
+	if got["@scope/b@2.0.0"].Integrity != "sha512-b" {
+		t.Fatalf("integrity not preserved: %#v", got["@scope/b@2.0.0"])
+	}
+}

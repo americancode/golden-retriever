@@ -383,6 +383,54 @@ func TestResolverRollsBackOptionalMetadependencyFailure(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONErrorsOnUnsupportedRootSpec(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"local":"file:../local"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var specErr *UnsupportedSpecError
+	if !errors.As(err, &specErr) {
+		t.Fatalf("got %v, want UnsupportedSpecError", err)
+	}
+	if specErr.Name != "local" || specErr.Spec != "file:../local" || specErr.Type != "prod" {
+		t.Fatalf("unexpected spec error: %#v", specErr)
+	}
+}
+
+func TestResolverErrorsOnUnsupportedProdTransitiveSpec(t *testing.T) {
+	srv := unsupportedSpecRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.Resolve(context.Background(), map[string]string{"prod-unsupported": "1.0.0"})
+	var specErr *UnsupportedSpecError
+	if !errors.As(err, &specErr) {
+		t.Fatalf("got %v, want UnsupportedSpecError", err)
+	}
+	if specErr.Name != "local-child" {
+		t.Fatalf("unexpected spec error: %#v", specErr)
+	}
+}
+
+func TestResolverSkipsUnsupportedOptionalTransitiveSpec(t *testing.T) {
+	srv := unsupportedSpecRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"optional-unsupported": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("optional-unsupported@1.0.0") {
+		t.Fatalf("root should resolve: %#v", graph.Packages())
+	}
+	if graph.Has("optional-wrapper@1.0.0") {
+		t.Fatalf("unsupported optional subtree should be rolled back: %#v", graph.Packages())
+	}
+}
+
 func peerRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +476,55 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"host": "^1.0.0"},
       "peerDependenciesMeta": {"host": {"optional": true}},
       "dist": {"tarball": "%s/optional-plugin/-/optional-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func unsupportedSpecRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/prod-unsupported":
+			fmt.Fprintf(w, `{
+  "name": "prod-unsupported",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "prod-unsupported",
+      "version": "1.0.0",
+      "dependencies": {"local-child": "file:../local-child"},
+      "dist": {"tarball": "%s/prod-unsupported/-/prod-unsupported-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-unsupported":
+			fmt.Fprintf(w, `{
+  "name": "optional-unsupported",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-unsupported",
+      "version": "1.0.0",
+      "optionalDependencies": {"optional-wrapper": "1.0.0"},
+      "dist": {"tarball": "%s/optional-unsupported/-/optional-unsupported-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "optional-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"local-child": "file:../local-child"},
+      "dist": {"tarball": "%s/optional-wrapper/-/optional-wrapper-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
