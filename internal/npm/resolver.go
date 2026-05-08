@@ -3,6 +3,7 @@ package npm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -43,7 +44,8 @@ type resolveCall struct {
 
 func (r *Resolver) Resolve(ctx context.Context, deps map[string]string) (*Graph, error) {
 	requests := make([]DependencyRequest, 0, len(deps))
-	for name, spec := range deps {
+	for _, name := range sortedDependencyNames(deps) {
+		spec := deps[name]
 		requests = append(requests, DependencyRequest{Name: name, Spec: spec, Type: EdgeProd})
 	}
 	return r.ResolveRoot(ctx, requests)
@@ -66,7 +68,8 @@ func (r *Resolver) ResolveRoot(ctx context.Context, deps []DependencyRequest) (*
 
 func (r *Resolver) resolveDeps(ctx context.Context, parent *Node, deps map[string]string, edgeType EdgeType) error {
 	requests := make([]DependencyRequest, 0, len(deps))
-	for name, spec := range deps {
+	for _, name := range sortedDependencyNames(deps) {
+		spec := deps[name]
 		requests = append(requests, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
 	}
 	if edgeType == EdgeOptional {
@@ -104,6 +107,14 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	actualName, wanted, err := parsePackageSpec(name, spec)
 	if err != nil {
 		return nil, err
+	}
+	if canReuseExistingForSpec(wanted) {
+		if existing := r.findExistingSatisfyingNode(actualName, wanted); existing != nil {
+			r.mu.Lock()
+			r.graph.AddDependency(parent, existing, name, rawSpec, spec, edgeType)
+			r.mu.Unlock()
+			return existing, nil
+		}
 	}
 	if err := r.acquireFetchSlot(ctx); err != nil {
 		return nil, err
@@ -257,6 +268,11 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 		return nil, fmt.Errorf("%s@%s peer dependency: %w", pkgName, pkgVersion, err)
 	}
 	return node, nil
+}
+
+func canReuseExistingForSpec(spec string) bool {
+	spec = strings.TrimSpace(spec)
+	return spec != "" && spec != "latest" && !registryTagLike(spec)
 }
 
 func (r *Resolver) overrideSpec(parent *Node, name, spec string) (string, *OverrideRule) {

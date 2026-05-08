@@ -1,6 +1,9 @@
 package npm
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPickVersionRanges(t *testing.T) {
 	pack := &Packument{
@@ -133,6 +136,44 @@ func TestPickVersionPrefersEngineCompatibleManifest(t *testing.T) {
 	}
 }
 
+func TestPickVersionHonorsBeforeTime(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "2.0.0", "beta": "2.0.0"},
+		Time: map[string]string{
+			"1.0.0": "2024-01-01T00:00:00Z",
+			"1.1.0": "2024-02-01T00:00:00Z",
+			"2.0.0": "2024-03-01T00:00:00Z",
+		},
+		Versions: map[string]VersionManifest{
+			"1.0.0": {},
+			"1.1.0": {},
+			"2.0.0": {},
+		},
+	}
+	before := time.Date(2024, 2, 15, 0, 0, 0, 0, time.UTC)
+
+	got, err := pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{Before: before})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("range got %s want 1.1.0", got)
+	}
+
+	got, err = pickVersionWithOptions(pack, "latest", ResolveOptions{Before: before})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("tag fallback got %s want highest version before latest publish time", got)
+	}
+
+	if _, err := pickVersionWithOptions(pack, "2.0.0", ResolveOptions{Before: before}); err == nil {
+		t.Fatalf("exact version published after before time should fail")
+	}
+}
+
 func TestPrereleaseRangesRequireMatchingTupleComparator(t *testing.T) {
 	tests := []struct {
 		version string
@@ -197,6 +238,52 @@ func TestTildePartialRangesMatchNpmSemver(t *testing.T) {
 		{"1.3.0", "~1.2.x", false},
 		{"1.3.0", "~1", true},
 		{"2.0.0", "~1", false},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestPartialComparatorRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"1.2.0", ">1.2", false},
+		{"1.2.9", ">1.2", false},
+		{"1.3.0", ">1.2", true},
+		{"1.2.0", ">=1.2", true},
+		{"1.9.9", ">1", false},
+		{"2.0.0", ">1", true},
+		{"1.2.9", "<=1.2", true},
+		{"1.3.0", "<=1.2", false},
+		{"1.9.9", "<=1", true},
+		{"2.0.0", "<=1", false},
+		{"1.0.0", "<1", false},
+		{"0.9.9", "<1", true},
+		{"2.0.0", "<=1.x", false},
+		{"1.9.9", "<=1.x", true},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestHyphenRangesPreservePrereleaseLowerBound(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"1.2.3-beta.1", "1.2.3-beta.1 - 1.2.3", true},
+		{"1.2.3-alpha.1", "1.2.3-beta.1 - 1.2.3", false},
+		{"1.2.3", "1.2.3-beta.1 - 1.2.3", true},
+		{"1.2.4", "1.2.3-beta.1 - 1.2.3", false},
 	}
 	for _, tc := range tests {
 		if got := satisfies(tc.version, tc.spec); got != tc.want {

@@ -69,6 +69,7 @@ type Packument struct {
 	Name     string                     `json:"name"`
 	DistTags map[string]string          `json:"dist-tags"`
 	Versions map[string]VersionManifest `json:"versions"`
+	Time     map[string]string          `json:"time"`
 }
 
 type VersionManifest struct {

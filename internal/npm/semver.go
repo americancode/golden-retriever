@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -64,23 +65,29 @@ func pickVersionWithOptions(pack *Packument, spec string, opts ResolveOptions) (
 		spec = "latest"
 	}
 	if tag, ok := pack.DistTags[spec]; ok {
-		return tag, nil
+		if versionBefore(pack, tag, opts.Before) {
+			return tag, nil
+		}
+		return pickVersionWithOptions(pack, "<="+tag, opts)
 	}
 	if _, ok := pack.Versions[spec]; ok {
+		if !versionBefore(pack, spec, opts.Before) {
+			return "", fmt.Errorf("no version of %s satisfies %q before %s", pack.Name, spec, opts.Before.Format(time.RFC3339))
+		}
 		return spec, nil
 	}
 
 	rangeSpec := spec
 	defaultVer := pack.DistTags["latest"]
 	if defaultVer != "" && satisfies(defaultVer, rangeSpec) {
-		if manifest, ok := pack.Versions[defaultVer]; ok && manifest.Deprecated == nil && manifestEngineOK(manifest, opts) {
+		if manifest, ok := pack.Versions[defaultVer]; ok && versionBefore(pack, defaultVer, opts.Before) && manifest.Deprecated == nil && manifestEngineOK(manifest, opts) {
 			return defaultVer, nil
 		}
 	}
 
 	versions := make([]string, 0, len(pack.Versions))
 	for version, manifest := range pack.Versions {
-		if parseVersion(version).ok {
+		if parseVersion(version).ok && versionBefore(pack, version, opts.Before) {
 			versions = append(versions, version)
 			_ = manifest
 		}
@@ -113,10 +120,25 @@ func pickVersionWithOptions(pack *Packument, spec string, opts ResolveOptions) (
 	return "", fmt.Errorf("no version of %s satisfies %q", pack.Name, spec)
 }
 
+func versionBefore(pack *Packument, version string, before time.Time) bool {
+	if before.IsZero() || pack == nil || pack.Time == nil {
+		return true
+	}
+	raw := pack.Time[version]
+	if raw == "" {
+		return true
+	}
+	published, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return true
+	}
+	return !published.After(before)
+}
+
 func pickVersionSatisfyingAll(pack *Packument, specs []string, opts ResolveOptions) (string, bool) {
 	versions := make([]string, 0, len(pack.Versions))
 	for version := range pack.Versions {
-		if parseVersion(version).ok {
+		if parseVersion(version).ok && versionBefore(pack, version, opts.Before) {
 			versions = append(versions, version)
 		}
 	}
@@ -350,6 +372,29 @@ func comparatorTarget(spec string) string {
 }
 
 func compareOp(version, op, target string) bool {
+	if bounds, ok := partialComparatorBounds(target); ok {
+		switch op {
+		case ">=":
+			return compareVersion(version, bounds.lower) >= 0
+		case ">":
+			if !bounds.hasUpper {
+				return false
+			}
+			return compareVersion(version, bounds.upper) >= 0
+		case "<":
+			return compareVersion(version, bounds.lower) < 0
+		case "<=":
+			if !bounds.hasUpper {
+				return true
+			}
+			return compareVersion(version, bounds.upper) < 0
+		default:
+			if compareVersion(version, bounds.lower) < 0 {
+				return false
+			}
+			return !bounds.hasUpper || compareVersion(version, bounds.upper) < 0
+		}
+	}
 	target = completeComparatorTarget(target, op)
 	cmp := compareVersion(version, target)
 	switch op {
@@ -364,6 +409,42 @@ func compareOp(version, op, target string) bool {
 	default:
 		return cmp == 0
 	}
+}
+
+type partialBounds struct {
+	lower    string
+	upper    string
+	hasUpper bool
+}
+
+func partialComparatorBounds(target string) (partialBounds, bool) {
+	m := partialRe.FindStringSubmatch(strings.TrimSpace(target))
+	if m == nil {
+		return partialBounds{}, false
+	}
+	if m[2] != "" && m[3] != "" && !isWild(m[1]) && !isWild(m[2]) && !isWild(m[3]) {
+		return partialBounds{}, false
+	}
+	if isWild(m[1]) {
+		return partialBounds{lower: "0.0.0"}, true
+	}
+	major := atoi(m[1])
+	if m[2] == "" || isWild(m[2]) {
+		return partialBounds{
+			lower:    fmt.Sprintf("%d.0.0", major),
+			upper:    fmt.Sprintf("%d.0.0", major+1),
+			hasUpper: true,
+		}, true
+	}
+	minor := atoi(m[2])
+	if m[3] == "" || isWild(m[3]) {
+		return partialBounds{
+			lower:    fmt.Sprintf("%d.%d.0", major, minor),
+			upper:    fmt.Sprintf("%d.%d.0", major, minor+1),
+			hasUpper: true,
+		}, true
+	}
+	return partialBounds{}, false
 }
 
 func satisfiesCaret(version, base string) bool {
@@ -502,7 +583,7 @@ func lowerHyphenBound(spec string) string {
 	if !v.ok {
 		return spec
 	}
-	return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	return versionLowerBound(v)
 }
 
 func upperHyphenBound(spec string) (string, bool) {

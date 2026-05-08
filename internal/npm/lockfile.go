@@ -88,7 +88,6 @@ func LoadLockfile(path string) (*Graph, error) {
 			}
 			g.Add(Package{Name: name, Version: pkg.Version, Tarball: resolved, Integrity: pkg.Integrity})
 		}
-		return g, nil
 	}
 
 	for name, pkg := range lock.Dependencies {

@@ -676,6 +676,26 @@ func TestResolverRollsBackOptionalMetadependencyFailure(t *testing.T) {
 	}
 }
 
+func TestResolverOptionalFailurePreservesSharedRequiredDependency(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared-required", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "optional-shared-root", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("shared-required@1.0.0") || !graph.Has("optional-shared-root@1.0.0") {
+		t.Fatalf("required packages should remain after optional subtree failure: %#v", graph.Packages())
+	}
+	if graph.Has("optional-shared-wrapper@1.0.0") || graph.Has("missing-meta@1.0.0") {
+		t.Fatalf("failed optional subtree should be removed: %#v", graph.Packages())
+	}
+}
+
 func TestResolvePackageJSONErrorsOnUnsupportedRootSpec(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "package.json")
@@ -705,6 +725,36 @@ func TestResolvePackageJSONErrorsOnInvalidPackageName(t *testing.T) {
 	}
 	if nameErr.Name != "bad space" || nameErr.Spec != "^1.0.0" {
 		t.Fatalf("unexpected name error: %#v", nameErr)
+	}
+}
+
+func TestResolvePackageJSONErrorsOnInvalidPackageNameForms(t *testing.T) {
+	tests := []string{
+		"node_modules",
+		"favicon.ico",
+		"@scope",
+		"@scope/",
+		"@scope/.hidden",
+		"_private",
+		"-dash",
+		".dot",
+	}
+	for _, depName := range tests {
+		t.Run(depName, func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "package.json")
+			if err := os.WriteFile(input, []byte(fmt.Sprintf(`{"dependencies":{%q:"^1.0.0"}}`, depName)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+			var nameErr *InvalidPackageNameError
+			if !errors.As(err, &nameErr) {
+				t.Fatalf("got %v, want InvalidPackageNameError", err)
+			}
+			if nameErr.Name != depName || nameErr.Spec != "^1.0.0" {
+				t.Fatalf("unexpected name error: %#v", nameErr)
+			}
+		})
 	}
 }
 
@@ -740,14 +790,42 @@ func TestResolvePackageJSONErrorsOnInvalidAliasTargetName(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONErrorsOnUnsupportedAliasTargetSpec(t *testing.T) {
+	tests := map[string]string{
+		"file":   "npm:file:../local",
+		"remote": "npm:https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
+		"nested": "npm:npm:real@1.0.0",
+	}
+	for name, spec := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "package.json")
+			if err := os.WriteFile(input, []byte(fmt.Sprintf(`{"dependencies":{"alias":%q}}`, spec)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+			var specErr *UnsupportedSpecError
+			if !errors.As(err, &specErr) {
+				t.Fatalf("got %v, want UnsupportedSpecError", err)
+			}
+			if specErr.Name != "alias" || specErr.Spec != spec || specErr.Type != "prod" {
+				t.Fatalf("unexpected spec error: %#v", specErr)
+			}
+		})
+	}
+}
+
 func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 	tests := map[string]string{
 		"workspace": "workspace:*",
 		"link":      "link:../local",
 		"git":       "git+https://github.com/acme/pkg.git",
 		"hosted":    "github:acme/pkg",
+		"gist":      "gist:acme/1234",
+		"ssh-url":   "ssh://git@github.com/acme/pkg.git",
 		"tarball":   "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
 		"directory": "../local",
+		"windows":   "C:\\local\\pkg",
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -765,6 +843,19 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 				t.Fatalf("unexpected spec error: %#v", specErr)
 			}
 		})
+	}
+}
+
+func TestResolvePackageJSONErrorsOnWorkspacesRoot(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"workspaces":["packages/*"],"dependencies":{"pkg":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var workspaceErr *UnsupportedWorkspacesError
+	if !errors.As(err, &workspaceErr) {
+		t.Fatalf("got %v, want UnsupportedWorkspacesError", err)
 	}
 }
 
@@ -797,6 +888,45 @@ func TestResolverSkipsUnsupportedOptionalTransitiveSpec(t *testing.T) {
 	}
 	if graph.Has("optional-wrapper@1.0.0") {
 		t.Fatalf("unsupported optional subtree should be rolled back: %#v", graph.Packages())
+	}
+}
+
+func TestResolverReusesExistingSatisfyingDependency(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared", Spec: "1.2.0", Type: EdgeProd},
+		{Name: "consumer", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared@1.3.0") {
+		t.Fatalf("existing satisfying dependency should be reused instead of fetching newer range match: %#v", graph.Packages())
+	}
+	if !graph.Has("shared@1.2.0") || !graph.Has("consumer@1.0.0") {
+		t.Fatalf("expected shared@1.2.0 and consumer@1.0.0: %#v", graph.Packages())
+	}
+	consumer := findNode(t, graph, "consumer")
+	edge := consumer.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("consumer should point at existing shared@1.2.0 edge: %#v", edge)
+	}
+}
+
+func TestSortedDependencyNamesDeterministic(t *testing.T) {
+	got := sortedDependencyNames(map[string]string{
+		"zeta":  "1.0.0",
+		"alpha": "1.0.0",
+		"mid":   "1.0.0",
+	})
+	want := []string{"alpha", "mid", "zeta"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
 	}
 }
 
@@ -1053,6 +1183,44 @@ func optionalFailureRegistry(t *testing.T) *httptest.Server {
       "version": "1.0.0",
       "dependencies": {"missing-meta": "1.0.0"},
       "dist": {"tarball": "%s/optional-wrapper/-/optional-wrapper-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-shared-root":
+			fmt.Fprintf(w, `{
+  "name": "optional-shared-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-shared-root",
+      "version": "1.0.0",
+      "optionalDependencies": {"optional-shared-wrapper": "1.0.0"},
+      "dist": {"tarball": "%s/optional-shared-root/-/optional-shared-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-shared-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "optional-shared-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-shared-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"shared-required": "1.0.0", "missing-meta": "1.0.0"},
+      "dist": {"tarball": "%s/optional-shared-wrapper/-/optional-shared-wrapper-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/shared-required":
+			fmt.Fprintf(w, `{
+  "name": "shared-required",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "shared-required",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/shared-required/-/shared-required-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -1331,6 +1499,46 @@ func bundleRegistry(t *testing.T, bundleField string) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func dedupeRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/consumer":
+			fmt.Fprintf(w, `{
+  "name": "consumer",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "consumer",
+      "version": "1.0.0",
+      "dependencies": {"shared": "^1.0.0"},
+      "dist": {"tarball": "%s/consumer/-/consumer-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/shared":
+			fmt.Fprintf(w, `{
+  "name": "shared",
+  "dist-tags": {"latest": "1.3.0"},
+  "versions": {
+    "1.2.0": {
+      "name": "shared",
+      "version": "1.2.0",
+      "dist": {"tarball": "%s/shared/-/shared-1.2.0.tgz"}
+    },
+    "1.3.0": {
+      "name": "shared",
+      "version": "1.3.0",
+      "dist": {"tarball": "%s/shared/-/shared-1.3.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}

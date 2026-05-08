@@ -14,15 +14,24 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - `fetch` command resolves/imports a package set and downloads tarballs.
 - `resolve` command prints the resolved package tarball set.
 - Lockfile v1 nested dependency import and v2/v3 `packages` import work for `package-lock.json` and `npm-shrinkwrap.json`.
+- Lockfile imports merge v2/v3 `packages` metadata with legacy `dependencies` metadata so incomplete package maps still contribute tarballs.
+- Ancient dependency-only lockfiles without `lockfileVersion` import through legacy `dependencies` metadata.
 - Directory inputs prioritize `npm-shrinkwrap.json` over `package-lock.json`, then fall back to `package.json`.
+- Hidden installed-tree lockfiles under `node_modules/.package-lock.json` are intentionally ignored for directory inputs because this tool mirrors source package inputs, not existing `node_modules` trees.
 - Lockfile imports derive default registry tarball URLs for registry package entries that omit `resolved`, while preserving integrity metadata.
-- `package.json` inputs now fail explicitly on invalid package names, invalid registry tag names, and unsupported dependency specs such as `file:`, `link:`, git, hosted git, directory, tarball URL, and `workspace:` specs instead of silently omitting them.
+- Lockfile dependency metadata also derives default registry tarball URLs when dependency entries omit `resolved`.
+- Lockfile package entries with alias paths use the manifest `name` when present, so aliased registry packages acquire the real tarball name/version.
+- `package.json` inputs now fail explicitly on invalid package names, including npm reserved names and malformed scoped names, invalid registry tag names, and unsupported dependency specs such as `file:`, `link:`, git, hosted git, SSH/SVN URL, directory, Windows path, tarball URL, non-registry alias targets, nested aliases, and `workspace:` specs instead of silently omitting them.
+- Workspace roots fail with a typed unsupported-workspaces error until full workspace resolution is implemented.
 - `package.json` registry dependency walking works for basic registry semver specs.
 - npm alias specs like `npm:pkg@range` are supported for tarball acquisition.
-- Range support now covers more npm-style cases, including partial versions, caret and tilde partial ranges, hyphen ranges, prerelease ordering, wildcard range handling, and deprecated-version avoidance.
+- Manifest selection supports npm-style `before` cutoff handling for dist-tags, exact versions, ranges, and combined peer version selection via `--before` / `NPM_BEFORE`.
+- Range support now covers more npm-style cases, including partial versions, partial comparator ranges, caret and tilde partial ranges, hyphen ranges with prerelease lower bounds, prerelease ordering, wildcard range handling, and deprecated-version avoidance.
 - Registry packument requests are coalesced so concurrent requests for the same package share one in-flight fetch.
 - Dependency resolution now resolves independent child dependencies concurrently.
 - Resolved graphs now retain root placement, dependency edges, edge types, and peer dependency edges in addition to the flat tarball set.
+- Dependency resolution reuses already-resolved package nodes when they satisfy later registry ranges, reducing over-fetching versus npm's deduped tree behavior.
+- Dependency request construction is deterministic for map-backed root and child dependency metadata, preventing run-to-run drift in the resolved tarball set.
 - Non-optional peer dependencies can be auto-placed at the parent location when no ancestor satisfies them.
 - Optional peer dependencies are recorded without auto-installing when unsatisfied.
 - Optional peer dependency conflicts are not treated as problem conflicts in normal mode, while `--strict-peer-deps` still fails them.
@@ -38,6 +47,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Resolver applies `engines.node` checks when `--node-version` is provided: manifest selection prefers engine-compatible range matches, strict mode fails incompatible required packages, while incompatible optional packages are skipped.
 - Omitted dev, optional, and peer dependencies are not resolved and therefore skip engine/platform install checks for those omitted dependency types.
 - Resolver ignores failed optional dependency resolution and rolls back failed optional subtrees so missing optional packages do not enter the tarball set.
+- Optional subtree rollback preserves packages already required by non-optional edges when a later optional branch fails.
 - Semver prerelease range handling now follows npm's same-version-tuple rule for prerelease candidates.
 - Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, version-qualified parent selectors, more-specific child selectors, nested and top-level `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies, devDependencies, optionalDependencies, and peerDependencies.
 - Override empty strings and empty override objects are coerced to wildcard `*`, matching npm Arborist override behavior.
@@ -86,23 +96,23 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Port npm manifest selection behavior from `npm-pick-manifest`.
 - Replace the current minimal semver implementation with npm-compatible semver behavior.
 - Expand alias handling beyond registry aliases if npm requires it.
-- Continue hardening dist-tags, exact versions, ranges, prereleases, hyphen ranges, and OR ranges against npm parity fixtures.
+- Continue hardening dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, and remaining comparator edge cases against npm parity fixtures.
 - Continue hardening `overrides`, including full selector semantics and npm parity fixtures.
 - Continue hardening `peerDependencies`.
 - Continue hardening `peerDependenciesMeta.optional`.
 - Continue reproducing npm Arborist peer conflict behavior, advanced peer set grouping, and strict/legacy peer mode edge cases.
-- Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
+- Finish optional dependency shared-subtree semantics from Arborist `optional-set.js` beyond current rollback and shared-required preservation coverage.
 - Expand bundled dependency parity for complete metadata, legacy bundling fixtures, and root bundler cases.
 - Finish npm `--omit` / `--include` parity edge cases beyond current dev/optional/peer engine and platform check coverage.
-- Support `workspaces`.
+- Support `workspaces`; current behavior is an explicit typed unsupported-workspaces error.
 - Support `workspace:` specs if needed for package tree inputs, or keep explicit unsupported errors with parity tests.
 - Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs where required, or continue hardening explicit unsupported errors with parity tests.
 - Continue hardening platform filter parity with npm fixtures, including automatic libc detection if needed.
 - Finish `engines` handling for warning/report behavior and omit/include interactions.
 - Support deprecation metadata handling where npm uses it for selection or warnings.
-- Finish ancient lockfile edge cases and incomplete lock metadata behavior.
+- Finish ancient lockfile edge cases and incomplete lock metadata behavior beyond current dependency-only and missing-resolved coverage.
 - Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
-- Model remaining npm config that affects resolution, especially prefer-dedupe and install strategy.
+- Model remaining npm config that affects resolution, especially prefer-dedupe and install strategy, beyond current existing-node range reuse.
 
 ## Acquisition Performance Work
 
@@ -177,12 +187,12 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
   - Overrides inside cyclic dependency chains and overrides that fix peer ERESOLVE cases.
 
 - Lockfile and shrinkwrap parity from `workspaces/arborist/test/shrinkwrap.js` and `spec-from-lock.js`:
-  - Expand ancient lockfile shapes beyond current v1/v2/v3 import coverage.
-  - Handle package entries missing `dependencies` or `integrity`.
-  - Expand lock metadata derivation when entries only have one of `resolved` or `integrity`, especially non-default registries.
-  - Ignore malformed lockfiles or fail deterministically according to npm-compatible input mode.
-  - Resolve from lock metadata for aliased packages and scoped packages.
-  - Decide and test whether hidden lockfiles under `node_modules/.package-lock.json` are intentionally unsupported.
+  - Expand ancient lockfile shapes beyond current v1/v2/v3 and dependency-only import coverage.
+  - Expand package entry coverage for missing `dependencies` or partial v2/v3 package metadata beyond current package/dependency metadata merge.
+  - Expand lock metadata derivation when entries only have one of `resolved` or `integrity`, especially non-default registries, beyond current package and dependency missing-resolved coverage.
+  - Expand malformed lockfile tests beyond current deterministic JSON parse failure.
+  - Expand lock metadata coverage for aliased and scoped packages beyond current manifest-name alias and scoped default tarball tests.
+  - Hidden lockfiles under `node_modules/.package-lock.json` are intentionally unsupported for source input mode; add installed-tree mode only if that becomes a product requirement.
 
 - Package spec and dependency validation from `workspaces/arborist/test/dep-valid.js`, `node_modules/npm-package-arg/lib/npa.js`, and `node_modules/npm-pick-manifest/lib/index.js`:
   - Registry specs for scoped packages, aliases, exact versions, dist-tags, hyphen ranges, prerelease ranges, and conflicting ranges.

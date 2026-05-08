@@ -3,6 +3,7 @@ package npm
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 type dependencyBundle struct {
@@ -48,6 +49,7 @@ func (b dependencyBundle) MarshalJSON() ([]byte, error) {
 	for name := range b.Names {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return json.Marshal(names)
 }
 

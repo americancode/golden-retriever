@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 )
 
 type ResolveOptions struct {
@@ -20,6 +22,7 @@ type ResolveOptions struct {
 	EngineStrict       bool
 	NodeVersion        string
 	Libc               string
+	Before             time.Time
 	ResolveConcurrency int
 }
 
@@ -62,6 +65,12 @@ func (e *InvalidTagNameError) Error() string {
 	return fmt.Sprintf("invalid tag name %q for package %s", e.Spec, e.Name)
 }
 
+type UnsupportedWorkspacesError struct{}
+
+func (e *UnsupportedWorkspacesError) Error() string {
+	return "workspaces are not implemented yet"
+}
+
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
 	info, err := os.Stat(input)
 	if err == nil && info.IsDir() {
@@ -95,7 +104,7 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 		return nil, err
 	}
 	if root.Workspaces != nil {
-		return nil, fmt.Errorf("workspaces are not implemented yet")
+		return nil, &UnsupportedWorkspacesError{}
 	}
 	rootSpecs := rootDependencySpecs(root)
 	overrides, err := ParseOverrides(root.Overrides, rootSpecs)
@@ -159,7 +168,8 @@ func mergeDeps(dst, src map[string]string) error {
 }
 
 func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) ([]DependencyRequest, error) {
-	for name, spec := range src {
+	for _, name := range sortedDependencyNames(src) {
+		spec := src[name]
 		if err := validateDependencySpec(name, spec, edgeType); err != nil {
 			return nil, err
 		}
@@ -168,7 +178,17 @@ func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeTyp
 	return dst, nil
 }
 
+func sortedDependencyNames(deps map[string]string) []string {
+	names := make([]string, 0, len(deps))
+	for name := range deps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 var gitSSHSpecRe = regexp.MustCompile(`^[^@]+@[^:.]+\.[^:]+:.+$`)
+var windowsDriveSpecRe = regexp.MustCompile(`^[a-zA-Z]:`)
 
 func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 	spec = strings.TrimSpace(spec)
@@ -179,11 +199,18 @@ func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
 	}
 	if strings.HasPrefix(strings.ToLower(spec), "npm:") {
+		aliasTarget := strings.TrimSpace(spec[4:])
+		if strings.HasPrefix(strings.ToLower(aliasTarget), "npm:") {
+			return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+		}
 		actual, wanted, err := parsePackageSpec(name, spec)
 		if err != nil {
 			return err
 		}
 		if !validPackageName(actual) {
+			if unsupportedSpecClass(aliasTarget) {
+				return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+			}
 			return &InvalidPackageNameError{Name: actual, Spec: spec}
 		}
 		return validateRegistryWanted(actual, wanted, edgeType)
@@ -208,13 +235,13 @@ func isRegistrySpec(spec string) bool {
 
 func unsupportedSpecClass(spec string) bool {
 	lower := strings.ToLower(strings.TrimSpace(spec))
-	blockedPrefixes := []string{"file:", "link:", "git:", "git+", "github:", "gitlab:", "bitbucket:", "http:", "https:", "workspace:"}
+	blockedPrefixes := []string{"file:", "link:", "git:", "git+", "github:", "gitlab:", "bitbucket:", "gist:", "http:", "https:", "ssh:", "svn:", "workspace:"}
 	for _, prefix := range blockedPrefixes {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
 	}
-	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") {
+	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") || windowsDriveSpecRe.MatchString(spec) {
 		return true
 	}
 	if strings.Contains(spec, "/") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar") {

@@ -68,6 +68,7 @@ func mirror(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	syncTarget := fs.Bool("sync-target", false, "query target registry first and rebuild target-present state for the resolved package set")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	fetchConcurrency := fs.Int("fetch-concurrency", max(8, runtime.NumCPU()*4), "parallel tarball download count")
@@ -84,6 +85,10 @@ func mirror(args []string) error {
 		return fmt.Errorf("missing --target-registry")
 	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
+	before, err := parseBefore(*beforeRaw)
 	if err != nil {
 		return err
 	}
@@ -104,6 +109,7 @@ func mirror(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		Before:             before,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -237,11 +243,16 @@ func fetch(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
+	before, err := parseBefore(*beforeRaw)
 	if err != nil {
 		return err
 	}
@@ -262,6 +273,7 @@ func fetch(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		Before:             before,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -300,11 +312,16 @@ func resolve(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
+	before, err := parseBefore(*beforeRaw)
 	if err != nil {
 		return err
 	}
@@ -322,6 +339,7 @@ func resolve(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		Before:             before,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -368,6 +386,7 @@ func stateSyncTarget(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
@@ -378,6 +397,10 @@ func stateSyncTarget(args []string) error {
 		return fmt.Errorf("missing --target-registry")
 	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
+	before, err := parseBefore(*beforeRaw)
 	if err != nil {
 		return err
 	}
@@ -398,6 +421,7 @@ func stateSyncTarget(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		Before:             before,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -528,6 +552,18 @@ func dependencyTypes(value string) []string {
 		}
 	}
 	return out
+}
+
+func parseBefore(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	before, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid --before %q: expected RFC3339 timestamp", value)
+	}
+	return before, nil
 }
 
 func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL time.Duration, metadataRetries int, offline bool) (*npm.Client, error) {
