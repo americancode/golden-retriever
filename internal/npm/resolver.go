@@ -118,6 +118,16 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	if err != nil {
 		return nil, err
 	}
+	if edgeType != EdgePeer {
+		if preferred, ok, err := r.resolvePreferredAncestorDependency(ctx, parent, name, wanted); err != nil {
+			return nil, err
+		} else if ok {
+			r.mu.Lock()
+			r.graph.AddDependency(parent, preferred, name, rawSpec, spec, edgeType)
+			r.mu.Unlock()
+			return preferred, nil
+		}
+	}
 	if canReuseExistingForSpec(wanted) {
 		if existing := r.findReusableSatisfyingNode(parent, actualName, wanted, edgeType); existing != nil {
 			r.mu.Lock()
@@ -351,7 +361,7 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 				r.graph.AddPeerConflict(node, conflict, name, spec)
 			}
 			r.mu.Unlock()
-			if !optional || r.Options.StrictPeerDeps {
+			if r.Options.StrictPeerDeps {
 				return &PeerConflictError{
 					Package:      node.ID,
 					PeerName:     name,
@@ -362,6 +372,12 @@ func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest Versio
 			continue
 		}
 		if optional {
+			r.mu.Lock()
+			r.graph.AddPeer(node, nil, name, spec, optional, false)
+			r.mu.Unlock()
+			continue
+		}
+		if !r.Options.StrictPeerDeps && r.hasPlannedAncestorDependency(node, name, spec) {
 			r.mu.Lock()
 			r.graph.AddPeer(node, nil, name, spec, optional, false)
 			r.mu.Unlock()
@@ -397,6 +413,26 @@ func (r *Resolver) resolvePreferredPeer(ctx context.Context, node, placement *No
 		}
 	}
 	return r.resolveDep(ctx, placement, name, spec, EdgePeer)
+}
+
+func (r *Resolver) resolvePreferredAncestorDependency(ctx context.Context, parent *Node, name, wanted string) (*Node, bool, error) {
+	for owner := parent; owner != nil; owner = owner.Parent {
+		if owner == parent {
+			continue
+		}
+		dep, ok := r.preferredDependency(owner, name)
+		if !ok || strings.TrimSpace(dep.Spec) == "" {
+			continue
+		}
+		target, err := r.resolveDep(ctx, owner, dep.Name, dep.Spec, dep.Type)
+		if err != nil {
+			return nil, false, err
+		}
+		if target != nil && satisfies(target.Version, wanted) {
+			return target, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 func (r *Resolver) preferredDependency(owner *Node, name string) (DependencyRequest, bool) {
@@ -441,11 +477,21 @@ func (r *Resolver) findExistingSatisfyingNode(name, spec string) *Node {
 func (r *Resolver) findReusableSatisfyingNode(parent *Node, name, spec string, edgeType EdgeType) *Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	strategy := normalizeInstallStrategy(r.Options.InstallStrategy)
 	if edgeType == EdgePeer {
 		return r.findExistingSatisfyingNodeLocked(name, spec)
 	}
-	if r.Options.PreferDedupe {
+	if r.Options.PreferDedupe || strategy == "hoisted" {
 		return r.findExistingSatisfyingNodeLocked(name, spec)
+	}
+	if strategy == "shallow" {
+		if edge := r.graph.Root.Dependencies[name]; edge != nil && edge.To != nil && satisfies(edge.To.Version, spec) {
+			return edge.To
+		}
+		if r.graph.Root.Name == name && satisfies(r.graph.Root.Version, spec) {
+			return r.graph.Root
+		}
+		return nil
 	}
 	var best *Node
 	for cursor := parent; cursor != nil; cursor = cursor.Parent {
@@ -461,6 +507,15 @@ func (r *Resolver) findReusableSatisfyingNode(parent *Node, name, spec string, e
 		}
 	}
 	return best
+}
+
+func normalizeInstallStrategy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "hoisted", "nested", "shallow":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return "nested"
+	}
 }
 
 func (r *Resolver) findExistingSatisfyingNodeLocked(name, spec string) *Node {
@@ -484,7 +539,7 @@ func (r *Resolver) reconcileOptionalPeers() {
 			continue
 		}
 		for _, peer := range node.Peers {
-			if peer == nil || !peer.PeerOptional || peer.Satisfied {
+			if peer == nil || peer.Satisfied {
 				continue
 			}
 			target := r.findExistingSatisfyingNodeLocked(peer.Name, peer.Spec)
@@ -495,6 +550,46 @@ func (r *Resolver) reconcileOptionalPeers() {
 			peer.Satisfied = true
 		}
 	}
+}
+
+func (r *Resolver) hasPlannedAncestorDependency(node *Node, name, spec string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for cursor := node; cursor != nil; cursor = cursor.Parent {
+		planned := r.nodeDeps[cursor.ID]
+		if planned == nil {
+			continue
+		}
+		dep := planned[name]
+		if dep.Name == "" {
+			continue
+		}
+		if specsCouldSatisfy(dep.Spec, spec) {
+			return true
+		}
+	}
+	return false
+}
+
+func specsCouldSatisfy(depSpec, peerSpec string) bool {
+	depSpec = strings.TrimSpace(depSpec)
+	peerSpec = strings.TrimSpace(peerSpec)
+	if depSpec == "" || peerSpec == "" {
+		return false
+	}
+	if depSpec == peerSpec {
+		return true
+	}
+	if parseVersion(depSpec).ok && satisfies(depSpec, peerSpec) {
+		return true
+	}
+	if rangeIntersects(depSpec, peerSpec) {
+		return true
+	}
+	if satisfies(depSpec, peerSpec) || satisfies(peerSpec, depSpec) {
+		return true
+	}
+	return registryTagLike(depSpec)
 }
 
 func (r *Resolver) tryResolveCombinedPeerSet(ctx context.Context, node *Node, name, spec string, conflict *Node) (*Node, bool, error) {

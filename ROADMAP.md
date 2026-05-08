@@ -23,15 +23,15 @@
 - [x] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
 - [x] Continue hardening `overrides` selector semantics beyond current version-qualified range intersection coverage.
 - [x] Add override semantic conflict detection for incomparable override sets with intersecting or disjoint replacement ranges.
-- [ ] Expand override fixtures for cyclic chains and peer-conflict fixes.
-- [ ] Decide whether alias, directory, file, and git override specs stay rejected or become supported.
-- [ ] Continue hardening `peerDependencies` placement beyond current root and ancestor dependency preference coverage.
-- [ ] Match npm lockfile behavior for peer conflicts that npm records as warnings but this resolver currently rejects.
-- [ ] Continue hardening `peerDependenciesMeta.optional`.
-- [ ] Expand peer fixtures for nested peers, unresolvable peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
-- [ ] Expand peer optional re-resolution fixtures for npm issues like #8726.
+- [x] Expand override fixtures for cyclic chains and peer-conflict fixes.
+- [x] Decide whether alias, directory, file, and git override specs stay rejected or become supported.
+- [x] Continue hardening `peerDependencies` placement beyond current root and ancestor dependency preference coverage.
+- [x] Match npm lockfile behavior for peer conflicts that npm records as warnings but this resolver currently rejects.
+- [x] Continue hardening `peerDependenciesMeta.optional`.
+- [x] Expand peer fixtures for nested peers, unresolvable peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
+- [x] Expand peer optional re-resolution fixtures for npm issues like #8726.
 - [ ] Expand peer optional existing-node preference fixtures for npm issues like #9249.
-- [ ] Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
+- [x] Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
 - [ ] Expand optional failure coverage for tarball download failures.
 - [ ] Match npm lockfile behavior for optional platform packages so all registry tarballs needed by a lockfile are mirrored, not only the current host platform.
 - [ ] Expand bundled dependency parity for complete metadata.
@@ -53,9 +53,9 @@
 - [ ] Expand incomplete lock metadata behavior beyond current missing-resolved and local/git skip coverage.
 - [ ] Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
 - [ ] Add yarn.lock influence where npm would use it for absent or incomplete lock metadata.
-- [ ] Model remaining npm config that affects resolution, especially `install-strategy`.
+- [x] Model remaining npm config that affects resolution, especially `install-strategy`.
 - [ ] Add default placement, nested placement, and legacy bundling fixtures.
-- [ ] Add explicit request placement fixtures where selected package versions change.
+- [x] Add explicit request placement fixtures where selected package versions change.
 
 ## Acquisition TODOs
 

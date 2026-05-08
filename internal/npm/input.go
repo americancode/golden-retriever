@@ -16,6 +16,7 @@ import (
 type ResolveOptions struct {
 	IncludeDev         bool
 	IncludeOptional    bool
+	InstallStrategy    string
 	LegacyPeerDeps     bool
 	StrictPeerDeps     bool
 	OmitPeer           bool

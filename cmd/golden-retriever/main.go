@@ -128,6 +128,7 @@ func mirror(args []string) error {
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
+	installStrategy := fs.String("install-strategy", "nested", "dependency placement strategy: nested, hoisted, or shallow")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
@@ -177,6 +178,7 @@ func mirror(args []string) error {
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
 		PreferDedupe:       *preferDedupe,
+		InstallStrategy:    *installStrategy,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
@@ -356,6 +358,7 @@ func fetch(args []string) error {
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
+	installStrategy := fs.String("install-strategy", "nested", "dependency placement strategy: nested, hoisted, or shallow")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
@@ -392,6 +395,7 @@ func fetch(args []string) error {
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
 		PreferDedupe:       *preferDedupe,
+		InstallStrategy:    *installStrategy,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
@@ -452,6 +456,7 @@ func resolve(args []string) error {
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
+	installStrategy := fs.String("install-strategy", "nested", "dependency placement strategy: nested, hoisted, or shallow")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
@@ -484,6 +489,7 @@ func resolve(args []string) error {
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
 		PreferDedupe:       *preferDedupe,
+		InstallStrategy:    *installStrategy,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
@@ -586,6 +592,7 @@ func stateSyncTarget(args []string) error {
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
+	installStrategy := fs.String("install-strategy", "nested", "dependency placement strategy: nested, hoisted, or shallow")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
@@ -627,6 +634,7 @@ func stateSyncTarget(args []string) error {
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
 		PreferDedupe:       *preferDedupe,
+		InstallStrategy:    *installStrategy,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,

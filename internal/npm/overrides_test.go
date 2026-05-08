@@ -477,30 +477,50 @@ func TestResolverRejectsInvalidOverrideSelector(t *testing.T) {
 }
 
 func TestResolverRejectsUnsupportedOverrideSpecs(t *testing.T) {
-	tests := map[string]string{
-		"selector-file": `{"app@file:../app":{"dep":"1.0.0"}}`,
-		"value-file":    `{"dep":"file:../dep"}`,
-		"value-git":     `{"dep":"github:org/dep"}`,
-		"self-file":     `{"app":{".":"file:../app"}}`,
+	tests := map[string]struct {
+		overrides string
+		kind      string
+	}{
+		"selector-file":      {overrides: `{"app@file:../app":{"dep":"1.0.0"}}`, kind: "unsupported"},
+		"selector-alias":     {overrides: `{"app@npm:real-app@1.0.0":{"dep":"1.0.0"}}`, kind: "invalid-name"},
+		"selector-git":       {overrides: `{"app@github:org/app":{"dep":"1.0.0"}}`, kind: "unsupported"},
+		"selector-directory": {overrides: `{"app@../local-app":{"dep":"1.0.0"}}`, kind: "unsupported"},
+		"value-file":         {overrides: `{"dep":"file:../dep"}`, kind: "unsupported"},
+		"value-alias":        {overrides: `{"dep":"npm:real-dep@1.0.0"}`, kind: "unsupported"},
+		"value-git":          {overrides: `{"dep":"github:org/dep"}`, kind: "unsupported"},
+		"value-directory":    {overrides: `{"dep":"../local-dep"}`, kind: "unsupported"},
+		"value-git-ssh":      {overrides: `{"dep":"git@github.com:org/dep.git"}`, kind: "unsupported"},
+		"self-file":          {overrides: `{"app":{".":"file:../app"}}`, kind: "unsupported"},
+		"self-alias":         {overrides: `{"app":{".":"npm:real-app@1.0.0"}}`, kind: "unsupported"},
+		"self-git":           {overrides: `{"app":{".":"github:org/app"}}`, kind: "unsupported"},
+		"self-directory":     {overrides: `{"app":{".":"../local-app"}}`, kind: "unsupported"},
 	}
-	for name, overrides := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			input := filepath.Join(dir, "package.json")
 			if err := os.WriteFile(input, []byte(fmt.Sprintf(`{
   "dependencies": {"app": "1.0.0"},
   "overrides": %s
-}`, overrides)), 0o644); err != nil {
+}`, tc.overrides)), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
 			_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
-			var specErr *UnsupportedSpecError
-			if !errors.As(err, &specErr) {
-				t.Fatalf("got %v, want UnsupportedSpecError", err)
-			}
-			if specErr.Type != "override" {
-				t.Fatalf("unexpected spec error: %#v", specErr)
+			switch tc.kind {
+			case "invalid-name":
+				var nameErr *InvalidPackageNameError
+				if !errors.As(err, &nameErr) {
+					t.Fatalf("got %v, want InvalidPackageNameError", err)
+				}
+			default:
+				var specErr *UnsupportedSpecError
+				if !errors.As(err, &specErr) {
+					t.Fatalf("got %v, want UnsupportedSpecError", err)
+				}
+				if specErr.Type != "override" {
+					t.Fatalf("unexpected spec error: %#v", specErr)
+				}
 			}
 		})
 	}
@@ -581,18 +601,87 @@ func TestResolverAppliesOverrideInsideCyclicDependencyChain(t *testing.T) {
 	}
 }
 
+func TestResolverAppliesOverrideAcrossMultipleEdgesInCyclicChain(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"cycle-foo": "1.0.1"},
+  "overrides": {"cycle-foo": {"cycle-bar": "2.0.0", "cycle-foo": "2.0.0"}}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("cycle-foo@1.0.1") || !graph.Has("cycle-bar@2.0.0") {
+		t.Fatalf("multi-edge cyclic override tree not resolved: %#v", graph.Packages())
+	}
+	if graph.Has("cycle-baz@1.0.1") {
+		t.Fatalf("override to cycle-bar@2 should prune cycle-baz@1.0.1: %#v", graph.Packages())
+	}
+	rootFoo := graph.Root.Dependencies["cycle-foo"].To
+	barEdge := rootFoo.Dependencies["cycle-bar"]
+	if barEdge == nil || barEdge.To.Version != "2.0.0" || barEdge.Spec != "2.0.0" {
+		t.Fatalf("cycle-foo should be overridden to cycle-bar@2.0.0: %#v", barEdge)
+	}
+	if len(barEdge.To.Dependencies) != 0 {
+		t.Fatalf("cycle-bar@2.0.0 should not retain cycle chain deps: %#v", barEdge.To.Dependencies)
+	}
+}
+
+func TestResolverAppliesCycleOverrideOnIntermediateNode(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"cycle-foo": "1.0.1"},
+  "overrides": {"cycle-bar": {"cycle-baz": "2.0.0"}}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("cycle-foo@1.0.1") || !graph.Has("cycle-bar@1.0.1") || !graph.Has("cycle-baz@2.0.0") {
+		t.Fatalf("intermediate cycle override tree not resolved: %#v", graph.Packages())
+	}
+	if graph.Has("cycle-baz@1.0.1") {
+		t.Fatalf("expected cycle-baz@1.0.1 to be replaced by override: %#v", graph.Packages())
+	}
+	rootFoo := graph.Root.Dependencies["cycle-foo"].To
+	bar := rootFoo.Dependencies["cycle-bar"]
+	if bar == nil || bar.To.Version != "1.0.1" {
+		t.Fatalf("expected cycle-foo -> cycle-bar@1.0.1: %#v", bar)
+	}
+	baz := bar.To.Dependencies["cycle-baz"]
+	if baz == nil || baz.To.Version != "2.0.0" || baz.Spec != "2.0.0" {
+		t.Fatalf("expected cycle-bar -> overridden cycle-baz@2.0.0: %#v", baz)
+	}
+}
+
 func TestResolverOverrideFixesPeerConflict(t *testing.T) {
 	srv := overrideRegistry(t)
 	defer srv.Close()
 
 	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
-	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
 		{Name: "peer-a", Spec: "1.0.0", Type: EdgeProd},
 		{Name: "peer-d", Spec: "2.0.0", Type: EdgeProd},
 	})
-	var conflict *PeerConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("got %v, want PeerConflictError before override", err)
+	if err != nil {
+		t.Fatalf("got %v, want nil before override in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) == 0 {
+		t.Fatalf("expected peer conflict warning before override")
 	}
 
 	dir := t.TempDir()
@@ -603,17 +692,65 @@ func TestResolverOverrideFixesPeerConflict(t *testing.T) {
 }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	overrideGraph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overrideGraph.Has("peer-a@1.0.0") || !overrideGraph.Has("peer-b@2.0.0") || !overrideGraph.Has("peer-c@2.0.0") || !overrideGraph.Has("peer-d@2.0.0") {
+		t.Fatalf("override should resolve peer conflict to the b@2/c@2 set: %#v", overrideGraph.Packages())
+	}
+	peerA := findNode(t, overrideGraph, "peer-a")
+	edge := peerA.Peers["peer-b"]
+	if edge == nil || !edge.Satisfied || edge.To == nil || edge.To.Version != "2.0.0" || edge.Spec != "2.0.0" {
+		t.Fatalf("peer-a peer should be overridden to peer-b@2.0.0: %#v", edge)
+	}
+}
+
+func TestResolverTopLevelOverrideFixesPeerConflict(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"peer-a": "1.0.0", "peer-d": "2.0.0"},
+  "overrides": {"peer-b": "2.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !graph.Has("peer-a@1.0.0") || !graph.Has("peer-b@2.0.0") || !graph.Has("peer-c@2.0.0") || !graph.Has("peer-d@2.0.0") {
-		t.Fatalf("override should resolve peer conflict to the b@2/c@2 set: %#v", graph.Packages())
+	if !graph.Has("peer-b@2.0.0") {
+		t.Fatalf("top-level peer override should resolve with peer-b@2.0.0: %#v", graph.Packages())
 	}
 	peerA := findNode(t, graph, "peer-a")
 	edge := peerA.Peers["peer-b"]
 	if edge == nil || !edge.Satisfied || edge.To == nil || edge.To.Version != "2.0.0" || edge.Spec != "2.0.0" {
 		t.Fatalf("peer-a peer should be overridden to peer-b@2.0.0: %#v", edge)
+	}
+}
+
+func TestResolverVersionQualifiedOverrideDoesNotFixPeerConflictWhenSelectorMisses(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"peer-a": "1.0.0", "peer-d": "2.0.0"},
+  "overrides": {"peer-b@^3.0.0": "2.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatalf("got %v, want nil in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) != 1 {
+		t.Fatalf("expected one peer conflict warning when override selector is disjoint, got %#v", graph.PeerConflicts)
 	}
 }
 

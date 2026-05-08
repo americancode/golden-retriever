@@ -72,3 +72,14 @@ NPM_PARITY=1 go test ./...
 ```
 
 The parity tests generate npm lockfiles and compare the package tarball set with this tool.
+
+## Current override spec policy
+
+For npm `overrides`, this tool currently supports registry-like replacement specs (versions, ranges, and dist-tags) and intentionally rejects non-registry override specs. Rejected override selectors/values include:
+
+- alias override specs (`npm:...`)
+- directory/local path specs (`../...`, `./...`, absolute paths)
+- `file:` / `link:` specs
+- git/hosted git specs (`github:`, `git+ssh:`, `git@...`, etc.)
+
+This keeps override behavior deterministic for registry mirroring. Support for those override classes can be added later as an explicit compatibility expansion.

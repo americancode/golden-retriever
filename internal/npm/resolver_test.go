@@ -163,6 +163,148 @@ func TestResolverPreferDedupeReusesSiblingDependency(t *testing.T) {
 	}
 }
 
+func TestResolverInstallStrategyHoistedReusesSiblingDependency(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, InstallStrategy: "hoisted"}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{
+		"novelty-a": "1.0.0",
+		"novelty-c": "1.0.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared@1.3.0") {
+		t.Fatalf("hoisted strategy should reuse existing satisfying version: %#v", graph.Packages())
+	}
+	c := findNode(t, graph, "novelty-c")
+	edge := c.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("novelty-c should reuse novelty-a shared version under hoisted strategy: %#v", edge)
+	}
+}
+
+func TestResolverInstallStrategyShallowUsesRootDependency(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, InstallStrategy: "shallow"}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared", Spec: "1.2.0", Type: EdgeProd},
+		{Name: "novelty-c", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := findNode(t, graph, "novelty-c")
+	edge := c.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("shallow strategy should place transitive dep from root request when available: %#v", edge)
+	}
+}
+
+func TestResolverPrefersPlannedRootDependencyVersionForTransitiveRange(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name":"parent",
+  "dist-tags":{"latest":"1.0.0"},
+  "versions":{
+    "1.0.0":{
+      "name":"parent",
+      "version":"1.0.0",
+      "dependencies":{"dep":"^1.0.0"},
+      "dist":{"tarball":"%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/dep":
+			fmt.Fprintf(w, `{
+  "name":"dep",
+  "dist-tags":{"latest":"1.3.0"},
+  "versions":{
+    "1.2.0":{"name":"dep","version":"1.2.0","dist":{"tarball":"%s/dep/-/dep-1.2.0.tgz"}},
+    "1.3.0":{"name":"dep","version":"1.3.0","dist":{"tarball":"%s/dep/-/dep-1.3.0.tgz"}}
+  }
+}`, serverURL(r), serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "parent", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "dep", Spec: "1.2.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("dep@1.3.0") {
+		t.Fatalf("transitive range should not outrun planned root dependency: %#v", graph.Packages())
+	}
+	if !graph.Has("dep@1.2.0") {
+		t.Fatalf("expected planned root dependency version to be used: %#v", graph.Packages())
+	}
+	parent := findNode(t, graph, "parent")
+	edge := parent.Dependencies["dep"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("parent dep edge should point to planned root version: %#v", edge)
+	}
+}
+
+func TestResolverFallsBackWhenPlannedRootDependencyCannotSatisfyTransitiveRange(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name":"parent",
+  "dist-tags":{"latest":"1.0.0"},
+  "versions":{
+    "1.0.0":{
+      "name":"parent",
+      "version":"1.0.0",
+      "dependencies":{"dep":"^2.0.0"},
+      "dist":{"tarball":"%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/dep":
+			fmt.Fprintf(w, `{
+  "name":"dep",
+  "dist-tags":{"latest":"2.1.0"},
+  "versions":{
+    "1.2.0":{"name":"dep","version":"1.2.0","dist":{"tarball":"%s/dep/-/dep-1.2.0.tgz"}},
+    "2.1.0":{"name":"dep","version":"2.1.0","dist":{"tarball":"%s/dep/-/dep-2.1.0.tgz"}}
+  }
+}`, serverURL(r), serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "parent", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "dep", Spec: "1.2.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("dep@1.2.0") || !graph.Has("dep@2.1.0") {
+		t.Fatalf("resolver should keep explicit root dep and add separate incompatible transitive version: %#v", graph.Packages())
+	}
+	parent := findNode(t, graph, "parent")
+	edge := parent.Dependencies["dep"]
+	if edge == nil || edge.To == nil || edge.To.Version != "2.1.0" {
+		t.Fatalf("parent dep edge should resolve to satisfying transitive version: %#v", edge)
+	}
+}
+
 func TestResolverRecordsUnsatisfiedOptionalPeerDependency(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
@@ -187,11 +329,37 @@ func TestResolverRecordsUnsatisfiedOptionalPeerDependency(t *testing.T) {
 	}
 }
 
-func TestResolverErrorsOnPeerConflict(t *testing.T) {
+func TestResolverRecordsPeerConflictWarningByDefault(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
 
 	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatalf("got %v, want nil in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) != 1 {
+		t.Fatalf("expected one peer conflict warning, got %#v", graph.PeerConflicts)
+	}
+	conflict := graph.PeerConflicts[0]
+	if conflict.Name != "host" || conflict.Spec != "^1.0.0" || conflict.FoundVersion != "2.0.0" {
+		t.Fatalf("unexpected conflict warning: %#v", conflict)
+	}
+	plugin := findNode(t, graph, "plugin")
+	peer := plugin.Peers["host"]
+	if peer == nil || peer.Satisfied || peer.To == nil || peer.To.Version != "2.0.0" {
+		t.Fatalf("unexpected peer edge: %#v", peer)
+	}
+}
+
+func TestResolverStrictPeerDepsErrorsOnPeerConflict(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, StrictPeerDeps: true}}
 	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
 		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
 		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
@@ -282,6 +450,49 @@ func TestResolverStrictPeerDepsErrorsOnOptionalPeerConflict(t *testing.T) {
 	}
 }
 
+func TestResolverPeerDependenciesMetaOptionalFalseKeepsPeerRequired(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "meta-false-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatalf("got %v, want nil in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) != 1 {
+		t.Fatalf("expected one peer conflict warning, got %#v", graph.PeerConflicts)
+	}
+	plugin := findNode(t, graph, "meta-false-plugin")
+	peer := plugin.Peers["host"]
+	if peer == nil || peer.PeerOptional || peer.Satisfied || peer.To == nil || peer.To.Version != "2.0.0" {
+		t.Fatalf("optional=false should keep required conflicting peer edge, got %#v", peer)
+	}
+}
+
+func TestResolverPeerDependenciesMetaForUnrelatedPeerDoesNotMakePeerOptional(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "meta-unrelated-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "meta-unrelated-plugin")
+	peer := plugin.Peers["host"]
+	if peer == nil || peer.PeerOptional || !peer.Satisfied || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("unrelated peerDependenciesMeta should not mark required peer optional: %#v", peer)
+	}
+	if !graph.Has("host@1.2.0") {
+		t.Fatalf("required peer should still be installed: %#v", graph.Packages())
+	}
+}
+
 func TestResolverReconcilesOverlappingPeerRanges(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
@@ -340,6 +551,27 @@ func TestResolverDoesNotReconcileDisjointPeerRanges(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "wide-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "disjoint-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatalf("got %v, want nil in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) != 1 {
+		t.Fatalf("expected one peer conflict warning, got %#v", graph.PeerConflicts)
+	}
+	conflict := graph.PeerConflicts[0]
+	if conflict.Name != "shared-peer" || conflict.Spec != "^2.0.0" || conflict.FoundVersion != "1.3.0" {
+		t.Fatalf("unexpected conflict warning: %#v", conflict)
+	}
+}
+
+func TestResolverStrictPeerDepsErrorsOnDisjointPeerRanges(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, StrictPeerDeps: true}}
 	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
 		{Name: "wide-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
 		{Name: "disjoint-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
@@ -350,6 +582,58 @@ func TestResolverDoesNotReconcileDisjointPeerRanges(t *testing.T) {
 	}
 	if conflict.PeerName != "shared-peer" || conflict.PeerSpec != "^2.0.0" || conflict.FoundVersion != "1.3.0" {
 		t.Fatalf("unexpected conflict: %#v", conflict)
+	}
+}
+
+func TestResolverResolvesNestedPeerFromAncestorDependency(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "nested-peer-parent", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("nested-peer-parent@1.0.0") || !graph.Has("nested-peer-child@1.0.0") || !graph.Has("host@1.2.0") {
+		t.Fatalf("nested peer tree should resolve parent, child, and host: %#v", graph.Packages())
+	}
+	child := findNode(t, graph, "nested-peer-child")
+	peer := child.Peers["host"]
+	if peer == nil || !peer.Satisfied || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("nested peer should be satisfied by ancestor dependency host@1.2.0: %#v", peer)
+	}
+}
+
+func TestResolverErrorsWhenRequiredPeerCannotBeResolved(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "missing-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err == nil {
+		t.Fatalf("expected error when required peer package is unresolvable")
+	}
+}
+
+func TestResolverRecordsMultiplePeerSetConflictWarnings(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "host-three-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatalf("got %v, want nil in non-strict mode", err)
+	}
+	if len(graph.PeerConflicts) != 2 {
+		t.Fatalf("expected two peer conflict warnings, got %#v", graph.PeerConflicts)
 	}
 }
 
@@ -416,6 +700,32 @@ func TestResolverReconcilesPreviouslyMissingOptionalPeer(t *testing.T) {
 	peer := plugin.Peers["shared-peer"]
 	if peer == nil || !peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "1.2.0" {
 		t.Fatalf("optional peer should be reconciled after satisfying node appears, got %#v", peer)
+	}
+}
+
+func TestResolverReconcilesOptionalPeerAfterInitialConflictWhenSatisfyingNodeAppears(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "host", Spec: "2.0.0", Type: EdgeProd},
+		{Name: "optional-conflict-then-satisfied-peer", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "host-provider", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "optional-conflict-then-satisfied-peer")
+	peer := plugin.Peers["host"]
+	if peer == nil || !peer.PeerOptional || !peer.Satisfied || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("optional peer should be re-resolved to satisfying host@1.2.0 after initial conflict, got %#v", peer)
+	}
+	if len(graph.PeerConflicts) != 0 {
+		t.Fatalf("optional peer re-resolution should not retain peer conflicts: %#v", graph.PeerConflicts)
+	}
+	if !graph.Has("host@2.0.0") || !graph.Has("host@1.2.0") {
+		t.Fatalf("fixture should keep both host versions to validate re-resolution, got %#v", graph.Packages())
 	}
 }
 
@@ -937,6 +1247,44 @@ func TestResolverOptionalFailurePreservesSharedRequiredDependency(t *testing.T) 
 	}
 	if graph.Has("optional-shared-wrapper@1.0.0") || graph.Has("missing-meta@1.0.0") {
 		t.Fatalf("failed optional subtree should be removed: %#v", graph.Packages())
+	}
+	root := findNode(t, graph, "optional-shared-root")
+	if edge := root.Dependencies["optional-shared-wrapper"]; edge != nil {
+		t.Fatalf("failed optional edge should not remain attached to root: %#v", edge)
+	}
+}
+
+func TestResolverOptionalFailurePrunesUnreferencedSharedOptionalSubtree(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"optional-shared-unreferenced-root": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("optional-shared-unreferenced-root@1.0.0") {
+		t.Fatalf("root package should resolve: %#v", graph.Packages())
+	}
+	if graph.Has("optional-shared-wrapper-unreferenced@1.0.0") || graph.Has("shared-only-optional@1.0.0") || graph.Has("missing-meta@1.0.0") {
+		t.Fatalf("failed optional set should be fully pruned when unreferenced elsewhere: %#v", graph.Packages())
+	}
+}
+
+func TestResolverOptionalFailureKeepsSharedNodeReferencedBySuccessfulOptionalSet(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"optional-shared-dual-root": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("optional-shared-dual-root@1.0.0") || !graph.Has("optional-good-wrapper@1.0.0") || !graph.Has("shared-only-optional@1.0.0") {
+		t.Fatalf("successful optional set should remain resolved: %#v", graph.Packages())
+	}
+	if graph.Has("optional-bad-wrapper@1.0.0") || graph.Has("missing-meta@1.0.0") {
+		t.Fatalf("failed optional set should be pruned: %#v", graph.Packages())
 	}
 }
 
@@ -1468,6 +1816,86 @@ func peerRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/meta-false-plugin":
+			fmt.Fprintf(w, `{
+  "name": "meta-false-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "meta-false-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"host": "^1.0.0"},
+      "peerDependenciesMeta": {"host": {"optional": false}},
+      "dist": {"tarball": "%s/meta-false-plugin/-/meta-false-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/meta-unrelated-plugin":
+			fmt.Fprintf(w, `{
+  "name": "meta-unrelated-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "meta-unrelated-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"host": "^1.0.0"},
+      "peerDependenciesMeta": {"other": {"optional": true}},
+      "dist": {"tarball": "%s/meta-unrelated-plugin/-/meta-unrelated-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/nested-peer-parent":
+			fmt.Fprintf(w, `{
+  "name": "nested-peer-parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "nested-peer-parent",
+      "version": "1.0.0",
+      "dependencies": {"nested-peer-child": "1.0.0", "host": "1.2.0"},
+      "dist": {"tarball": "%s/nested-peer-parent/-/nested-peer-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/nested-peer-child":
+			fmt.Fprintf(w, `{
+  "name": "nested-peer-child",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "nested-peer-child",
+      "version": "1.0.0",
+      "peerDependencies": {"host": "^1.0.0"},
+      "dist": {"tarball": "%s/nested-peer-child/-/nested-peer-child-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/missing-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "missing-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "missing-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"missing-host": "^1.0.0"},
+      "dist": {"tarball": "%s/missing-peer-plugin/-/missing-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/host-three-plugin":
+			fmt.Fprintf(w, `{
+  "name": "host-three-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "host-three-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"host": "^3.0.0"},
+      "dist": {"tarball": "%s/host-three-plugin/-/host-three-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/peer-first-plugin":
 			fmt.Fprintf(w, `{
   "name": "peer-first-plugin",
@@ -1622,6 +2050,19 @@ func peerRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/host-provider":
+			fmt.Fprintf(w, `{
+  "name": "host-provider",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "host-provider",
+      "version": "1.0.0",
+      "dependencies": {"host": "1.2.0"},
+      "dist": {"tarball": "%s/host-provider/-/host-provider-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/optional-existing-peer-plugin":
 			fmt.Fprintf(w, `{
   "name": "optional-existing-peer-plugin",
@@ -1647,6 +2088,20 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"shared-peer": "1.2.0"},
       "peerDependenciesMeta": {"shared-peer": {"optional": true}},
       "dist": {"tarball": "%s/missing-then-satisfied-optional-peer/-/missing-then-satisfied-optional-peer-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-conflict-then-satisfied-peer":
+			fmt.Fprintf(w, `{
+  "name": "optional-conflict-then-satisfied-peer",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-conflict-then-satisfied-peer",
+      "version": "1.0.0",
+      "peerDependencies": {"host": "^1.0.0"},
+      "peerDependenciesMeta": {"host": {"optional": true}},
+      "dist": {"tarball": "%s/optional-conflict-then-satisfied-peer/-/optional-conflict-then-satisfied-peer-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -1809,6 +2264,71 @@ func optionalFailureRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/optional-shared-unreferenced-root":
+			fmt.Fprintf(w, `{
+  "name": "optional-shared-unreferenced-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-shared-unreferenced-root",
+      "version": "1.0.0",
+      "optionalDependencies": {"optional-shared-wrapper-unreferenced": "1.0.0"},
+      "dist": {"tarball": "%s/optional-shared-unreferenced-root/-/optional-shared-unreferenced-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-shared-wrapper-unreferenced":
+			fmt.Fprintf(w, `{
+  "name": "optional-shared-wrapper-unreferenced",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-shared-wrapper-unreferenced",
+      "version": "1.0.0",
+      "dependencies": {"shared-only-optional": "1.0.0", "missing-meta": "1.0.0"},
+      "dist": {"tarball": "%s/optional-shared-wrapper-unreferenced/-/optional-shared-wrapper-unreferenced-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-shared-dual-root":
+			fmt.Fprintf(w, `{
+  "name": "optional-shared-dual-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-shared-dual-root",
+      "version": "1.0.0",
+      "optionalDependencies": {"optional-good-wrapper": "1.0.0", "optional-bad-wrapper": "1.0.0"},
+      "dist": {"tarball": "%s/optional-shared-dual-root/-/optional-shared-dual-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-good-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "optional-good-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-good-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"shared-only-optional": "1.0.0"},
+      "dist": {"tarball": "%s/optional-good-wrapper/-/optional-good-wrapper-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-bad-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "optional-bad-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-bad-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"shared-only-optional": "1.0.0", "missing-meta": "1.0.0"},
+      "dist": {"tarball": "%s/optional-bad-wrapper/-/optional-bad-wrapper-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/shared-required":
 			fmt.Fprintf(w, `{
   "name": "shared-required",
@@ -1818,6 +2338,18 @@ func optionalFailureRegistry(t *testing.T) *httptest.Server {
       "name": "shared-required",
       "version": "1.0.0",
       "dist": {"tarball": "%s/shared-required/-/shared-required-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/shared-only-optional":
+			fmt.Fprintf(w, `{
+  "name": "shared-only-optional",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "shared-only-optional",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/shared-only-optional/-/shared-only-optional-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))

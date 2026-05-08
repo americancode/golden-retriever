@@ -149,6 +149,37 @@ func TestLoadInputDirectoryPrioritizesShrinkwrap(t *testing.T) {
 	}
 }
 
+func TestLoadInputLegacyShrinkwrapPeerCase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "npm-shrinkwrap.json"), []byte(`{
+  "name": "root",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "legacy-peer-plugin": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-peer-plugin/-/legacy-peer-plugin-1.0.0.tgz",
+      "peerDependencies": {"legacy-peer-host": "^1.0.0"},
+      "dependencies": {
+        "legacy-peer-host": {
+          "version": "1.2.0",
+          "resolved": "https://registry.npmjs.org/legacy-peer-host/-/legacy-peer-host-1.2.0.tgz"
+        }
+      }
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), dir, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("legacy-peer-plugin@1.0.0") || !graph.Has("legacy-peer-host@1.2.0") {
+		t.Fatalf("legacy shrinkwrap peer tree should be imported: %#v", graph.Packages())
+	}
+}
+
 func TestLoadInputDirectoryIgnoresHiddenLockfile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"root","version":"1.0.0"}`), 0o644); err != nil {
