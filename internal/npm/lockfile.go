@@ -14,14 +14,52 @@ type lockfile struct {
 }
 
 type lockPackage struct {
-	Name         string                 `json:"name"`
-	Version      string                 `json:"version"`
-	Resolved     string                 `json:"resolved"`
-	Integrity    string                 `json:"integrity"`
-	Dependencies map[string]string      `json:"dependencies"`
-	Dev          bool                   `json:"dev"`
-	Optional     bool                   `json:"optional"`
-	Extra        map[string]interface{} `json:"-"`
+	Name               string                 `json:"name"`
+	Version            string                 `json:"version"`
+	Resolved           string                 `json:"resolved"`
+	Integrity          string                 `json:"integrity"`
+	Dependencies       map[string]string      `json:"dependencies"`
+	NestedDependencies map[string]lockPackage `json:"-"`
+	Requires           map[string]string      `json:"requires"`
+	Dev                bool                   `json:"dev"`
+	Optional           bool                   `json:"optional"`
+	Extra              map[string]interface{} `json:"-"`
+}
+
+func (p *lockPackage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name         string            `json:"name"`
+		Version      string            `json:"version"`
+		Resolved     string            `json:"resolved"`
+		Integrity    string            `json:"integrity"`
+		Dependencies json.RawMessage   `json:"dependencies"`
+		Requires     map[string]string `json:"requires"`
+		Dev          bool              `json:"dev"`
+		Optional     bool              `json:"optional"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.Name = raw.Name
+	p.Version = raw.Version
+	p.Resolved = raw.Resolved
+	p.Integrity = raw.Integrity
+	p.Requires = raw.Requires
+	p.Dev = raw.Dev
+	p.Optional = raw.Optional
+	if len(raw.Dependencies) > 0 && string(raw.Dependencies) != "null" {
+		var specs map[string]string
+		if err := json.Unmarshal(raw.Dependencies, &specs); err == nil {
+			p.Dependencies = specs
+		} else {
+			var nested map[string]lockPackage
+			if nestedErr := json.Unmarshal(raw.Dependencies, &nested); nestedErr != nil {
+				return err
+			}
+			p.NestedDependencies = nested
+		}
+	}
+	return nil
 }
 
 func LoadLockfile(path string) (*Graph, error) {
@@ -58,6 +96,9 @@ func LoadLockfile(path string) (*Graph, error) {
 func walkLockDependency(g *Graph, name string, pkg lockPackage) {
 	if pkg.Version != "" && pkg.Resolved != "" {
 		g.Add(Package{Name: name, Version: pkg.Version, Tarball: pkg.Resolved, Integrity: pkg.Integrity})
+	}
+	for childName, child := range pkg.NestedDependencies {
+		walkLockDependency(g, childName, child)
 	}
 }
 

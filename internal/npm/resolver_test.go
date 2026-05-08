@@ -129,6 +129,26 @@ func TestResolverLegacyPeerDepsIgnoresPeers(t *testing.T) {
 	}
 }
 
+func TestResolverOmitPeerSkipsPeerResolution(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, OmitPeer: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "plugin")
+	if len(plugin.Peers) != 0 {
+		t.Fatalf("omit peer should not record peer edges: %#v", plugin.Peers)
+	}
+	if graph.Has("host@1.2.0") || graph.Has("host@2.0.0") {
+		t.Fatalf("omit peer should not auto-resolve peer tarballs: %#v", graph.Packages())
+	}
+}
+
 func TestResolverOptionalPeerConflictRecordsByDefault(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()

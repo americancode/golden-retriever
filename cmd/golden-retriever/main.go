@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"golden-retriever/internal/npm"
@@ -60,6 +61,8 @@ func mirror(args []string) error {
 	offline := fs.Bool("offline", false, "resolve using only cached source registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
+	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
+	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
@@ -79,6 +82,10 @@ func mirror(args []string) error {
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
+	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -88,10 +95,11 @@ func mirror(args []string) error {
 		return err
 	}
 	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
-		IncludeDev:         *includeDev,
-		IncludeOptional:    *includeOptional,
+		IncludeDev:         dependencySet.includeDev,
+		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
+		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		ResolveConcurrency: *resolveConcurrency,
@@ -220,12 +228,18 @@ func fetch(args []string) error {
 	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
+	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
+	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
 		return err
 	}
 
@@ -237,10 +251,11 @@ func fetch(args []string) error {
 		return err
 	}
 	graph, err := npm.LoadInput(ctx, client, *input, npm.ResolveOptions{
-		IncludeDev:         *includeDev,
-		IncludeOptional:    *includeOptional,
+		IncludeDev:         dependencySet.includeDev,
+		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
+		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		ResolveConcurrency: *resolveConcurrency,
@@ -274,6 +289,8 @@ func resolve(args []string) error {
 	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
+	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
+	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
@@ -282,16 +299,21 @@ func resolve(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
 
 	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
 	if err != nil {
 		return err
 	}
 	graph, err := npm.LoadInput(context.Background(), client, *input, npm.ResolveOptions{
-		IncludeDev:         *includeDev,
-		IncludeOptional:    *includeOptional,
+		IncludeDev:         dependencySet.includeDev,
+		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
+		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		ResolveConcurrency: *resolveConcurrency,
@@ -333,6 +355,8 @@ func stateSyncTarget(args []string) error {
 	offline := fs.Bool("offline", false, "resolve using only cached source registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
+	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
+	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
@@ -346,6 +370,10 @@ func stateSyncTarget(args []string) error {
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
+	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -355,10 +383,11 @@ func stateSyncTarget(args []string) error {
 		return err
 	}
 	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
-		IncludeDev:         *includeDev,
-		IncludeOptional:    *includeOptional,
+		IncludeDev:         dependencySet.includeDev,
+		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
+		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		ResolveConcurrency: *resolveConcurrency,
@@ -440,6 +469,57 @@ func splitPackageKey(key string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("package must be name@version")
+}
+
+type dependencySet struct {
+	includeDev      bool
+	includeOptional bool
+	omitPeer        bool
+}
+
+func dependencySelection(includeDev, includeOptional bool, omit, include string) (dependencySet, error) {
+	set := dependencySet{
+		includeDev:      includeDev,
+		includeOptional: includeOptional,
+	}
+	for _, item := range dependencyTypes(omit) {
+		switch item {
+		case "dev":
+			set.includeDev = false
+		case "optional":
+			set.includeOptional = false
+		case "peer":
+			set.omitPeer = true
+		default:
+			return dependencySet{}, fmt.Errorf("unsupported omit dependency type %q", item)
+		}
+	}
+	for _, item := range dependencyTypes(include) {
+		switch item {
+		case "dev":
+			set.includeDev = true
+		case "optional":
+			set.includeOptional = true
+		case "peer":
+			set.omitPeer = false
+		default:
+			return dependencySet{}, fmt.Errorf("unsupported include dependency type %q", item)
+		}
+	}
+	return set, nil
+}
+
+func dependencyTypes(value string) []string {
+	var out []string
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL time.Duration, metadataRetries int, offline bool) (*npm.Client, error) {

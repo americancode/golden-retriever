@@ -13,7 +13,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - CLI entrypoint exists at `cmd/golden-retriever`.
 - `fetch` command resolves/imports a package set and downloads tarballs.
 - `resolve` command prints the resolved package tarball set.
-- Lockfile v2/v3 `packages` import works for `package-lock.json` and `npm-shrinkwrap.json`.
+- Lockfile v1 nested dependency import and v2/v3 `packages` import work for `package-lock.json` and `npm-shrinkwrap.json`.
+- Directory inputs prioritize `npm-shrinkwrap.json` over `package-lock.json`, then fall back to `package.json`.
 - `package.json` registry dependency walking works for basic registry semver specs.
 - npm alias specs like `npm:pkg@range` are supported for tarball acquisition.
 - Range support now covers more npm-style cases, including partial versions, hyphen ranges, prerelease ordering, and deprecated-version avoidance.
@@ -82,26 +83,23 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Continue hardening `peerDependencies`.
 - Continue hardening `peerDependenciesMeta.optional`.
 - Continue reproducing npm Arborist peer conflict behavior, peer set grouping, and strict/legacy peer mode edge cases.
-- Support `optionalDependencies` with platform and failure semantics matching npm.
-- Support `bundleDependencies` / `bundledDependencies`.
-- Support `devDependencies` inclusion/exclusion modes.
-- Support `peerDependencies` inclusion/exclusion modes where npm behavior requires it.
+- Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
+- Expand bundled dependency parity for complete metadata, legacy bundling fixtures, and root bundler cases.
+- Finish npm `--omit` / `--include` parity edge cases, including engine/platform check interactions.
 - Support `workspaces`.
 - Support `workspace:` specs if needed for package tree inputs.
 - Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs, or explicitly report unsupported specs with parity tests.
-- Support platform filters from `os`, `cpu`, and `libc`.
-- Support `engines` handling according to npm config behavior.
+- Add `libc` platform filtering.
+- Finish `engines` handling for warning/report behavior and omit/include interactions.
 - Support deprecation metadata handling where npm uses it for selection or warnings.
-- Support lockfile v1 dependency import fully.
-- Support npm shrinkwrap behavior differences where relevant.
-- Model npm config that affects resolution, including registry, scope registries, strict peer deps, legacy peer deps, omit/include, prefer-dedupe, and install strategy.
+- Finish ancient lockfile edge cases and incomplete lock metadata behavior.
+- Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
+- Model remaining npm config that affects resolution, especially prefer-dedupe and install strategy.
 
 ## Acquisition Performance Work
 
-- Keep concurrent tarball downloading.
 - Continue improving concurrent packument fetching during dependency resolution.
 - Add cache pruning and explicit invalidation commands.
-- Continue hardening ETag / `If-None-Match` support for packuments.
 - Continue hardening retry with exponential backoff for transient packument failures.
 - Add rate-limit aware behavior.
 - Continue streaming tarball verification and add larger-file benchmarks.
@@ -115,35 +113,26 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 ## State File Work
 
 - Continue versioning the state file schema.
-- Treat target registry inventory as the primary state model.
-- Treat locally maintained state as the normal source of truth.
-- Support CI cache workflows, especially GitLab cache, for state and metadata cache reuse.
 - Document and test GitLab CI cache layout for `.gr/state.json`, `.gr/metadata`, and downloaded tarballs when useful.
 - Track package name, version, resolved URL, integrity, shasum, output path, size, and timestamps.
 - Track packument metadata cache keys separately from downloaded tarballs.
 - Continue hardening target registry query/sync, including registry-specific auth and retry behavior.
 - Keep target registry query/sync optional for rebuilding or verifying state.
 - Continue hardening authenticated push/publish workflow against real target registries.
-- Run target state rebuild/sync in parallel where possible.
-- Target registry operations support non-interactive GitLab CI credentials from `.npmrc` expansion or direct environment variables.
 - Track failures with retry counts and last error.
 - Validate state against existing files at startup.
 - Add `state inspect` or similar command if useful.
 
 ## Test Framework Work
 
-- Keep fast unit tests independent from the public registry.
-- Keep mock registry tests for deterministic resolver and fetch behavior.
 - Expand npm parity tests with generated fixtures.
 - Compare tarball URL sets against npm-generated `package-lock.json`.
 - Compare resolved package name/version sets against npm.
-- Add fixtures for peer dependencies.
-- Add fixtures for peer dependency conflicts and strict/legacy peer modes.
-- Add fixtures for optional dependencies.
-- Add fixtures for bundled dependencies.
-- Add fixtures for overrides.
-- Add fixtures for aliases.
-- Add fixtures for scoped packages.
+- Expand fixtures for peer dependency placement, conflicts, strict/legacy modes, and peer optional re-resolution.
+- Expand fixtures for optional dependency shared-subtree behavior and tarball failure behavior.
+- Expand fixtures for bundled dependency edge cases.
+- Expand fixtures for overrides.
+- Expand fixtures for aliases and scoped packages.
 - Expand fixtures for dist-tags and prereleases.
 - Add fixtures for conflicting ranges.
 - Add fixtures for lockfile v1, v2, and v3.
@@ -158,12 +147,12 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 
 - Arborist ideal tree parity from `workspaces/arborist/test/arborist/build-ideal-tree.js`:
   - Engine checks: expand coverage for warnings when engine strict is false and respect omit flags for dev/optional/peer dependency engine checks.
-  - Platform checks: fail required incompatible packages and ignore optional incompatible packages, with both root and transitive cases.
+  - Platform checks: expand root/transitive coverage and add `libc`.
   - Peer dependency placement: overlap cases, nested peers, unresolvable peers, cyclic peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
   - Peer optional re-resolution: issue #8726 cases where optional peer constraints force a previously chosen dependency version to be re-resolved, including fresh install and lockfile cases.
   - Peer optional existing-node preference: issue #9249 behavior where existing tree nodes are preferred over registry fetches when satisfying peer optional edges.
   - Dedupe and placement modes: default placement, `preferDedupe`, `legacyBundling`, duplicated transitive deps, and explicit request placement behavior where they change selected package versions.
-  - Bundle dependency cases: empty bundle metadata, complete bundle metadata, bundled metadata dependency duplication, root bundler, two bundled deps, and legacy bundling bundle fixtures.
+  - Bundle dependency cases: complete bundle metadata, bundled metadata dependency duplication, root bundler, two bundled deps, and legacy bundling bundle fixtures.
   - Shrinkwrapped dependency behavior: do not add/update shrinkwrapped deps by default, behavior with `complete:true`, bad shrinkwrap handling, and legacy shrinkwrap resolution.
   - Yarn lock influence: use `yarn.lock` versions/resolutions where npm would when package lock data is absent or incomplete.
   - Workspace resolution: simple/non-simplistic workspaces, workspace root links, workspace overrides, conflicting workspace dev deps, and workspace-specific peer set behavior.
@@ -185,8 +174,7 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
   - Overrides inside cyclic dependency chains and overrides that fix peer ERESOLVE cases.
 
 - Lockfile and shrinkwrap parity from `workspaces/arborist/test/shrinkwrap.js` and `spec-from-lock.js`:
-  - Prioritize `npm-shrinkwrap.json` over `package-lock.json`.
-  - Import v1, v2, v3, and ancient lockfile shapes.
+  - Expand ancient lockfile shapes beyond current v1/v2/v3 import coverage.
   - Handle package entries missing `dependencies`, `resolved`, or `integrity`.
   - Preserve/derive integrity when lock metadata only has one of `resolved` or `integrity`.
   - Ignore malformed lockfiles or fail deterministically according to npm-compatible input mode.
@@ -203,7 +191,7 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 - Optional dependency and omit/include behavior from `workspaces/arborist/test/optional-set.js`, `build-ideal-tree.js`, and install command tests:
   - Expand optional failure coverage for tarball download failures and shared optional subtrees.
   - Optional metadependency failures are ignored only when the optional ancestor is the reason for inclusion; add shared-subtree cases from `optional-set.js`.
-  - `--omit=dev`, `--omit=optional`, `--omit=peer` and matching `--include` behavior should match npm's dependency graph and engine/platform checks.
+  - Expand `--omit=dev`, `--omit=optional`, `--omit=peer` and matching `--include` coverage for engine/platform checks and lockfile parity.
 
 - Registry/auth/config behavior from `workspaces/config/test/nerf-dart.js`, `env-replace.js`, `parse-field.js`, and npm publish command auth tests:
   - Full nerf-dart matching for registry auth keys, including path-specific registry auth and scoped registries.
@@ -222,14 +210,8 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 
 ## CLI Work
 
-- Preserve `fetch` and `resolve`.
 - Continue hardening `push` command for authenticated parallel target registry publication.
-- `mirror` command added for the combined CI workflow: resolve once, optionally sync target state, fetch missing tarballs, push missing tarballs, and update state.
 - Continue hardening `--registry`.
-- Expand scoped registry support from `.npmrc`.
-- Expand auth token support from `.npmrc` and environment.
-- Add `--include-dev` and `--include-optional` behavior matching npm.
-- Add `--omit` / `--include` flags matching npm naming.
 - Add `--json` output.
 - Add `--dry-run`.
 - Add `--fail-fast`.

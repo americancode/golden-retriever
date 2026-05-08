@@ -14,6 +14,7 @@ type ResolveOptions struct {
 	IncludeOptional    bool
 	LegacyPeerDeps     bool
 	StrictPeerDeps     bool
+	OmitPeer           bool
 	EngineStrict       bool
 	NodeVersion        string
 	ResolveConcurrency int
@@ -31,11 +32,26 @@ type packageJSON struct {
 }
 
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
+	info, err := os.Stat(input)
+	if err == nil && info.IsDir() {
+		if fileExists(filepath.Join(input, "npm-shrinkwrap.json")) {
+			return LoadLockfile(filepath.Join(input, "npm-shrinkwrap.json"))
+		}
+		if fileExists(filepath.Join(input, "package-lock.json")) {
+			return LoadLockfile(filepath.Join(input, "package-lock.json"))
+		}
+		return ResolvePackageJSON(ctx, client, filepath.Join(input, "package.json"), opts)
+	}
 	base := filepath.Base(input)
 	if base == "package-lock.json" || base == "npm-shrinkwrap.json" {
 		return LoadLockfile(input)
 	}
 	return ResolvePackageJSON(ctx, client, input, opts)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts ResolveOptions) (*Graph, error) {

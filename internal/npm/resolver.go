@@ -267,7 +267,7 @@ func (r *Resolver) overrideSpec(parent *Node, name, spec string) (string, *Overr
 }
 
 func (r *Resolver) resolvePeers(ctx context.Context, node *Node, manifest VersionManifest) error {
-	if r.Options.LegacyPeerDeps {
+	if r.Options.LegacyPeerDeps || r.Options.OmitPeer {
 		return nil
 	}
 	for name, spec := range manifest.PeerDependencies {
