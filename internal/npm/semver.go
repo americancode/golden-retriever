@@ -10,9 +10,11 @@ import (
 )
 
 var (
-	versionRe     = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
-	partialRe     = regexp.MustCompile(`^v?([0-9xX*]+)(?:\.([0-9xX*]+))?(?:\.([0-9xX*]+))?(?:-([0-9A-Za-z.-]+))?$`)
-	hyphenRangeRe = regexp.MustCompile(`^\s*(\S+)\s+-\s+(\S+)\s*$`)
+	versionRe         = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+	partialRe         = regexp.MustCompile(`^v?([0-9xX*]+)(?:\.([0-9xX*]+))?(?:\.([0-9xX*]+))?(?:-([0-9A-Za-z.-]+))?$`)
+	hyphenRangeRe     = regexp.MustCompile(`^\s*(\S+)\s+-\s+(\S+)\s*$`)
+	comparatorTrimRe  = regexp.MustCompile(`(<=|>=|<|>|=)\s+`)
+	rangePrefixTrimRe = regexp.MustCompile(`(\^|~>?)\s+`)
 )
 
 func parsePackageSpec(depName, spec string) (string, string, error) {
@@ -295,6 +297,8 @@ func satisfies(version, spec string) bool {
 
 func satisfiesAll(version, spec string) bool {
 	spec = normalizeHyphenRange(spec)
+	spec = comparatorTrimRe.ReplaceAllString(spec, "$1")
+	spec = rangePrefixTrimRe.ReplaceAllString(spec, "$1")
 	parts := strings.Fields(spec)
 	if len(parts) == 0 {
 		return true
@@ -315,6 +319,9 @@ func satisfiesOne(version, spec string) bool {
 	spec = strings.ReplaceAll(spec, " ", "")
 	if strings.HasPrefix(spec, "^") {
 		return satisfiesCaret(version, strings.TrimPrefix(spec, "^"))
+	}
+	if strings.HasPrefix(spec, "~>") {
+		return satisfiesTilde(version, strings.TrimPrefix(spec, "~>"))
 	}
 	if strings.HasPrefix(spec, "~") {
 		return satisfiesTilde(version, strings.TrimPrefix(spec, "~"))

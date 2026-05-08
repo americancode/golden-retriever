@@ -156,12 +156,13 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 }
 
 type resolverSnapshot struct {
-	graph         graphSnapshot
-	resolved      map[string]*Node
-	parentByID    map[string]*Node
-	depsByID      map[string]map[string]*Edge
-	peersByID     map[string]map[string]*Edge
-	peerConflicts []PeerConflict
+	graph          graphSnapshot
+	resolved       map[string]*Node
+	parentByID     map[string]*Node
+	depsByID       map[string]map[string]*Edge
+	peersByID      map[string]map[string]*Edge
+	peerConflicts  []PeerConflict
+	engineWarnings []*PackageEngineError
 }
 
 type graphSnapshot struct {
@@ -177,11 +178,12 @@ func (r *Resolver) snapshot() resolverSnapshot {
 			packages: clonePackages(r.graph.packages),
 			nodes:    cloneNodes(r.graph.nodes),
 		},
-		resolved:      cloneResolved(r.resolved),
-		parentByID:    map[string]*Node{},
-		depsByID:      map[string]map[string]*Edge{},
-		peersByID:     map[string]map[string]*Edge{},
-		peerConflicts: append([]PeerConflict(nil), r.graph.PeerConflicts...),
+		resolved:       cloneResolved(r.resolved),
+		parentByID:     map[string]*Node{},
+		depsByID:       map[string]map[string]*Edge{},
+		peersByID:      map[string]map[string]*Edge{},
+		peerConflicts:  append([]PeerConflict(nil), r.graph.PeerConflicts...),
+		engineWarnings: append([]*PackageEngineError(nil), r.graph.EngineWarnings...),
 	}
 	for id, node := range r.graph.nodes {
 		s.parentByID[id] = node.Parent
@@ -197,6 +199,7 @@ func (r *Resolver) restore(s resolverSnapshot) {
 	r.graph.packages = s.graph.packages
 	r.graph.nodes = s.graph.nodes
 	r.graph.PeerConflicts = s.peerConflicts
+	r.graph.EngineWarnings = s.engineWarnings
 	r.resolved = s.resolved
 	for id, node := range r.graph.nodes {
 		node.Parent = s.parentByID[id]
@@ -231,6 +234,9 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 		if r.Options.EngineStrict {
 			return nil, engineErr
 		}
+		r.mu.Lock()
+		r.graph.AddEngineWarning(engineErr)
+		r.mu.Unlock()
 	}
 
 	pkg := Package{

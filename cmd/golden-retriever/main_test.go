@@ -1,8 +1,13 @@
 package main
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"golden-retriever/internal/npm"
 )
 
 func TestDependencySelectionOmitIncludePrecedence(t *testing.T) {
@@ -43,5 +48,35 @@ func TestParseBefore(t *testing.T) {
 	}
 	if _, err := parseBefore("2024-02-15"); err == nil {
 		t.Fatalf("invalid before should fail")
+	}
+}
+
+func TestPrintEngineWarnings(t *testing.T) {
+	graph := npm.NewGraph()
+	graph.AddEngineWarning(&npm.PackageEngineError{
+		Package: "engine-package@1.0.0",
+		Engine:  "node",
+		Wanted:  ">=20",
+		Current: "12.18.4",
+	})
+
+	oldStderr := os.Stderr
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = write
+	defer func() { os.Stderr = oldStderr }()
+	printEngineWarnings(graph)
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "warn EBADENGINE package=engine-package@1.0.0 required=node@>=20 current=12.18.4") {
+		t.Fatalf("unexpected warning output: %q", got)
 	}
 }

@@ -16,9 +16,11 @@ type SyncTargetReport struct {
 	Present int
 	Missing int
 	Failed  int
+	Elapsed time.Duration
 }
 
 func SyncTarget(ctx context.Context, target *Client, state *State, packages []Package, opts SyncTargetOptions) (SyncTargetReport, error) {
+	start := time.Now()
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 16
 	}
@@ -67,6 +69,7 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			report.Elapsed = time.Since(start)
 			return report, ctx.Err()
 		case jobs <- pkg:
 		}
@@ -74,6 +77,7 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 	close(jobs)
 	wg.Wait()
 	state.UpdatedAt = time.Now().UTC()
+	report.Elapsed = time.Since(start)
 	return report, firstErr
 }
 

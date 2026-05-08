@@ -72,3 +72,56 @@ func TestApplyEnvAuthForRegistryDoesNotOverrideNPMRC(t *testing.T) {
 		t.Fatalf("auth = %s", got)
 	}
 }
+
+func TestApplyEnvAuthForRegistryTokenPrecedence(t *testing.T) {
+	t.Setenv("NPM_TARGET_TOKEN", "target")
+	t.Setenv("NPM_AUTH_TOKEN", "auth")
+	t.Setenv("NODE_AUTH_TOKEN", "node")
+	t.Setenv("NPM_TOKEN", "npm")
+	t.Setenv("CI_JOB_TOKEN", "job")
+	cfg := DefaultConfig()
+	cfg.ApplyEnvAuthForRegistry("https://gitlab.example/api/v4/projects/123/packages/npm")
+
+	if got := cfg.AuthFor("https://gitlab.example/api/v4/projects/123/packages/npm/demo").Header; got != "Bearer target" {
+		t.Fatalf("auth = %s", got)
+	}
+}
+
+func TestApplyEnvAuthForRegistryCIJobTokenFallback(t *testing.T) {
+	t.Setenv("CI_JOB_TOKEN", "job")
+	cfg := DefaultConfig()
+	cfg.ApplyEnvAuthForRegistry("https://gitlab.example/api/v4/projects/123/packages/npm")
+
+	if got := cfg.AuthFor("https://gitlab.example/api/v4/projects/123/packages/npm/demo").Header; got != "Bearer job" {
+		t.Fatalf("auth = %s", got)
+	}
+}
+
+func TestApplyEnvAuthForRegistryUserPasswordPrecedence(t *testing.T) {
+	t.Setenv("NPM_TARGET_USERNAME", "target-user")
+	t.Setenv("NPM_TARGET_PASSWORD", "target-pass")
+	t.Setenv("CI_DEPLOY_USER", "deploy-user")
+	t.Setenv("CI_DEPLOY_PASSWORD", "deploy-pass")
+	t.Setenv("NPM_USERNAME", "npm-user")
+	t.Setenv("NPM_PASSWORD", "npm-pass")
+	cfg := DefaultConfig()
+	cfg.ApplyEnvAuthForRegistry("https://gitlab.example/api/v4/projects/123/packages/npm")
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("target-user:target-pass"))
+	if got := cfg.AuthFor("https://gitlab.example/api/v4/projects/123/packages/npm/demo").Header; got != want {
+		t.Fatalf("auth = %s want %s", got, want)
+	}
+}
+
+func TestAuthForBareAndScopedAuth(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.values["//registry.example/:_auth"] = base64.StdEncoding.EncodeToString([]byte("root:secret"))
+	cfg.values["//registry.example/@scope/:_authToken"] = "scoped-secret"
+
+	if got := cfg.AuthFor("https://registry.example/left-pad").Header; got != "Basic "+base64.StdEncoding.EncodeToString([]byte("root:secret")) {
+		t.Fatalf("bare auth = %s", got)
+	}
+	if got := cfg.AuthFor("https://registry.example/@scope/pkg").Header; got != "Bearer scoped-secret" {
+		t.Fatalf("scoped auth = %s", got)
+	}
+}

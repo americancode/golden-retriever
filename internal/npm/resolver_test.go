@@ -211,6 +211,34 @@ func TestResolverReconcilesOverlappingPeerRanges(t *testing.T) {
 	}
 }
 
+func TestResolverReconcilesThreeWayPeerEntrySet(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "wide-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "mid-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "exact-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared-peer@1.3.0") {
+		t.Fatalf("three-way peer set should replace the first broad peer choice: %#v", graph.Packages())
+	}
+	if !graph.Has("shared-peer@1.2.0") {
+		t.Fatalf("expected combined peer set to select shared-peer@1.2.0: %#v", graph.Packages())
+	}
+	for _, name := range []string{"wide-peer-plugin", "mid-peer-plugin", "exact-peer-plugin"} {
+		plugin := findNode(t, graph, name)
+		peer := plugin.Peers["shared-peer"]
+		if peer == nil || !peer.Satisfied || peer.To == nil || peer.To.Version != "1.2.0" {
+			t.Fatalf("%s peer not reconciled: %#v", name, peer)
+		}
+	}
+}
+
 func TestResolverDoesNotReconcileDisjointPeerRanges(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
@@ -226,6 +254,30 @@ func TestResolverDoesNotReconcileDisjointPeerRanges(t *testing.T) {
 	}
 	if conflict.PeerName != "shared-peer" || conflict.PeerSpec != "^2.0.0" || conflict.FoundVersion != "1.3.0" {
 		t.Fatalf("unexpected conflict: %#v", conflict)
+	}
+}
+
+func TestResolverHandlesCyclicPeerDependencies(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "cyclic-a", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("cyclic-a@1.0.0") || !graph.Has("cyclic-b@1.0.0") {
+		t.Fatalf("cyclic peer set should resolve both packages: %#v", graph.Packages())
+	}
+	cyclicA := findNode(t, graph, "cyclic-a")
+	cyclicB := findNode(t, graph, "cyclic-b")
+	if peer := cyclicA.Peers["cyclic-b"]; peer == nil || !peer.Satisfied || peer.To != cyclicB {
+		t.Fatalf("cyclic-a peer not satisfied by cyclic-b: %#v", peer)
+	}
+	if peer := cyclicB.Peers["cyclic-a"]; peer == nil || !peer.Satisfied || peer.To != cyclicA {
+		t.Fatalf("cyclic-b peer not satisfied by cyclic-a: %#v", peer)
 	}
 }
 
@@ -509,6 +561,33 @@ func TestResolverAllowsEngineMismatchWhenNotStrict(t *testing.T) {
 	}
 	if !graph.Has("engine-package@1.0.0") {
 		t.Fatalf("non-strict engine mismatch should still resolve: %#v", graph.Packages())
+	}
+	if len(graph.EngineWarnings) != 1 {
+		t.Fatalf("expected one non-strict engine warning, got %#v", graph.EngineWarnings)
+	}
+	warning := graph.EngineWarnings[0]
+	if warning.Package != "engine-package@1.0.0" || warning.Engine != "node" || warning.Wanted != ">=20" || warning.Current != "12.18.4" {
+		t.Fatalf("unexpected engine warning: %#v", warning)
+	}
+}
+
+func TestResolverRollsBackOptionalEngineWarnings(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{
+		IncludeOptional: true,
+		NodeVersion:     "12.18.4",
+	}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"engine-optional-failing-parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("engine-package@1.0.0") || graph.Has("missing-engine-meta@1.0.0") {
+		t.Fatalf("failed optional subtree should be rolled back: %#v", graph.Packages())
+	}
+	if len(graph.EngineWarnings) != 0 {
+		t.Fatalf("engine warnings from rolled-back optional subtree should not remain: %#v", graph.EngineWarnings)
 	}
 }
 
@@ -846,16 +925,40 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 	}
 }
 
-func TestResolvePackageJSONErrorsOnWorkspacesRoot(t *testing.T) {
+func TestResolvePackageJSONIncludesWorkspaceExternalDependencies(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
 	dir := t.TempDir()
-	input := filepath.Join(dir, "package.json")
-	if err := os.WriteFile(input, []byte(`{"workspaces":["packages/*"],"dependencies":{"pkg":"1.0.0"}}`), 0o644); err != nil {
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
-	var workspaceErr *UnsupportedWorkspacesError
-	if !errors.As(err, &workspaceErr) {
-		t.Fatalf("got %v, want UnsupportedWorkspacesError", err)
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:*"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.0.0",
+  "dependencies":{"consumer":"1.0.0"},
+  "devDependencies":{"consumer-two":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("app@1.0.0") {
+		t.Fatalf("workspace package itself should not be fetched as a registry tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") || !graph.Has("consumer-two@1.0.0") {
+		t.Fatalf("workspace external dependencies not resolved: %#v", graph.Packages())
 	}
 }
 
@@ -913,6 +1016,31 @@ func TestResolverReusesExistingSatisfyingDependency(t *testing.T) {
 	edge := consumer.Dependencies["shared"]
 	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
 		t.Fatalf("consumer should point at existing shared@1.2.0 edge: %#v", edge)
+	}
+}
+
+func TestResolverKeepsIncompatibleVersionsAtMultipleDepths(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "consumer", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "consumer-two", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("shared@1.3.0") || !graph.Has("shared@2.1.0") {
+		t.Fatalf("incompatible transitive ranges should keep both shared versions: %#v", graph.Packages())
+	}
+	consumer := findNode(t, graph, "consumer")
+	consumerTwo := findNode(t, graph, "consumer-two")
+	if edge := consumer.Dependencies["shared"]; edge == nil || edge.To == nil || edge.To.Version != "1.3.0" {
+		t.Fatalf("consumer should use shared@1.3.0: %#v", edge)
+	}
+	if edge := consumerTwo.Dependencies["shared"]; edge == nil || edge.To == nil || edge.To.Version != "2.1.0" {
+		t.Fatalf("consumer-two should use shared@2.1.0: %#v", edge)
 	}
 }
 
@@ -991,6 +1119,19 @@ func peerRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/mid-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "mid-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "mid-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": ">=1.1.0 <2.0.0"},
+      "dist": {"tarball": "%s/mid-peer-plugin/-/mid-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/exact-peer-plugin":
 			fmt.Fprintf(w, `{
   "name": "exact-peer-plugin",
@@ -1014,6 +1155,32 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "version": "1.0.0",
       "peerDependencies": {"shared-peer": "^2.0.0"},
       "dist": {"tarball": "%s/disjoint-peer-plugin/-/disjoint-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/cyclic-a":
+			fmt.Fprintf(w, `{
+  "name": "cyclic-a",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "cyclic-a",
+      "version": "1.0.0",
+      "peerDependencies": {"cyclic-b": "1.0.0"},
+      "dist": {"tarball": "%s/cyclic-a/-/cyclic-a-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/cyclic-b":
+			fmt.Fprintf(w, `{
+  "name": "cyclic-b",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "cyclic-b",
+      "version": "1.0.0",
+      "peerDependencies": {"cyclic-a": "1.0.0"},
+      "dist": {"tarball": "%s/cyclic-b/-/cyclic-b-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -1244,6 +1411,32 @@ func engineRegistry(t *testing.T) *httptest.Server {
       "version": "1.0.0",
       "optionalDependencies": {"engine-package": "1.0.0"},
       "dist": {"tarball": "%s/engine-parent/-/engine-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/engine-optional-failing-parent":
+			fmt.Fprintf(w, `{
+  "name": "engine-optional-failing-parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "engine-optional-failing-parent",
+      "version": "1.0.0",
+      "optionalDependencies": {"engine-failing-wrapper": "1.0.0"},
+      "dist": {"tarball": "%s/engine-optional-failing-parent/-/engine-optional-failing-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/engine-failing-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "engine-failing-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "engine-failing-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"engine-package": "1.0.0", "missing-engine-meta": "1.0.0"},
+      "dist": {"tarball": "%s/engine-failing-wrapper/-/engine-failing-wrapper-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -1522,10 +1715,23 @@ func dedupeRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/consumer-two":
+			fmt.Fprintf(w, `{
+  "name": "consumer-two",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "consumer-two",
+      "version": "1.0.0",
+      "dependencies": {"shared": "^2.0.0"},
+      "dist": {"tarball": "%s/consumer-two/-/consumer-two-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/shared":
 			fmt.Fprintf(w, `{
   "name": "shared",
-  "dist-tags": {"latest": "1.3.0"},
+  "dist-tags": {"latest": "2.1.0"},
   "versions": {
     "1.2.0": {
       "name": "shared",
@@ -1536,9 +1742,14 @@ func dedupeRegistry(t *testing.T) *httptest.Server {
       "name": "shared",
       "version": "1.3.0",
       "dist": {"tarball": "%s/shared/-/shared-1.3.0.tgz"}
+    },
+    "2.1.0": {
+      "name": "shared",
+      "version": "2.1.0",
+      "dist": {"tarball": "%s/shared/-/shared-2.1.0.tgz"}
     }
   }
-}`, serverURL(r), serverURL(r))
+}`, serverURL(r), serverURL(r), serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -100,6 +101,75 @@ func TestPublishAllTreatsConflictAsPresent(t *testing.T) {
 	}
 }
 
+func TestPublishAllPublishesScopedPackageWithAuth(t *testing.T) {
+	tgz := testPackageTarball(t, `{"name":"@scope/demo","version":"1.0.0"}`)
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "scope-demo-1.0.0.tgz")
+	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var authHeader string
+	var publishPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		publishPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.ScopeRegistries["@scope"] = srv.URL
+	cfg.values[nerfDart(srv.URL+"/")+":_authToken"] = "scoped-secret"
+	state := NewState()
+	state.Local["@scope/demo@1.0.0"] = StateRecord{Name: "@scope/demo", Version: "1.0.0", Path: tgzPath}
+
+	report, err := PublishAll(context.Background(), NewClientWithConfig(cfg), state, PublishOptions{Source: "scoped-publish"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Pushed != 1 || report.Failed != 0 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if publishPath != "/@scope%2Fdemo" {
+		t.Fatalf("publish path = %s", publishPath)
+	}
+	if authHeader != "Bearer scoped-secret" {
+		t.Fatalf("auth header = %s", authHeader)
+	}
+	if state.Target["@scope/demo@1.0.0"].Source != "scoped-publish" {
+		t.Fatalf("target not marked: %#v", state.Target)
+	}
+}
+
+func TestPublishAllRetriesTransientFailure(t *testing.T) {
+	tgz := testPackageTarball(t, `{"name":"demo","version":"1.0.0"}`)
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "demo-1.0.0.tgz")
+	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt64(&hits, 1) == 1 {
+			http.Error(w, "temporary", http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	state := NewState()
+	state.Local["demo@1.0.0"] = StateRecord{Name: "demo", Version: "1.0.0", Path: tgzPath}
+	report, err := PublishAll(context.Background(), NewClient(srv.URL), state, PublishOptions{MaxRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Pushed != 1 || atomic.LoadInt64(&hits) != 2 {
+		t.Fatalf("report=%#v hits=%d", report, hits)
+	}
+}
+
 func TestPublishAllSkipsTargetPresent(t *testing.T) {
 	state := NewState()
 	state.Local["demo@1.0.0"] = StateRecord{Name: "demo", Version: "1.0.0", Path: "/nope"}
@@ -108,12 +178,15 @@ func TestPublishAllSkipsTargetPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Skipped != 1 || report.Pushed != 0 {
+	if report.Skipped != 0 || report.Pushed != 0 {
 		t.Fatalf("unexpected report: %#v", report)
+	}
+	if _, ok := state.Local["demo@1.0.0"]; ok {
+		t.Fatalf("invalid local record should be removed before publish")
 	}
 }
 
-func testPackageTarball(t *testing.T, packageJSON string) []byte {
+func testPackageTarball(t testing.TB, packageJSON string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

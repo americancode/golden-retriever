@@ -26,6 +26,7 @@ type PublishOptions struct {
 	Source      string
 	Tag         string
 	Access      string
+	MaxRetries  int
 }
 
 type PublishReport struct {
@@ -33,6 +34,7 @@ type PublishReport struct {
 	Skipped int
 	Present int
 	Failed  int
+	Elapsed time.Duration
 }
 
 type publishManifest struct {
@@ -45,6 +47,7 @@ type publishManifest struct {
 }
 
 func PublishAll(ctx context.Context, target *Client, state *State, opts PublishOptions) (PublishReport, error) {
+	start := time.Now()
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 8
 	}
@@ -57,7 +60,11 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	if opts.Access == "" {
 		opts.Access = "public"
 	}
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 0
+	}
 	normalizeState(state)
+	ValidateStateFiles(state)
 
 	jobs := make(chan StateRecord)
 	var stateMu sync.Mutex
@@ -78,6 +85,10 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 					if firstErr == nil {
 						firstErr = err
 					}
+					recordFailure(state, &stateMu, Package{
+						Name: rec.Name, Version: rec.Version, Tarball: rec.Tarball,
+						Integrity: rec.Integrity, Shasum: rec.Shasum,
+					}, "publish", err)
 				} else if result == publishPushed {
 					report.Pushed++
 					stateMu.Lock()
@@ -105,6 +116,7 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			report.Elapsed = time.Since(start)
 			return report, ctx.Err()
 		case jobs <- rec:
 		}
@@ -112,6 +124,7 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	close(jobs)
 	wg.Wait()
 	state.UpdatedAt = time.Now().UTC()
+	report.Elapsed = time.Since(start)
 	return report, firstErr
 }
 
@@ -154,25 +167,60 @@ func publishOne(ctx context.Context, target *Client, rec StateRecord, opts Publi
 	if err != nil {
 		return publishSkipped, Package{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	result, err := publishDocumentWithRetries(ctx, target, endpoint, body, pkg, opts.MaxRetries)
 	if err != nil {
 		return publishSkipped, Package{}, err
+	}
+	if result == publishPresent {
+		return publishPresent, pkg, nil
+	}
+	return publishPushed, pkg, nil
+}
+
+func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package, maxRetries int) (publishResult, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		result, err := publishDocument(ctx, target, endpoint, body, pkg)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !isRetryable(err) || attempt == maxRetries {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return publishSkipped, ctx.Err()
+		case <-time.After(retryDelay(err, attempt)):
+		}
+	}
+	return publishSkipped, lastErr
+}
+
+func publishDocument(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package) (publishResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return publishSkipped, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	target.applyAuth(req)
 	res, err := target.HTTPClient.Do(req)
 	if err != nil {
-		return publishSkipped, Package{}, err
+		return publishSkipped, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusConflict {
-		return publishPresent, pkg, nil
+		return publishPresent, nil
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return publishSkipped, Package{}, fmt.Errorf("%s: publish returned %w", pkg.Key(), httpStatusError{StatusCode: res.StatusCode, Status: res.Status})
+		return publishSkipped, fmt.Errorf("%s: publish returned %w", pkg.Key(), httpStatusError{
+			StatusCode: res.StatusCode,
+			Status:     res.Status,
+			RetryAfter: retryAfterDelay(res.Header.Get("Retry-After")),
+		})
 	}
-	return publishPushed, pkg, nil
+	return publishPushed, nil
 }
 
 func manifestFromTarball(tarballData []byte) (publishManifest, error) {

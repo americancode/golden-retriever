@@ -13,10 +13,11 @@ func (p Package) Key() string {
 }
 
 type Graph struct {
-	Root          *Node
-	PeerConflicts []PeerConflict
-	packages      map[string]Package
-	nodes         map[string]*Node
+	Root           *Node
+	PeerConflicts  []PeerConflict
+	EngineWarnings []*PackageEngineError
+	packages       map[string]Package
+	nodes          map[string]*Node
 }
 
 func NewGraph() *Graph {
@@ -133,6 +134,13 @@ func (g *Graph) AddPeerConflict(from, found *Node, name, spec string) {
 		Spec:         spec,
 		FoundVersion: found.Version,
 	})
+}
+
+func (g *Graph) AddEngineWarning(warning *PackageEngineError) {
+	if warning == nil {
+		return
+	}
+	g.EngineWarnings = append(g.EngineWarnings, warning)
 }
 
 func clonePackages(in map[string]Package) map[string]Package {

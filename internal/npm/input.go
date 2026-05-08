@@ -37,6 +37,12 @@ type packageJSON struct {
 	Workspaces           any               `json:"workspaces"`
 }
 
+type workspacePackage struct {
+	Name string
+	Root packageJSON
+	Path string
+}
+
 type UnsupportedSpecError struct {
 	Name string
 	Spec string
@@ -103,8 +109,15 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	if root.Workspaces != nil {
-		return nil, &UnsupportedWorkspacesError{}
+	workspaces, err := loadWorkspaces(filepath.Dir(path), root.Workspaces)
+	if err != nil {
+		return nil, err
+	}
+	workspaceNames := map[string]bool{}
+	for _, workspace := range workspaces {
+		if workspace.Name != "" {
+			workspaceNames[workspace.Name] = true
+		}
 	}
 	rootSpecs := rootDependencySpecs(root)
 	overrides, err := ParseOverrides(root.Overrides, rootSpecs)
@@ -113,20 +126,38 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 	}
 
 	var deps []DependencyRequest
-	deps, err = appendDeps(deps, root.Dependencies, EdgeProd)
+	deps, err = appendDeps(deps, root.Dependencies, EdgeProd, workspaceNames)
 	if err != nil {
 		return nil, err
 	}
 	if opts.IncludeDev {
-		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev)
+		deps, err = appendDeps(deps, root.DevDependencies, EdgeDev, workspaceNames)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if opts.IncludeOptional {
-		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional)
+		deps, err = appendDeps(deps, root.OptionalDependencies, EdgeOptional, workspaceNames)
 		if err != nil {
 			return nil, err
+		}
+	}
+	for _, workspace := range workspaces {
+		deps, err = appendDeps(deps, workspace.Root.Dependencies, EdgeProd, workspaceNames)
+		if err != nil {
+			return nil, err
+		}
+		if opts.IncludeDev {
+			deps, err = appendDeps(deps, workspace.Root.DevDependencies, EdgeDev, workspaceNames)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if opts.IncludeOptional {
+			deps, err = appendDeps(deps, workspace.Root.OptionalDependencies, EdgeOptional, workspaceNames)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -167,15 +198,96 @@ func mergeDeps(dst, src map[string]string) error {
 	return nil
 }
 
-func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) ([]DependencyRequest, error) {
+func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceNames map[string]bool) ([]DependencyRequest, error) {
 	for _, name := range sortedDependencyNames(src) {
 		spec := src[name]
+		if workspaceNames[name] && isWorkspaceReference(spec) {
+			continue
+		}
 		if err := validateDependencySpec(name, spec, edgeType); err != nil {
 			return nil, err
 		}
 		dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
 	}
 	return dst, nil
+}
+
+func loadWorkspaces(rootDir string, raw any) ([]workspacePackage, error) {
+	patterns, err := workspacePatterns(raw)
+	if err != nil {
+		return nil, err
+	}
+	var out []workspacePackage
+	seen := map[string]bool{}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(filepath.Join(rootDir, filepath.FromSlash(pattern)))
+		if err != nil {
+			return nil, fmt.Errorf("invalid workspace pattern %q: %w", pattern, err)
+		}
+		sort.Strings(matches)
+		for _, match := range matches {
+			info, err := os.Stat(match)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			pkgPath := filepath.Join(match, "package.json")
+			data, err := os.ReadFile(pkgPath)
+			if err != nil {
+				continue
+			}
+			var pkg packageJSON
+			if err := json.Unmarshal(data, &pkg); err != nil {
+				return nil, err
+			}
+			if pkg.Name == "" || seen[pkgPath] {
+				continue
+			}
+			seen[pkgPath] = true
+			out = append(out, workspacePackage{Name: pkg.Name, Root: pkg, Path: pkgPath})
+		}
+	}
+	return out, nil
+}
+
+func workspacePatterns(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var patterns []string
+	switch value := raw.(type) {
+	case []any:
+		for _, item := range value {
+			pattern, ok := item.(string)
+			if !ok {
+				return nil, &UnsupportedWorkspacesError{}
+			}
+			patterns = append(patterns, pattern)
+		}
+	case map[string]any:
+		pkgs, ok := value["packages"]
+		if !ok {
+			return nil, nil
+		}
+		items, ok := pkgs.([]any)
+		if !ok {
+			return nil, &UnsupportedWorkspacesError{}
+		}
+		for _, item := range items {
+			pattern, ok := item.(string)
+			if !ok {
+				return nil, &UnsupportedWorkspacesError{}
+			}
+			patterns = append(patterns, pattern)
+		}
+	default:
+		return nil, &UnsupportedWorkspacesError{}
+	}
+	return patterns, nil
+}
+
+func isWorkspaceReference(spec string) bool {
+	spec = strings.TrimSpace(strings.ToLower(spec))
+	return spec == "" || strings.HasPrefix(spec, "workspace:") || strings.HasPrefix(spec, "file:") || strings.HasPrefix(spec, "link:")
 }
 
 func sortedDependencyNames(deps map[string]string) []string {

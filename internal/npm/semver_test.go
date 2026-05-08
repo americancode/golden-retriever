@@ -238,6 +238,9 @@ func TestTildePartialRangesMatchNpmSemver(t *testing.T) {
 		{"1.3.0", "~1.2.x", false},
 		{"1.3.0", "~1", true},
 		{"2.0.0", "~1", false},
+		{"1.2.3", "~>1.2.0", true},
+		{"1.2.9", "~> 1.2.0", true},
+		{"1.3.0", "~>1.2.0", false},
 	}
 	for _, tc := range tests {
 		if got := satisfies(tc.version, tc.spec); got != tc.want {
@@ -266,6 +269,9 @@ func TestPartialComparatorRangesMatchNpmSemver(t *testing.T) {
 		{"0.9.9", "<1", true},
 		{"2.0.0", "<=1.x", false},
 		{"1.9.9", "<=1.x", true},
+		{"1.2.3", ">= 1.2.0", true},
+		{"1.2.3", "> 1.2.0 < 2.0.0", true},
+		{"1.2.3", "< 1.2.0 || >= 1.2.3", true},
 	}
 	for _, tc := range tests {
 		if got := satisfies(tc.version, tc.spec); got != tc.want {

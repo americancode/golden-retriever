@@ -23,6 +23,8 @@ type lockPackage struct {
 	Requires           map[string]string      `json:"requires"`
 	Dev                bool                   `json:"dev"`
 	Optional           bool                   `json:"optional"`
+	InBundle           bool                   `json:"inBundle"`
+	Link               bool                   `json:"link"`
 	Extra              map[string]interface{} `json:"-"`
 }
 
@@ -36,6 +38,8 @@ func (p *lockPackage) UnmarshalJSON(data []byte) error {
 		Requires     map[string]string `json:"requires"`
 		Dev          bool              `json:"dev"`
 		Optional     bool              `json:"optional"`
+		InBundle     bool              `json:"inBundle"`
+		Link         bool              `json:"link"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -47,6 +51,8 @@ func (p *lockPackage) UnmarshalJSON(data []byte) error {
 	p.Requires = raw.Requires
 	p.Dev = raw.Dev
 	p.Optional = raw.Optional
+	p.InBundle = raw.InBundle
+	p.Link = raw.Link
 	if len(raw.Dependencies) > 0 && string(raw.Dependencies) != "null" {
 		var specs map[string]string
 		if err := json.Unmarshal(raw.Dependencies, &specs); err == nil {
@@ -75,7 +81,7 @@ func LoadLockfile(path string) (*Graph, error) {
 	g := NewGraph()
 	if len(lock.Packages) > 0 {
 		for loc, pkg := range lock.Packages {
-			if loc == "" || pkg.Version == "" {
+			if loc == "" || pkg.Version == "" || pkg.InBundle || pkg.Link {
 				continue
 			}
 			name := pkg.Name
@@ -97,6 +103,9 @@ func LoadLockfile(path string) (*Graph, error) {
 }
 
 func walkLockDependency(g *Graph, name string, pkg lockPackage) {
+	if pkg.InBundle || pkg.Link {
+		return
+	}
 	if pkg.Version != "" {
 		resolved := pkg.Resolved
 		if resolved == "" {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -58,5 +59,119 @@ func TestSyncTargetMarksPresentAndMissingPackages(t *testing.T) {
 	}
 	if rec.Tarball == "https://source/present.tgz" {
 		t.Fatalf("target record should use target registry tarball when available: %#v", rec)
+	}
+}
+
+func TestSyncTargetUsesScopedRegistryAuth(t *testing.T) {
+	const token = "scoped-secret"
+	var sawAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+token {
+			sawAuth = true
+		}
+		switch r.URL.EscapedPath() {
+		case "/@scope%2Fpresent":
+			fmt.Fprintf(w, `{
+  "name": "@scope/present",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "@scope/present",
+      "version": "1.0.0",
+      "dist": {
+        "tarball": "%s/@scope/present/-/present-1.0.0.tgz",
+        "integrity": "sha512-present"
+      }
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.ScopeRegistries["@scope"] = srv.URL
+	cfg.values[nerfDart(srv.URL+"/")+":_authToken"] = token
+	state := NewState()
+	report, err := SyncTarget(context.Background(), NewClientWithConfig(cfg), state, []Package{
+		{Name: "@scope/present", Version: "1.0.0"},
+	}, SyncTargetOptions{Concurrency: 1, Source: "scoped-target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Present != 1 || report.Missing != 0 || report.Failed != 0 || !sawAuth {
+		t.Fatalf("report=%#v sawAuth=%v", report, sawAuth)
+	}
+	if state.Target["@scope/present@1.0.0"].Source != "scoped-target" {
+		t.Fatalf("target not marked: %#v", state.Target)
+	}
+}
+
+func TestSyncTargetReportsPartialFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/present":
+			fmt.Fprintf(w, `{
+  "name": "present",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {"name": "present", "version": "1.0.0"}
+  }
+}`)
+		case "/broken":
+			http.Error(w, "broken", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	state := NewState()
+	report, err := SyncTarget(context.Background(), NewClient(srv.URL), state, []Package{
+		{Name: "present", Version: "1.0.0"},
+		{Name: "missing", Version: "1.0.0"},
+		{Name: "broken", Version: "1.0.0"},
+	}, SyncTargetOptions{Concurrency: 2, Source: "partial"})
+	if err == nil {
+		t.Fatalf("partial sync should return first registry error")
+	}
+	if report.Present != 1 || report.Missing != 1 || report.Failed != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if state.Target["present@1.0.0"].Source != "partial" {
+		t.Fatalf("successful package should still be marked: %#v", state.Target)
+	}
+}
+
+func TestSyncTargetRetriesTransientPackumentFailure(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt64(&hits, 1) == 1 {
+			http.Error(w, "temporary", http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprintf(w, `{
+  "name": "present",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {"name": "present", "version": "1.0.0"}
+  }
+}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	client.PackumentRetries = 1
+	state := NewState()
+	report, err := SyncTarget(context.Background(), client, state, []Package{
+		{Name: "present", Version: "1.0.0"},
+	}, SyncTargetOptions{Concurrency: 1, Source: "retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Present != 1 || atomic.LoadInt64(&hits) != 2 {
+		t.Fatalf("report=%#v hits=%d", report, hits)
 	}
 }

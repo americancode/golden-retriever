@@ -1,0 +1,27 @@
+stages:
+  - mirror
+
+variables:
+  GOLDEN_RETRIEVER_STATE: ".gr/state.json"
+  GOLDEN_RETRIEVER_METADATA_CACHE: ".gr/metadata"
+  GOLDEN_RETRIEVER_TARBALLS: ".gr/tgzs"
+
+cache:
+  key:
+    files:
+      - package.json
+      - package-lock.json
+      - npm-shrinkwrap.json
+  paths:
+    - .gr/state.json
+    - .gr/metadata/
+    - .gr/tgzs/
+  policy: pull-push
+
+mirror:npm:
+  stage: mirror
+  image: golang:1.23
+  rules:
+    - if: '$NPM_TARGET_REGISTRY'
+  script:
+    - go run ./cmd/golden-retriever mirror --input package.json --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY"

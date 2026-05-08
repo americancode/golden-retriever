@@ -18,8 +18,8 @@ go run ./cmd/golden-retriever fetch \
 
 Supported inputs:
 
-- `package.json`: resolves the full dependency tree from the npm registry.
-- `package-lock.json` / `npm-shrinkwrap.json`: imports the resolved tarball set directly.
+- `package.json`: resolves the full dependency tree from the npm registry. Basic workspaces are supported by discovering workspace package globs, skipping local workspace tarball acquisition, and resolving each workspace package's external dependencies.
+- `package-lock.json` / `npm-shrinkwrap.json`: imports the resolved tarball set directly and skips bundled/link entries that are not separate registry tarballs.
 
 The output directory receives tarballs named as `<escaped-name>-<version>.tgz`; scoped packages are escaped as `@scope+pkg`.
 
@@ -44,6 +44,8 @@ Target registry pushes must be authenticated and should run in parallel wherever
 ## GitLab CI
 
 The expected production trigger is a GitLab CI pipeline. The state file and metadata cache should be stored in GitLab cache so normal runs avoid querying the target registry unless explicitly requested.
+
+This repository includes a baseline `.gitlab-ci.yml` that caches `.gr/state.json`, `.gr/metadata/`, and `.gr/tgzs/`, then runs `golden-retriever mirror` when `NPM_TARGET_REGISTRY` is set. The tarball cache is optional but useful when jobs retry or when target pushes fail after successful fetches.
 
 Typical flow:
 

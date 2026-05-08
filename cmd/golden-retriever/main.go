@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -37,6 +38,8 @@ func run(args []string) error {
 		return resolve(args[1:])
 	case "state":
 		return stateCmd(args[1:])
+	case "cache":
+		return cacheCmd(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -44,6 +47,65 @@ func run(args []string) error {
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func cacheCmd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing cache subcommand")
+	}
+	switch args[0] {
+	case "prune":
+		return cachePrune(args[1:])
+	case "clear":
+		return cacheClear(args[1:])
+	default:
+		return fmt.Errorf("unknown cache subcommand %q", args[0])
+	}
+}
+
+func cachePrune(args []string) error {
+	fs := flag.NewFlagSet("cache prune", flag.ExitOnError)
+	cacheDir := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
+	maxAge := fs.Duration("max-age", 7*24*time.Hour, "remove cache entries older than this duration")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := npm.PruneMetadataCache(npm.CachePruneOptions{Dir: *cacheDir, MaxAge: *maxAge})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return printJSON(struct {
+			Command string               `json:"command"`
+			Cache   string               `json:"cache"`
+			Prune   npm.CachePruneReport `json:"prune"`
+		}{Command: "cache prune", Cache: *cacheDir, Prune: report})
+	}
+	fmt.Printf("cache=%s scanned=%d removed=%d failed=%d elapsed=%s\n", *cacheDir, report.Scanned, report.Removed, report.Failed, report.Elapsed)
+	return nil
+}
+
+func cacheClear(args []string) error {
+	fs := flag.NewFlagSet("cache clear", flag.ExitOnError)
+	cacheDir := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := npm.PruneMetadataCache(npm.CachePruneOptions{Dir: *cacheDir, RemoveAll: true})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return printJSON(struct {
+			Command string               `json:"command"`
+			Cache   string               `json:"cache"`
+			Prune   npm.CachePruneReport `json:"prune"`
+		}{Command: "cache clear", Cache: *cacheDir, Prune: report})
+	}
+	fmt.Printf("cache=%s scanned=%d removed=%d failed=%d elapsed=%s\n", *cacheDir, report.Scanned, report.Removed, report.Failed, report.Elapsed)
+	return nil
 }
 
 func mirror(args []string) error {
@@ -74,9 +136,12 @@ func mirror(args []string) error {
 	fetchConcurrency := fs.Int("fetch-concurrency", max(8, runtime.NumCPU()*4), "parallel tarball download count")
 	targetConcurrency := fs.Int("target-concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
 	pushConcurrency := fs.Int("push-concurrency", max(4, runtime.NumCPU()*2), "parallel target registry publish count")
+	outputNaming := fs.String("output-naming", "flat", "tarball output naming strategy: flat or registry")
 	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
+	publishRetries := fs.Int("publish-retries", 3, "target registry publish retry count for transient failures")
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	timeout := fs.Duration("timeout", 30*time.Minute, "workflow timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -115,6 +180,9 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
+	if !*jsonOut {
+		printEngineWarnings(graph)
+	}
 
 	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries, false)
 	if err != nil {
@@ -122,12 +190,13 @@ func mirror(args []string) error {
 	}
 	targetClient.UseStaleOnFailure = false
 
+	var syncReport npm.SyncTargetReport
 	if *syncTarget {
 		state, err := npm.LoadState(*statePath)
 		if err != nil {
 			return err
 		}
-		syncReport, err := npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
+		syncReport, err = npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
 			Concurrency: *targetConcurrency,
 			Source:      *targetRegistry,
 		})
@@ -137,15 +206,18 @@ func mirror(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("target_sync packages=%d present=%d missing=%d failed=%d state=%s target=%s\n",
-			len(graph.Packages()), syncReport.Present, syncReport.Missing, syncReport.Failed, *statePath, *targetRegistry)
+		if !*jsonOut {
+			fmt.Printf("target_sync packages=%d present=%d missing=%d failed=%d state=%s target=%s\n",
+				len(graph.Packages()), syncReport.Present, syncReport.Missing, syncReport.Failed, *statePath, *targetRegistry)
+		}
 	}
 
 	fetchReport, err := npm.FetchAll(ctx, sourceClient, graph.Packages(), npm.FetchOptions{
-		OutDir:      *out,
-		StatePath:   *statePath,
-		Concurrency: *fetchConcurrency,
-		MaxRetries:  *maxRetries,
+		OutDir:             *out,
+		StatePath:          *statePath,
+		Concurrency:        *fetchConcurrency,
+		MaxRetries:         *maxRetries,
+		OutputNameStrategy: *outputNaming,
 	})
 	if err != nil {
 		return err
@@ -160,6 +232,7 @@ func mirror(args []string) error {
 		Source:      *targetRegistry,
 		Tag:         *tag,
 		Access:      *access,
+		MaxRetries:  *publishRetries,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -168,9 +241,26 @@ func mirror(args []string) error {
 		return err
 	}
 
-	fmt.Printf("mirror packages=%d downloaded=%d local_skipped=%d target_skipped=%d fetch_failed=%d pushed=%d already_present=%d push_skipped=%d push_failed=%d out=%s state=%s target=%s\n",
-		len(graph.Packages()), fetchReport.Downloaded, fetchReport.Skipped, fetchReport.TargetSkipped, fetchReport.Failed,
-		pushReport.Pushed, pushReport.Present, pushReport.Skipped, pushReport.Failed, *out, *statePath, *targetRegistry)
+	if *jsonOut {
+		return printJSON(struct {
+			Command        string                    `json:"command"`
+			Packages       int                       `json:"packages"`
+			Fetch          npm.FetchReport           `json:"fetch"`
+			Push           npm.PublishReport         `json:"push"`
+			TargetSync     npm.SyncTargetReport      `json:"targetSync,omitempty"`
+			TargetSynced   bool                      `json:"targetSynced"`
+			Out            string                    `json:"out"`
+			State          string                    `json:"state"`
+			TargetRegistry string                    `json:"targetRegistry"`
+			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
+		}{
+			Command: "mirror", Packages: len(graph.Packages()), Fetch: fetchReport, Push: pushReport,
+			TargetSync: syncReport, TargetSynced: *syncTarget, Out: *out, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings,
+		})
+	}
+	fmt.Printf("mirror packages=%d downloaded=%d downloaded_bytes=%d local_skipped=%d target_skipped=%d fetch_failed=%d fetch_elapsed=%s pushed=%d already_present=%d push_skipped=%d push_failed=%d out=%s state=%s target=%s\n",
+		len(graph.Packages()), fetchReport.Downloaded, fetchReport.DownloadedBytes, fetchReport.Skipped, fetchReport.TargetSkipped, fetchReport.Failed,
+		fetchReport.Elapsed, pushReport.Pushed, pushReport.Present, pushReport.Skipped, pushReport.Failed, *out, *statePath, *targetRegistry)
 	return nil
 }
 
@@ -183,6 +273,8 @@ func push(args []string) error {
 	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel target registry publish count")
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
+	maxRetries := fs.Int("max-retries", 3, "target registry publish retry count for transient failures")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	timeout := fs.Duration("timeout", 10*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -208,6 +300,7 @@ func push(args []string) error {
 		Source:      *targetRegistry,
 		Tag:         *tag,
 		Access:      *access,
+		MaxRetries:  *maxRetries,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -215,8 +308,16 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("pushed=%d already_present=%d skipped=%d failed=%d state=%s target=%s\n",
-		report.Pushed, report.Present, report.Skipped, report.Failed, *statePath, *targetRegistry)
+	if *jsonOut {
+		return printJSON(struct {
+			Command        string            `json:"command"`
+			Push           npm.PublishReport `json:"push"`
+			State          string            `json:"state"`
+			TargetRegistry string            `json:"targetRegistry"`
+		}{Command: "push", Push: report, State: *statePath, TargetRegistry: *targetRegistry})
+	}
+	fmt.Printf("pushed=%d already_present=%d skipped=%d failed=%d elapsed=%s state=%s target=%s\n",
+		report.Pushed, report.Present, report.Skipped, report.Failed, report.Elapsed, *statePath, *targetRegistry)
 	return nil
 }
 
@@ -233,6 +334,7 @@ func fetch(args []string) error {
 	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel download count")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
+	outputNaming := fs.String("output-naming", "flat", "tarball output naming strategy: flat or registry")
 	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
@@ -244,6 +346,7 @@ func fetch(args []string) error {
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -279,18 +382,32 @@ func fetch(args []string) error {
 	if err != nil {
 		return err
 	}
+	if !*jsonOut {
+		printEngineWarnings(graph)
+	}
 
 	report, err := npm.FetchAll(ctx, client, graph.Packages(), npm.FetchOptions{
-		OutDir:      *out,
-		StatePath:   *state,
-		Concurrency: *concurrency,
-		MaxRetries:  *maxRetries,
+		OutDir:             *out,
+		StatePath:          *state,
+		Concurrency:        *concurrency,
+		MaxRetries:         *maxRetries,
+		OutputNameStrategy: *outputNaming,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("packages=%d downloaded=%d local_skipped=%d target_skipped=%d failed=%d out=%s state=%s\n",
-		len(graph.Packages()), report.Downloaded, report.Skipped, report.TargetSkipped, report.Failed, *out, *state)
+	if *jsonOut {
+		return printJSON(struct {
+			Command        string                    `json:"command"`
+			Packages       int                       `json:"packages"`
+			Fetch          npm.FetchReport           `json:"fetch"`
+			Out            string                    `json:"out"`
+			State          string                    `json:"state"`
+			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
+		}{Command: "fetch", Packages: len(graph.Packages()), Fetch: report, Out: *out, State: *state, EngineWarnings: graph.EngineWarnings})
+	}
+	fmt.Printf("packages=%d downloaded=%d downloaded_bytes=%d local_skipped=%d target_skipped=%d failed=%d elapsed=%s out=%s state=%s\n",
+		len(graph.Packages()), report.Downloaded, report.DownloadedBytes, report.Skipped, report.TargetSkipped, report.Failed, report.Elapsed, *out, *state)
 	return nil
 }
 
@@ -345,6 +462,7 @@ func resolve(args []string) error {
 	if err != nil {
 		return err
 	}
+	printEngineWarnings(graph)
 	for _, pkg := range graph.Packages() {
 		fmt.Printf("%s@%s %s\n", pkg.Name, pkg.Version, pkg.Tarball)
 	}
@@ -356,6 +474,8 @@ func stateCmd(args []string) error {
 		return fmt.Errorf("missing state subcommand")
 	}
 	switch args[0] {
+	case "inspect":
+		return stateInspect(args[1:])
 	case "mark-target":
 		return stateMarkTarget(args[1:])
 	case "sync-target":
@@ -363,6 +483,52 @@ func stateCmd(args []string) error {
 	default:
 		return fmt.Errorf("unknown state subcommand %q", args[0])
 	}
+}
+
+func stateInspect(args []string) error {
+	fs := flag.NewFlagSet("state inspect", flag.ExitOnError)
+	statePath := fs.String("state", ".gr/state.json", "state inventory file")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON")
+	validate := fs.Bool("validate-files", false, "verify local tarballs and remove invalid local records")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	state, err := npm.LoadState(*statePath)
+	if err != nil {
+		return err
+	}
+	var validation npm.StateValidationReport
+	if *validate {
+		validation = npm.ValidateStateFiles(state)
+		if err := npm.SaveState(*statePath, state); err != nil {
+			return err
+		}
+	}
+	summary := npm.SummarizeState(state)
+	if *jsonOut {
+		payload := struct {
+			npm.StateSummary
+			Validation npm.StateValidationReport `json:"validation,omitempty"`
+			StatePath  string                    `json:"statePath"`
+		}{
+			StateSummary: summary,
+			Validation:   validation,
+			StatePath:    *statePath,
+		}
+		data, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+	fmt.Printf("state=%s schema=%d target=%d local=%d failures=%d updated=%s\n",
+		*statePath, summary.SchemaVersion, summary.Target, summary.Local, summary.Failures, summary.UpdatedAt.Format(time.RFC3339))
+	if *validate {
+		fmt.Printf("validation checked_local=%d valid_local=%d removed_local=%d\n",
+			validation.CheckedLocal, validation.ValidLocal, validation.RemovedLocal)
+	}
+	return nil
 }
 
 func stateSyncTarget(args []string) error {
@@ -389,6 +555,7 @@ func stateSyncTarget(args []string) error {
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -427,6 +594,9 @@ func stateSyncTarget(args []string) error {
 	if err != nil {
 		return err
 	}
+	if !*jsonOut {
+		printEngineWarnings(graph)
+	}
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
 		return err
@@ -447,8 +617,18 @@ func stateSyncTarget(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("packages=%d target_present=%d target_missing=%d failed=%d state=%s target=%s\n",
-		len(graph.Packages()), report.Present, report.Missing, report.Failed, *statePath, *targetRegistry)
+	if *jsonOut {
+		return printJSON(struct {
+			Command        string                    `json:"command"`
+			Packages       int                       `json:"packages"`
+			TargetSync     npm.SyncTargetReport      `json:"targetSync"`
+			State          string                    `json:"state"`
+			TargetRegistry string                    `json:"targetRegistry"`
+			EngineWarnings []*npm.PackageEngineError `json:"engineWarnings,omitempty"`
+		}{Command: "state sync-target", Packages: len(graph.Packages()), TargetSync: report, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings})
+	}
+	fmt.Printf("packages=%d target_present=%d target_missing=%d failed=%d elapsed=%s state=%s target=%s\n",
+		len(graph.Packages()), report.Present, report.Missing, report.Failed, report.Elapsed, *statePath, *targetRegistry)
 	return nil
 }
 
@@ -591,7 +771,8 @@ Commands:
   mirror    resolve, optionally sync target state, fetch tarballs, and push missing packages
   push      publish local tarballs missing from target registry
   resolve   print the resolved package tarball set
-  state     manage target registry inventory state
+  state     manage target registry inventory state; subcommands: inspect, sync-target, mark-target
+  cache     manage metadata cache; subcommands: prune, clear
 
 Run "golden-retriever fetch -h" for flags.`)
 }
@@ -610,4 +791,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func printEngineWarnings(graph *npm.Graph) {
+	if graph == nil {
+		return
+	}
+	for _, warning := range graph.EngineWarnings {
+		if warning == nil {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "warn EBADENGINE package=%s required=%s@%s current=%s\n",
+			warning.Package, warning.Engine, warning.Wanted, warning.Current)
+	}
+}
+
+func printJSON(value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
 }

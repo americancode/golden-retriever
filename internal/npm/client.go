@@ -162,7 +162,7 @@ func (c *Client) fetchPackumentWithRetries(ctx context.Context, name, reqURL, re
 		if !isRetryable(err) || attempt == retries {
 			break
 		}
-		backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+		backoff := retryDelay(lastErr, attempt)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -204,7 +204,11 @@ func (c *Client) fetchPackument(ctx context.Context, name, reqURL, registry stri
 		return &cached.Packument, nil
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return nil, fmt.Errorf("packument %s: registry returned %w", name, httpStatusError{StatusCode: res.StatusCode, Status: res.Status})
+		return nil, fmt.Errorf("packument %s: registry returned %w", name, httpStatusError{
+			StatusCode: res.StatusCode,
+			Status:     res.Status,
+			RetryAfter: retryAfterDelay(res.Header.Get("Retry-After")),
+		})
 	}
 
 	var p Packument

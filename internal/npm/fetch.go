@@ -13,31 +13,45 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type FetchOptions struct {
-	OutDir      string
-	StatePath   string
-	Concurrency int
-	MaxRetries  int
+	OutDir             string
+	StatePath          string
+	Concurrency        int
+	MaxRetries         int
+	OutputNameStrategy string
 }
 
 type FetchReport struct {
-	Downloaded    int
-	Skipped       int
-	TargetSkipped int
-	Failed        int
+	Downloaded      int
+	Skipped         int
+	TargetSkipped   int
+	Failed          int
+	DownloadedBytes int64
+	Elapsed         time.Duration
 }
 
 type State struct {
-	SchemaVersion int                    `json:"schemaVersion"`
-	UpdatedAt     time.Time              `json:"updatedAt"`
-	Target        map[string]StateRecord `json:"target"`
-	Local         map[string]StateRecord `json:"local"`
-	Downloaded    map[string]StateRecord `json:"downloaded,omitempty"`
+	SchemaVersion int                      `json:"schemaVersion"`
+	UpdatedAt     time.Time                `json:"updatedAt"`
+	Target        map[string]StateRecord   `json:"target"`
+	Local         map[string]StateRecord   `json:"local"`
+	Failures      map[string]FailureRecord `json:"failures,omitempty"`
+	Downloaded    map[string]StateRecord   `json:"downloaded,omitempty"`
+}
+
+type FailureRecord struct {
+	Name      string    `json:"name"`
+	Version   string    `json:"version"`
+	Attempts  int       `json:"attempts"`
+	LastError string    `json:"lastError"`
+	FailedAt  time.Time `json:"failedAt"`
+	Source    string    `json:"source,omitempty"`
 }
 
 type StateRecord struct {
@@ -54,6 +68,7 @@ type StateRecord struct {
 }
 
 func FetchAll(ctx context.Context, client *Client, packages []Package, opts FetchOptions) (FetchReport, error) {
+	start := time.Now()
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 16
 	}
@@ -67,6 +82,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	if err != nil {
 		return FetchReport{}, err
 	}
+	ValidateStateFiles(state)
 
 	jobs := make(chan Package)
 	var mu sync.Mutex
@@ -80,7 +96,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 		go func() {
 			defer wg.Done()
 			for pkg := range jobs {
-				result, err := fetchOne(ctx, client, pkg, opts.OutDir, state, &stateMu, opts.MaxRetries)
+				result, bytes, err := fetchOne(ctx, client, pkg, opts.OutDir, opts.OutputNameStrategy, state, &stateMu, opts.MaxRetries)
 				mu.Lock()
 				if err != nil {
 					report.Failed++
@@ -89,6 +105,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 					}
 				} else if result == fetchDownloaded {
 					report.Downloaded++
+					report.DownloadedBytes += bytes
 				} else if result == fetchTargetPresent {
 					report.TargetSkipped++
 				} else if result == fetchLocalPresent {
@@ -104,6 +121,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			report.Elapsed = time.Since(start)
 			return report, ctx.Err()
 		case jobs <- pkg:
 		}
@@ -111,6 +129,7 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	close(jobs)
 	wg.Wait()
 
+	report.Elapsed = time.Since(start)
 	if err := saveState(opts.StatePath, state); err != nil {
 		return report, err
 	}
@@ -125,30 +144,56 @@ const (
 	fetchTargetPresent
 )
 
-func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, state *State, stateMu *sync.Mutex, maxRetries int) (fetchResult, error) {
+func fetchOne(ctx context.Context, client *Client, pkg Package, outDir, outputNameStrategy string, state *State, stateMu *sync.Mutex, maxRetries int) (fetchResult, int64, error) {
 	if pkg.Tarball == "" {
-		return fetchLocalPresent, fmt.Errorf("%s missing tarball URL", pkg.Key())
+		recordFailure(state, stateMu, pkg, "fetch", fmt.Errorf("%s missing tarball URL", pkg.Key()))
+		return fetchLocalPresent, 0, fmt.Errorf("%s missing tarball URL", pkg.Key())
 	}
-	path := filepath.Join(outDir, tarballFileName(pkg))
+	path, err := tarballOutputPath(outDir, pkg, outputNameStrategy)
+	if err != nil {
+		recordFailure(state, stateMu, pkg, "fetch", err)
+		return fetchLocalPresent, 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		recordFailure(state, stateMu, pkg, "fetch", err)
+		return fetchLocalPresent, 0, err
+	}
 	stateMu.Lock()
 	if targetContainsPackage(state, pkg) {
 		stateMu.Unlock()
-		return fetchTargetPresent, nil
+		return fetchTargetPresent, 0, nil
 	}
 	if rec, ok := state.Local[pkg.Key()]; ok && rec.Tarball == pkg.Tarball && rec.Path == path {
 		stateMu.Unlock()
 		if verifyFile(path, pkg) == nil {
-			return fetchLocalPresent, nil
+			return fetchLocalPresent, 0, nil
 		}
 	} else {
 		stateMu.Unlock()
 	}
+	if verifyFile(path, pkg) == nil {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fetchLocalPresent, 0, err
+		}
+		stateMu.Lock()
+		state.Local[pkg.Key()] = StateRecord{
+			Name: pkg.Name, Version: pkg.Version, Tarball: pkg.Tarball,
+			Integrity: pkg.Integrity, Shasum: pkg.Shasum, Path: path,
+			Size: info.Size(), DownloadedAt: time.Now().UTC(),
+		}
+		delete(state.Failures, pkg.Key())
+		state.UpdatedAt = time.Now().UTC()
+		stateMu.Unlock()
+		return fetchLocalPresent, 0, nil
+	}
 	if err := downloadWithRetries(ctx, client, pkg.Tarball, path, pkg, maxRetries); err != nil {
-		return fetchLocalPresent, err
+		recordFailure(state, stateMu, pkg, "fetch", err)
+		return fetchLocalPresent, 0, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return fetchLocalPresent, err
+		return fetchLocalPresent, 0, err
 	}
 	stateMu.Lock()
 	state.Local[pkg.Key()] = StateRecord{
@@ -156,9 +201,25 @@ func fetchOne(ctx context.Context, client *Client, pkg Package, outDir string, s
 		Integrity: pkg.Integrity, Shasum: pkg.Shasum, Path: path,
 		Size: info.Size(), DownloadedAt: time.Now().UTC(),
 	}
+	delete(state.Failures, pkg.Key())
 	state.UpdatedAt = time.Now().UTC()
 	stateMu.Unlock()
-	return fetchDownloaded, nil
+	return fetchDownloaded, info.Size(), nil
+}
+
+func recordFailure(state *State, stateMu *sync.Mutex, pkg Package, source string, err error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	normalizeState(state)
+	rec := state.Failures[pkg.Key()]
+	rec.Name = pkg.Name
+	rec.Version = pkg.Version
+	rec.Attempts++
+	rec.LastError = err.Error()
+	rec.FailedAt = time.Now().UTC()
+	rec.Source = source
+	state.Failures[pkg.Key()] = rec
+	state.UpdatedAt = time.Now().UTC()
 }
 
 func targetContainsPackage(state *State, pkg Package) bool {
@@ -189,7 +250,7 @@ func downloadWithRetries(ctx context.Context, client *Client, tarball, path stri
 		if !isRetryable(err) || attempt == maxRetries {
 			break
 		}
-		backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+		backoff := retryDelay(lastErr, attempt)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -202,6 +263,7 @@ func downloadWithRetries(ctx context.Context, client *Client, tarball, path stri
 type httpStatusError struct {
 	StatusCode int
 	Status     string
+	RetryAfter time.Duration
 }
 
 func (e httpStatusError) Error() string {
@@ -219,6 +281,31 @@ func isRetryable(err error) bool {
 	return true
 }
 
+func retryDelay(err error, attempt int) time.Duration {
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) && statusErr.RetryAfter > 0 {
+		return statusErr.RetryAfter
+	}
+	return time.Duration(100*(1<<attempt)) * time.Millisecond
+}
+
+func retryAfterDelay(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		delay := time.Until(when)
+		if delay > 0 {
+			return delay
+		}
+	}
+	return 0
+}
+
 func download(ctx context.Context, client *Client, tarball, path string, pkg Package) error {
 	tmp := path + ".tmp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarball, nil)
@@ -232,7 +319,11 @@ func download(ctx context.Context, client *Client, tarball, path string, pkg Pac
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return fmt.Errorf("%s: tarball returned %w", pkg.Key(), httpStatusError{StatusCode: res.StatusCode, Status: res.Status})
+		return fmt.Errorf("%s: tarball returned %w", pkg.Key(), httpStatusError{
+			StatusCode: res.StatusCode,
+			Status:     res.Status,
+			RetryAfter: retryAfterDelay(res.Header.Get("Retry-After")),
+		})
 	}
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -328,6 +419,7 @@ func NewState() *State {
 		SchemaVersion: 1,
 		Target:        map[string]StateRecord{},
 		Local:         map[string]StateRecord{},
+		Failures:      map[string]FailureRecord{},
 	}
 }
 
@@ -341,12 +433,64 @@ func normalizeState(state *State) {
 	if state.Local == nil {
 		state.Local = map[string]StateRecord{}
 	}
+	if state.Failures == nil {
+		state.Failures = map[string]FailureRecord{}
+	}
 	if len(state.Local) == 0 && len(state.Downloaded) > 0 {
 		for key, rec := range state.Downloaded {
 			state.Local[key] = rec
 		}
 		state.Downloaded = nil
 	}
+}
+
+type StateValidationReport struct {
+	CheckedLocal int
+	ValidLocal   int
+	RemovedLocal int
+}
+
+type StateSummary struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	Target        int       `json:"target"`
+	Local         int       `json:"local"`
+	Failures      int       `json:"failures"`
+}
+
+func SummarizeState(state *State) StateSummary {
+	normalizeState(state)
+	return StateSummary{
+		SchemaVersion: state.SchemaVersion,
+		UpdatedAt:     state.UpdatedAt,
+		Target:        len(state.Target),
+		Local:         len(state.Local),
+		Failures:      len(state.Failures),
+	}
+}
+
+func ValidateStateFiles(state *State) StateValidationReport {
+	normalizeState(state)
+	var report StateValidationReport
+	for key, rec := range state.Local {
+		report.CheckedLocal++
+		if rec.Path == "" {
+			delete(state.Local, key)
+			report.RemovedLocal++
+			continue
+		}
+		pkg := Package{Name: rec.Name, Version: rec.Version, Tarball: rec.Tarball, Integrity: rec.Integrity, Shasum: rec.Shasum}
+		if verifyFile(rec.Path, pkg) != nil {
+			delete(state.Local, key)
+			report.RemovedLocal++
+			continue
+		}
+		report.ValidLocal++
+	}
+	if report.RemovedLocal > 0 {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	return report
 }
 
 func SaveState(path string, state *State) error {
@@ -376,10 +520,29 @@ func MarkTargetPresent(state *State, pkg Package, source string) {
 		Integrity: pkg.Integrity, Shasum: pkg.Shasum,
 		PresentAt: time.Now().UTC(), Source: source,
 	}
+	delete(state.Failures, pkg.Key())
 	state.UpdatedAt = time.Now().UTC()
 }
 
 func tarballFileName(pkg Package) string {
 	name := strings.ReplaceAll(pkg.Name, "/", "+")
 	return name + "-" + pkg.Version + ".tgz"
+}
+
+func tarballOutputPath(outDir string, pkg Package, strategy string) (string, error) {
+	switch strategy {
+	case "", "flat", "escaped":
+		return filepath.Join(outDir, tarballFileName(pkg)), nil
+	case "registry":
+		name := pkg.Name
+		baseName := name
+		if strings.HasPrefix(name, "@") {
+			if _, after, ok := strings.Cut(name, "/"); ok {
+				baseName = after
+			}
+		}
+		return filepath.Join(outDir, name, "-", baseName+"-"+pkg.Version+".tgz"), nil
+	default:
+		return "", fmt.Errorf("unsupported output naming strategy %q", strategy)
+	}
 }

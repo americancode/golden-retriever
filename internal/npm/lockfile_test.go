@@ -310,6 +310,90 @@ func TestLoadLockfileMergesPackagesAndDependenciesMetadata(t *testing.T) {
 	}
 }
 
+func TestLoadLockfileSkipsInBundleEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/parent": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz"
+    },
+    "node_modules/bundled": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/bundled/-/bundled-1.0.0.tgz",
+      "inBundle": true
+    }
+  },
+  "dependencies": {
+    "legacy-bundled": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-bundled/-/legacy-bundled-1.0.0.tgz",
+      "inBundle": true
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("parent@1.0.0") {
+		t.Fatalf("parent should be imported: %#v", graph.Packages())
+	}
+	if graph.Has("bundled@1.0.0") || graph.Has("legacy-bundled@1.0.0") {
+		t.Fatalf("inBundle entries should not be separate tarball acquisitions: %#v", graph.Packages())
+	}
+}
+
+func TestLoadLockfileSkipsLinkEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/local-link": {
+      "version": "1.0.0",
+      "resolved": "../local-link",
+      "link": true
+    },
+    "node_modules/registry-pkg": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/registry-pkg/-/registry-pkg-2.0.0.tgz"
+    }
+  },
+  "dependencies": {
+    "legacy-link": {
+      "version": "1.0.0",
+      "resolved": "../legacy-link",
+      "link": true
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("local-link@1.0.0") || graph.Has("legacy-link@1.0.0") {
+		t.Fatalf("link entries should not be treated as registry tarballs: %#v", graph.Packages())
+	}
+	if !graph.Has("registry-pkg@2.0.0") {
+		t.Fatalf("registry package should still be imported: %#v", graph.Packages())
+	}
+}
+
 func TestLoadLockfileImportsAliasPackageByManifestName(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package-lock.json")
