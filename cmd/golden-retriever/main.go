@@ -433,6 +433,7 @@ func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL ti
 	}
 	if registry != "" {
 		cfg.Registry = registry
+		cfg.ApplyEnvAuthForRegistry(registry)
 	}
 	client := npm.NewClientWithConfig(cfg)
 	client.CacheDir = metadataCache

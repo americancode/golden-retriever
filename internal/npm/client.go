@@ -76,6 +76,10 @@ type VersionManifest struct {
 	Version              string            `json:"version"`
 	Dependencies         map[string]string `json:"dependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	BundleDependencies   dependencyBundle  `json:"bundleDependencies"`
+	BundledDependencies  dependencyBundle  `json:"bundledDependencies"`
+	OS                   stringList        `json:"os"`
+	CPU                  stringList        `json:"cpu"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 	PeerDependenciesMeta map[string]struct {
 		Optional bool `json:"optional"`

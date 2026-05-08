@@ -143,6 +143,12 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 	if pkgVersion == "" {
 		pkgVersion = version
 	}
+	if compatible, platformErr := platformCompatible(manifest); !compatible {
+		if edgeType == EdgeOptional {
+			return nil, nil
+		}
+		return nil, platformErr
+	}
 
 	pkg := Package{
 		Name:      pkgName,
@@ -159,9 +165,15 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 
 	childDeps := map[string]string{}
 	mergeDeps(childDeps, manifest.Dependencies)
+	bundled := bundledDependencyNames(manifest)
+	childDeps = filterBundledDependencies(childDeps, bundled)
 	if r.Options.IncludeOptional {
-		if err := r.resolveDeps(ctx, node, manifest.OptionalDependencies, EdgeOptional); err != nil {
+		optionalDeps := filterBundledDependencies(manifest.OptionalDependencies, bundled)
+		if err := r.resolveDeps(ctx, node, optionalDeps, EdgeOptional); err != nil {
 			return nil, fmt.Errorf("%s@%s optional dependency: %w", pkgName, pkgVersion, err)
+		}
+		for name := range optionalDeps {
+			delete(childDeps, name)
 		}
 	}
 	if err := r.resolveDeps(ctx, node, childDeps, EdgeProd); err != nil {

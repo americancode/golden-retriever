@@ -56,6 +56,29 @@ func defaultNPMRCPaths(projectDir string) []string {
 	return paths
 }
 
+func (c *Config) ApplyEnvAuthForRegistry(registry string) {
+	if c == nil || registry == "" {
+		return
+	}
+	key := nerfDart(strings.TrimRight(registry, "/") + "/")
+	if key == "" || c.longestAuthKey(strings.TrimRight(registry, "/")+"/") != "" {
+		return
+	}
+	if token := firstEnv("NPM_TARGET_TOKEN", "NPM_AUTH_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN", "CI_JOB_TOKEN"); token != "" {
+		c.values[key+":_authToken"] = token
+		return
+	}
+	username, password := firstUserPassEnv(
+		"NPM_TARGET_USERNAME", "NPM_TARGET_PASSWORD",
+		"CI_DEPLOY_USER", "CI_DEPLOY_PASSWORD",
+		"NPM_USERNAME", "NPM_PASSWORD",
+	)
+	if username != "" && password != "" {
+		c.values[key+":username"] = username
+		c.values[key+":_password"] = password
+	}
+}
+
 func (c *Config) LoadFile(path string) error {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -85,6 +108,26 @@ func (c *Config) LoadFile(path string) error {
 		}
 	}
 	return nil
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstUserPassEnv(names ...string) (string, string) {
+	for i := 0; i+1 < len(names); i += 2 {
+		username := os.Getenv(names[i])
+		password := os.Getenv(names[i+1])
+		if username != "" && password != "" {
+			return username, password
+		}
+	}
+	return "", ""
 }
 
 func expandNPMRCValue(value string) string {

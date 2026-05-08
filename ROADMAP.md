@@ -25,6 +25,9 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Peer conflicts are detected when an ancestor/root candidate exists but does not satisfy the requested peer range.
 - `--legacy-peer-deps` ignores peer dependencies.
 - `--strict-peer-deps` fails on optional peer conflicts in addition to required peer conflicts.
+- Resolver skips `bundleDependencies` / `bundledDependencies` child tarballs because npm expects those contents to be provided by the parent tarball.
+- Resolver treats duplicate `optionalDependencies` entries as overriding `dependencies`.
+- Resolver applies npm-style `os` and `cpu` platform filters, skipping incompatible optional packages and failing incompatible required packages.
 - Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies.
 - Packument metadata can be cached on disk with `--metadata-cache`.
 - Cached packuments support freshness control with `--metadata-cache-ttl`.
@@ -119,7 +122,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Keep target registry query/sync optional for rebuilding or verifying state.
 - Continue hardening authenticated push/publish workflow against real target registries.
 - Run target state rebuild/sync in parallel where possible.
-- Ensure all target registry operations work non-interactively in GitLab CI.
+- Target registry operations support non-interactive GitLab CI credentials from `.npmrc` expansion or direct environment variables.
 - Track failures with retry counts and last error.
 - Validate state against existing files at startup.
 - Add `state inspect` or similar command if useful.
@@ -134,6 +137,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Add fixtures for peer dependencies.
 - Add fixtures for peer dependency conflicts and strict/legacy peer modes.
 - Add fixtures for optional dependencies.
+- Add fixtures for bundled dependencies.
 - Add fixtures for overrides.
 - Add fixtures for aliases.
 - Add fixtures for scoped packages.
@@ -141,7 +145,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Add fixtures for conflicting ranges.
 - Add fixtures for lockfile v1, v2, and v3.
 - Add fixtures for workspaces.
-- Add fixtures for platform-filtered packages.
+- Expand fixtures for platform-filtered packages, including CPU combinations and real npm parity cases.
 - Add large-package-tree performance benchmark.
 - Add benchmark comparing this downloader against npm cache/package acquisition where practical.
 

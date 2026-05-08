@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -165,6 +166,102 @@ func TestResolverStrictPeerDepsErrorsOnOptionalPeerConflict(t *testing.T) {
 	}
 }
 
+func TestResolverSkipsBundledDependencies(t *testing.T) {
+	srv := bundleRegistry(t, `"bundleDependencies": ["bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("bundled@1.0.0") {
+		t.Fatalf("bundled dependency should not be resolved as a separate tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("loose@1.0.0") {
+		t.Fatalf("non-bundled dependency should still be resolved: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsBundledDependenciesAliasField(t *testing.T) {
+	srv := bundleRegistry(t, `"bundledDependencies": ["bundled"]`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("bundled@1.0.0") {
+		t.Fatalf("bundled dependency should not be resolved as a separate tarball: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsAllDependenciesWhenBundleDependenciesIsTrue(t *testing.T) {
+	srv := bundleRegistry(t, `"bundleDependencies": true`)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("bundled@1.0.0") || graph.Has("loose@1.0.0") {
+		t.Fatalf("bundleDependencies true should skip child dependency tarballs: %#v", graph.Packages())
+	}
+}
+
+func TestResolverOptionalDependenciesOverrideDependencies(t *testing.T) {
+	srv := optionalOverrideRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared@1.0.0") {
+		t.Fatalf("dependency entry should be overridden by optionalDependencies: %#v", graph.Packages())
+	}
+	if !graph.Has("shared@2.0.0") {
+		t.Fatalf("optional dependency override should be resolved: %#v", graph.Packages())
+	}
+	parent := findNode(t, graph, "parent")
+	edge := parent.Dependencies["shared"]
+	if edge == nil || edge.Type != EdgeOptional || edge.To == nil || edge.To.Version != "2.0.0" {
+		t.Fatalf("unexpected shared edge: %#v", edge)
+	}
+}
+
+func TestResolverSkipsIncompatibleOptionalDependency(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("incompatible@1.0.0") {
+		t.Fatalf("incompatible optional dependency should be skipped: %#v", graph.Packages())
+	}
+	if !graph.Has("compatible@1.0.0") {
+		t.Fatalf("compatible optional dependency should be resolved: %#v", graph.Packages())
+	}
+}
+
+func TestResolverErrorsOnIncompatibleProdDependency(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.Resolve(context.Background(), map[string]string{"incompatible": "1.0.0"})
+	var platformErr *PackagePlatformError
+	if !errors.As(err, &platformErr) {
+		t.Fatalf("got %v, want PackagePlatformError", err)
+	}
+}
+
 func peerRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +307,146 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"host": "^1.0.0"},
       "peerDependenciesMeta": {"host": {"optional": true}},
       "dist": {"tarball": "%s/optional-plugin/-/optional-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func platformRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	currentOS := npmOS(runtime.GOOS)
+	blockedOS := "!" + currentOS
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name": "parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "parent",
+      "version": "1.0.0",
+      "optionalDependencies": {"incompatible": "1.0.0", "compatible": "1.0.0"},
+      "dist": {"tarball": "%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/incompatible":
+			fmt.Fprintf(w, `{
+  "name": "incompatible",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "incompatible",
+      "version": "1.0.0",
+      "os": ["%s"],
+      "dist": {"tarball": "%s/incompatible/-/incompatible-1.0.0.tgz"}
+    }
+  }
+}`, blockedOS, serverURL(r))
+		case "/compatible":
+			fmt.Fprintf(w, `{
+  "name": "compatible",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "compatible",
+      "version": "1.0.0",
+      "os": ["%s"],
+      "dist": {"tarball": "%s/compatible/-/compatible-1.0.0.tgz"}
+    }
+  }
+}`, currentOS, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func optionalOverrideRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name": "parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "parent",
+      "version": "1.0.0",
+      "dependencies": {"shared": "1.0.0"},
+      "optionalDependencies": {"shared": "2.0.0"},
+      "dist": {"tarball": "%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/shared":
+			fmt.Fprintf(w, `{
+  "name": "shared",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "shared",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/shared/-/shared-1.0.0.tgz"}
+    },
+    "2.0.0": {
+      "name": "shared",
+      "version": "2.0.0",
+      "dist": {"tarball": "%s/shared/-/shared-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func bundleRegistry(t *testing.T, bundleField string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/parent":
+			fmt.Fprintf(w, `{
+  "name": "parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "parent",
+      "version": "1.0.0",
+      "dependencies": {"bundled": "1.0.0", "loose": "1.0.0"},
+      %s,
+      "dist": {"tarball": "%s/parent/-/parent-1.0.0.tgz"}
+    }
+  }
+}`, bundleField, serverURL(r))
+		case "/bundled":
+			fmt.Fprintf(w, `{
+  "name": "bundled",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "bundled",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/bundled/-/bundled-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/loose":
+			fmt.Fprintf(w, `{
+  "name": "loose",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "loose",
+      "version": "1.0.0",
+      "dist": {"tarball": "%s/loose/-/loose-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))

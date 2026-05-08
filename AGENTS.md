@@ -31,6 +31,8 @@ Use it as the reference for behavior, especially:
 - `internal/npm/input.go`: input dispatch for package and lock files.
 - `internal/npm/lockfile.go`: lockfile import.
 - `internal/npm/resolver.go`: package.json dependency resolver.
+- `internal/npm/bundle.go`: npm `bundleDependencies` / `bundledDependencies` parsing and filtering for resolver parity.
+- `internal/npm/platform.go`: npm `os` / `cpu` package compatibility filtering for resolver parity.
 - `internal/npm/overrides.go`: root `package.json#overrides` parser and matcher for registry dependency overrides.
 - `internal/npm/types.go`: resolved graph model, including package nodes, dependency edges, and peer edges.
 - `internal/npm/semver.go`: current minimal semver/range support.
@@ -72,6 +74,7 @@ See `ROADMAP.md` before choosing the next task.
 - Treat local state as the normal inventory source. Target registry querying is optional and should be used to rebuild or verify state.
 - Design state and metadata cache paths so they work well with GitLab cache. This program is expected to run from GitLab CI.
 - Target registry auth must be non-interactive and compatible with CI variables.
+- Target registry clients call `ApplyEnvAuthForRegistry` when `--target-registry` is set, so CI can provide `NPM_TARGET_TOKEN`, `NPM_AUTH_TOKEN`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, `CI_JOB_TOKEN`, or username/password pairs without generating `.npmrc`.
 - Target registry sync and push should run in parallel where practical.
 - Target registry push must support authentication.
 - Preserve tarball integrity verification.

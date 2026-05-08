@@ -57,7 +57,7 @@ go run ./cmd/golden-retriever mirror \
   --sync-target
 ```
 
-Authentication should come from CI variables via `.npmrc` or environment expansion, for example an auth token scoped to the target registry.
+Authentication should come from CI variables. The CLI supports npmrc auth with environment expansion, and it also reads target registry credentials directly from environment variables when `--target-registry` is set. Token precedence is `NPM_TARGET_TOKEN`, `NPM_AUTH_TOKEN`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, then `CI_JOB_TOKEN`. Username/password precedence is `NPM_TARGET_USERNAME` + `NPM_TARGET_PASSWORD`, `CI_DEPLOY_USER` + `CI_DEPLOY_PASSWORD`, then `NPM_USERNAME` + `NPM_PASSWORD`.
 
 `mirror` is the CI-oriented command: it resolves the input once, optionally refreshes target-present state with `--sync-target`, fetches only tarballs still needed locally, publishes missing package versions to the target registry in parallel, and updates `state.target` after successful publishes. For fully cached normal runs, omit `--sync-target` and rely on the cached `.gr/state.json`.
 
