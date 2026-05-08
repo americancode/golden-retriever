@@ -2,6 +2,7 @@ package npm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -117,6 +118,87 @@ func TestResolverPrefersVersionQualifiedChildOverride(t *testing.T) {
 	edge := app.Dependencies["dep"]
 	if edge == nil || edge.To.Version != "3.0.0" || edge.Spec != "3.0.0" {
 		t.Fatalf("unexpected specific override edge: %#v", edge)
+	}
+}
+
+func TestOverridesResolveWithRangeIntersectingSelector(t *testing.T) {
+	overrides, err := ParseOverrides(json.RawMessage(`{
+  "dep": "2.0.0",
+  "dep@^1.0.0": "3.0.0"
+}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, rule := overrides.ResolveWithRule(nil, "dep", "^1.0.0")
+	if spec != "3.0.0" || rule == nil || rule.Target.Spec != "^1.0.0" {
+		t.Fatalf("got spec=%q rule=%#v, want version-qualified override", spec, rule)
+	}
+	parent := &Node{Name: "app", Version: "1.0.0"}
+	spec, rule = overrides.ResolveWithRule(parent, "dep", "^1.0.0")
+	if spec != "3.0.0" || rule == nil || rule.Target.Spec != "^1.0.0" {
+		t.Fatalf("with parent got spec=%q rule=%#v, want version-qualified override", spec, rule)
+	}
+	rangeOverrides, err := ParseOverrides(json.RawMessage(`{
+  "range-dep@^1.0.0": "3.0.0"
+}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, rule = rangeOverrides.ResolveWithRule(parent, "range-dep", "^1.2.0")
+	if spec != "3.0.0" || rule == nil || rule.Target.Spec != "^1.0.0" {
+		t.Fatalf("intersecting range got spec=%q rule=%#v, want version-qualified override", spec, rule)
+	}
+}
+
+func TestResolverMatchesVersionQualifiedOverrideByRangeIntersection(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"range-app": "1.0.0"},
+  "overrides": {
+    "range-dep@^1.0.0": "3.0.0"
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := findNode(t, graph, "range-app")
+	edge := app.Dependencies["range-dep"]
+	if edge == nil || edge.RawSpec != "^1.2.0" || edge.Spec != "3.0.0" || edge.To.Version != "3.0.0" {
+		t.Fatalf("intersecting override selector should apply: %#v", edge)
+	}
+}
+
+func TestResolverDoesNotMatchVersionQualifiedOverrideWhenRangesAreDisjoint(t *testing.T) {
+	srv := overrideRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "dependencies": {"range-app": "1.0.0"},
+  "overrides": {
+    "range-dep@^2.0.0": "3.0.0"
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := findNode(t, graph, "range-app")
+	edge := app.Dependencies["range-dep"]
+	if edge == nil || edge.RawSpec != "^1.2.0" || edge.Spec != "^1.2.0" || edge.To.Version != "1.2.3" {
+		t.Fatalf("disjoint override selector should not apply: %#v", edge)
 	}
 }
 
@@ -513,6 +595,36 @@ func overrideRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/range-app":
+			fmt.Fprintf(w, `{
+  "name": "range-app",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "range-app",
+      "version": "1.0.0",
+      "dependencies": {"range-dep": "^1.2.0"},
+      "dist": {"tarball": "%s/range-app/-/range-app-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/range-dep":
+			fmt.Fprintf(w, `{
+  "name": "range-dep",
+  "dist-tags": {"latest": "3.0.0"},
+  "versions": {
+    "1.2.3": {
+      "name": "range-dep",
+      "version": "1.2.3",
+      "dist": {"tarball": "%s/range-dep/-/range-dep-1.2.3.tgz"}
+    },
+    "3.0.0": {
+      "name": "range-dep",
+      "version": "3.0.0",
+      "dist": {"tarball": "%s/range-dep/-/range-dep-3.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
 		case "/other":
 			fmt.Fprintf(w, `{
   "name": "other",

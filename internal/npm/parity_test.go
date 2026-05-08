@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,86 @@ func TestNPMParityFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNPMParityRealPackageJSONFixtures(t *testing.T) {
+	if os.Getenv("NPM_PARITY") != "1" {
+		t.Skip("set NPM_PARITY=1 to run npm-backed parity test")
+	}
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not found")
+	}
+
+	fixtures := realPackageJSONFixtures(t)
+	for _, fixture := range fixtures {
+		t.Run(strings.TrimSuffix(filepath.Base(fixture), ".package.json"), func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "package.json")
+			data, err := os.ReadFile(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(input, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts")
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("npm install failed: %v\n%s", err, out)
+			}
+
+			want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
+			client := NewClient("https://registry.npmjs.org")
+			graph, err := ResolvePackageJSON(context.Background(), client, input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := resolvedPackageSet(graph.Packages())
+			if !equalStringSlices(got.Keys, want.Keys) {
+				t.Fatalf("package set mismatch\ngot:  %v\nwant: %v", got.Keys, want.Keys)
+			}
+			if !equalStringSlices(got.Tarballs, want.Tarballs) {
+				t.Fatalf("tarball set mismatch\ngot:  %v\nwant: %v", got.Tarballs, want.Tarballs)
+			}
+
+			outDir := filepath.Join(dir, "tgzs")
+			statePath := filepath.Join(dir, "state.json")
+			report, err := FetchAll(context.Background(), client, graph.Packages(), FetchOptions{
+				OutDir:      outDir,
+				StatePath:   statePath,
+				Concurrency: 16,
+				MaxRetries:  2,
+			})
+			if err != nil {
+				t.Fatalf("fetch failed: %v report=%+v", err, report)
+			}
+			if report.Downloaded != len(got.Keys) {
+				t.Fatalf("downloaded %d tgzs, want %d; report=%+v", report.Downloaded, len(got.Keys), report)
+			}
+			files, err := filepath.Glob(filepath.Join(outDir, "*.tgz"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) != len(got.Keys) {
+				t.Fatalf("tgz file count = %d, want %d", len(files), len(got.Keys))
+			}
+		})
+	}
+}
+
+func realPackageJSONFixtures(t *testing.T) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join("..", "..", "test", "package-jsons", "*.package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no real package.json fixtures found under test/package-jsons")
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 type parityPackageSet struct {

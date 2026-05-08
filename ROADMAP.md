@@ -16,28 +16,30 @@
 
 ## Resolution Parity TODOs
 
-- [ ] Continue porting npm package spec parsing behavior from `npm-package-arg`.
+- [ ] Continue porting npm package spec parsing behavior from `npm-package-arg` beyond current registry alias, alias wildcard default, and unsupported-spec classification coverage.
 - [ ] Port remaining npm manifest selection behavior from `npm-pick-manifest`.
-- [ ] Replace or finish hardening the minimal semver implementation until it matches npm semver behavior.
+- [ ] Continue hardening semver behavior beyond current strict version identity, prerelease, partial, hyphen, OR, and comparator coverage.
 - [ ] Expand alias handling beyond registry aliases if target package trees require it.
 - [ ] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
-- [ ] Continue hardening `overrides` selector semantics.
-- [ ] Add override semantic conflict detection when ranges intersect or do not intersect.
+- [ ] Continue hardening `overrides` selector semantics beyond current version-qualified range intersection coverage.
+- [ ] Add override semantic conflict detection for incomparable override sets with intersecting or disjoint replacement ranges.
 - [ ] Expand override fixtures for cyclic chains and peer-conflict fixes.
 - [ ] Decide whether alias, directory, file, and git override specs stay rejected or become supported.
 - [ ] Continue hardening `peerDependencies` placement.
+- [ ] Match npm lockfile behavior for peer conflicts that npm records as warnings but this resolver currently rejects.
 - [ ] Continue hardening `peerDependenciesMeta.optional`.
 - [ ] Expand peer fixtures for nested peers, unresolvable peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
 - [ ] Expand peer optional re-resolution fixtures for npm issues like #8726.
 - [ ] Expand peer optional existing-node preference fixtures for npm issues like #9249.
 - [ ] Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
 - [ ] Expand optional failure coverage for tarball download failures.
+- [ ] Match npm lockfile behavior for optional platform packages so all registry tarballs needed by a lockfile are mirrored, not only the current host platform.
 - [ ] Expand bundled dependency parity for complete metadata.
 - [ ] Expand bundled dependency parity for legacy bundling fixtures.
 - [ ] Expand bundled dependency parity for root bundler cases.
 - [ ] Finish npm `--omit` / `--include` edge cases.
-- [ ] Expand workspace support beyond basic package discovery and external dependency traversal.
-- [ ] Support or explicitly reject versioned `workspace:` specs with npm parity fixtures.
+- [ ] Expand workspace support beyond basic package discovery, external dependency traversal, and versioned local workspace specs.
+- [ ] Add npm-backed parity fixtures for satisfied and unsatisfied versioned `workspace:` specs.
 - [ ] Expand workspace fixtures for root links, workspace overrides, conflicting workspace dev deps, and workspace-specific peer sets.
 - [ ] Support or explicitly reject `file:` specs with parity fixtures.
 - [ ] Support or explicitly reject `link:` specs with parity fixtures.
@@ -48,7 +50,7 @@
 - [ ] Finish remaining `engines` omit/include interactions.
 - [ ] Expand deprecation metadata parity fixtures.
 - [ ] Finish ancient lockfile edge cases.
-- [ ] Finish incomplete lock metadata behavior.
+- [ ] Expand incomplete lock metadata behavior beyond current missing-resolved and local/git skip coverage.
 - [ ] Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
 - [ ] Add yarn.lock influence where npm would use it for absent or incomplete lock metadata.
 - [ ] Model remaining npm config that affects resolution, especially `prefer-dedupe`.

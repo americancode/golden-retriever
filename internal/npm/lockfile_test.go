@@ -394,6 +394,118 @@ func TestLoadLockfileSkipsLinkEntries(t *testing.T) {
 	}
 }
 
+func TestLoadLockfileSkipsLocalAndGitResolvedEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/local-file": {
+      "version": "1.0.0",
+      "resolved": "file:../local-file.tgz"
+    },
+    "node_modules/relative-file": {
+      "version": "1.0.0",
+      "resolved": "../relative-file.tgz"
+    },
+    "node_modules/git-package": {
+      "version": "1.0.0",
+      "resolved": "git+ssh://git@github.com/example/git-package.git#abc123"
+    },
+    "node_modules/remote-tarball": {
+      "version": "1.0.0",
+      "resolved": "https://example.test/remote-tarball-1.0.0.tgz"
+    }
+  },
+  "dependencies": {
+    "legacy-local": {
+      "version": "1.0.0",
+      "resolved": "file:legacy-local.tgz"
+    },
+    "legacy-remote": {
+      "version": "1.0.0",
+      "resolved": "https://example.test/legacy-remote-1.0.0.tgz"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"local-file@1.0.0",
+		"relative-file@1.0.0",
+		"git-package@1.0.0",
+		"legacy-local@1.0.0",
+	} {
+		if graph.Has(key) {
+			t.Fatalf("%s should not be imported as a registry tarball: %#v", key, graph.Packages())
+		}
+	}
+	if !graph.Has("remote-tarball@1.0.0") || !graph.Has("legacy-remote@1.0.0") {
+		t.Fatalf("remote tarballs should still be imported: %#v", graph.Packages())
+	}
+}
+
+func TestLoadLockfileSkipsNonSemverVersionEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	data := []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/git-version": {
+      "version": "git+ssh://git@github.com/example/git-version.git#abc123",
+      "resolved": "git+ssh://git@github.com/example/git-version.git#abc123"
+    },
+    "node_modules/file-version": {
+      "version": "file:../file-version.tgz",
+      "resolved": "file:../file-version.tgz"
+    },
+    "node_modules/registry-pkg": {
+      "version": "1.2.3",
+      "resolved": "https://registry.npmjs.org/registry-pkg/-/registry-pkg-1.2.3.tgz"
+    }
+  },
+  "dependencies": {
+    "legacy-git-version": {
+      "version": "github:example/legacy-git-version"
+    },
+    "legacy-registry": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/legacy-registry/-/legacy-registry-2.0.0.tgz"
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadLockfile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"git-version@git+ssh://git@github.com/example/git-version.git#abc123",
+		"file-version@file:../file-version.tgz",
+		"legacy-git-version@github:example/legacy-git-version",
+	} {
+		if graph.Has(key) {
+			t.Fatalf("%s should not be imported as a registry package: %#v", key, graph.Packages())
+		}
+	}
+	if !graph.Has("registry-pkg@1.2.3") || !graph.Has("legacy-registry@2.0.0") {
+		t.Fatalf("registry packages should still be imported: %#v", graph.Packages())
+	}
+}
+
 func TestLoadLockfileImportsAliasPackageByManifestName(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package-lock.json")

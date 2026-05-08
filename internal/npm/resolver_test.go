@@ -968,6 +968,7 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 		"ssh-url":   "ssh://git@github.com/acme/pkg.git",
 		"tarball":   "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
 		"directory": "../local",
+		"home-dir":  "~/local",
 		"windows":   "C:\\local\\pkg",
 	}
 	for name, spec := range tests {
@@ -986,6 +987,14 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 				t.Fatalf("unexpected spec error: %#v", specErr)
 			}
 		})
+	}
+}
+
+func TestValidateDependencySpecAllowsTildeSemverRanges(t *testing.T) {
+	for _, spec := range []string{"~0.4.0", "~1.1.4", "~"} {
+		if err := validateDependencySpec("pkg", spec, EdgeProd); err != nil {
+			t.Fatalf("validateDependencySpec(%q) = %v, want nil", spec, err)
+		}
 	}
 }
 
@@ -1059,6 +1068,72 @@ func TestResolvePackageJSONUsesWorkspaceWhenVersionSatisfied(t *testing.T) {
 	}
 	if !graph.Has("consumer@1.0.0") || !graph.Has("consumer-two@1.0.0") {
 		t.Fatalf("root and workspace external dependencies should resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONUsesVersionedWorkspaceWhenSatisfied(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:^1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.2.0",
+  "dependencies":{"consumer":"1.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("app@1.2.0") {
+		t.Fatalf("satisfied versioned workspace dependency should not fetch registry app tarball: %#v", graph.Packages())
+	}
+	if !graph.Has("consumer@1.0.0") {
+		t.Fatalf("workspace external dependency should resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONErrorsOnUnsatisfiedVersionedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	workspaceDir := filepath.Join(dir, "packages", "app")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{
+  "workspaces":["packages/*"],
+  "dependencies":{"app":"workspace:^2.0.0"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(`{
+  "name":"app",
+  "version":"1.2.0"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+	var workspaceErr *WorkspaceDependencyError
+	if !errors.As(err, &workspaceErr) {
+		t.Fatalf("got %v, want WorkspaceDependencyError", err)
+	}
+	if workspaceErr.Name != "app" || workspaceErr.Spec != "workspace:^2.0.0" || workspaceErr.Version != "1.2.0" {
+		t.Fatalf("unexpected workspace error: %#v", workspaceErr)
 	}
 }
 

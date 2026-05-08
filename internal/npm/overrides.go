@@ -248,6 +248,9 @@ func selectorSpecMatches(candidate, selector string) bool {
 	if candidate == selector {
 		return true
 	}
+	if rangeIntersects(candidate, selector) {
+		return true
+	}
 	return satisfies(candidate, selector)
 }
 

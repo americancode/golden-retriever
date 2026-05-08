@@ -82,7 +82,7 @@ type VersionManifest struct {
 	OS                   stringList        `json:"os"`
 	CPU                  stringList        `json:"cpu"`
 	Libc                 stringList        `json:"libc"`
-	Engines              map[string]string `json:"engines"`
+	Engines              engineMap         `json:"engines"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 	PeerDependenciesMeta map[string]struct {
 		Optional bool `json:"optional"`
@@ -93,6 +93,28 @@ type VersionManifest struct {
 		Shasum    string `json:"shasum"`
 	} `json:"dist"`
 	Deprecated any `json:"deprecated"`
+}
+
+type engineMap map[string]string
+
+func (m *engineMap) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*m = nil
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*m = nil
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range raw {
+		if s, ok := value.(string); ok {
+			out[key] = s
+		}
+	}
+	*m = out
+	return nil
 }
 
 func (c *Client) Packument(ctx context.Context, name string) (*Packument, error) {

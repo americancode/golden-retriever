@@ -81,7 +81,7 @@ func LoadLockfile(path string) (*Graph, error) {
 	g := NewGraph()
 	if len(lock.Packages) > 0 {
 		for loc, pkg := range lock.Packages {
-			if loc == "" || pkg.Version == "" || pkg.InBundle || pkg.Link {
+			if loc == "" || skipLockPackage(pkg) {
 				continue
 			}
 			name := pkg.Name
@@ -103,7 +103,7 @@ func LoadLockfile(path string) (*Graph, error) {
 }
 
 func walkLockDependency(g *Graph, name string, pkg lockPackage) {
-	if pkg.InBundle || pkg.Link {
+	if skipLockPackage(pkg) {
 		return
 	}
 	if pkg.Version != "" {
@@ -116,6 +116,36 @@ func walkLockDependency(g *Graph, name string, pkg lockPackage) {
 	for childName, child := range pkg.NestedDependencies {
 		walkLockDependency(g, childName, child)
 	}
+}
+
+func skipLockPackage(pkg lockPackage) bool {
+	if pkg.Version == "" || pkg.InBundle || pkg.Link {
+		return true
+	}
+	if !parseVersion(pkg.Version).ok {
+		return true
+	}
+	return localLockResolved(pkg.Resolved)
+}
+
+func localLockResolved(resolved string) bool {
+	resolved = strings.TrimSpace(resolved)
+	if resolved == "" {
+		return false
+	}
+	lower := strings.ToLower(resolved)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	if strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "link:") ||
+		strings.HasPrefix(lower, "git:") || strings.HasPrefix(lower, "git+") ||
+		strings.HasPrefix(lower, "github:") || strings.HasPrefix(lower, "gitlab:") ||
+		strings.HasPrefix(lower, "bitbucket:") || strings.HasPrefix(lower, "gist:") ||
+		strings.HasPrefix(lower, "ssh:") || strings.HasPrefix(lower, "svn:") {
+		return true
+	}
+	return strings.HasPrefix(resolved, ".") || strings.HasPrefix(resolved, "/") ||
+		strings.HasPrefix(resolved, "~") || windowsDriveSpecRe.MatchString(resolved)
 }
 
 func defaultTarballURL(name, version string) string {

@@ -87,6 +87,16 @@ func (e *DuplicateWorkspaceError) Error() string {
 	return fmt.Sprintf("duplicate workspace package %q at %s and %s", e.Name, e.First, e.Other)
 }
 
+type WorkspaceDependencyError struct {
+	Name    string
+	Spec    string
+	Version string
+}
+
+func (e *WorkspaceDependencyError) Error() string {
+	return fmt.Sprintf("workspace dependency %s@%s does not satisfy local workspace version %s", e.Name, e.Spec, e.Version)
+}
+
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
 	info, err := os.Stat(input)
 	if err == nil && info.IsDir() {
@@ -211,7 +221,11 @@ func mergeDeps(dst, src map[string]string) error {
 func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType, workspaceVersions map[string]string) ([]DependencyRequest, error) {
 	for _, name := range sortedDependencyNames(src) {
 		spec := src[name]
-		if workspaceDependencySatisfied(workspaceVersions, name, spec) {
+		satisfied, err := workspaceDependencySatisfied(workspaceVersions, name, spec)
+		if err != nil {
+			return nil, err
+		}
+		if satisfied {
 			continue
 		}
 		if err := validateDependencySpec(name, spec, edgeType); err != nil {
@@ -308,15 +322,41 @@ func isWorkspaceReference(spec string) bool {
 	return spec == "" || strings.HasPrefix(spec, "workspace:") || strings.HasPrefix(spec, "file:") || strings.HasPrefix(spec, "link:")
 }
 
-func workspaceDependencySatisfied(workspaceVersions map[string]string, name, spec string) bool {
+func workspaceDependencySatisfied(workspaceVersions map[string]string, name, spec string) (bool, error) {
 	version, ok := workspaceVersions[name]
 	if !ok {
+		return false, nil
+	}
+	if isWorkspaceReference(spec) && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(spec)), "workspace:") {
+		return true, nil
+	}
+	if wanted, ok := workspaceWanted(spec); ok {
+		if workspaceWantedSatisfied(version, wanted) {
+			return true, nil
+		}
+		return false, &WorkspaceDependencyError{Name: name, Spec: spec, Version: version}
+	}
+	return version != "" && satisfies(version, spec), nil
+}
+
+func workspaceWanted(spec string) (string, bool) {
+	spec = strings.TrimSpace(spec)
+	if !strings.HasPrefix(strings.ToLower(spec), "workspace:") {
+		return "", false
+	}
+	return strings.TrimSpace(spec[len("workspace:"):]), true
+}
+
+func workspaceWantedSatisfied(version, wanted string) bool {
+	if version == "" {
 		return false
 	}
-	if isWorkspaceReference(spec) {
+	switch strings.TrimSpace(wanted) {
+	case "", "*", "^", "~":
 		return true
+	default:
+		return satisfies(version, wanted)
 	}
-	return version != "" && satisfies(version, spec)
 }
 
 func sortedDependencyNames(deps map[string]string) []string {
@@ -382,7 +422,7 @@ func unsupportedSpecClass(spec string) bool {
 			return true
 		}
 	}
-	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") || windowsDriveSpecRe.MatchString(spec) {
+	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~/") || windowsDriveSpecRe.MatchString(spec) {
 		return true
 	}
 	if strings.Contains(spec, "/") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar") {

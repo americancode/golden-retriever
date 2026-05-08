@@ -31,7 +31,7 @@ func parsePackageSpec(depName, spec string) (string, string, error) {
 		return "", "", fmt.Errorf("%s: invalid npm alias spec %q", depName, spec)
 	}
 	if wanted == "" {
-		wanted = "latest"
+		wanted = "*"
 	}
 	return name, wanted, nil
 }
@@ -197,6 +197,12 @@ func parseVersion(v string) npmVersion {
 	if m == nil {
 		return npmVersion{}
 	}
+	if numericHasLeadingZero(m[1]) || numericHasLeadingZero(m[2]) || numericHasLeadingZero(m[3]) {
+		return npmVersion{}
+	}
+	if !validPrereleaseIdentifiers(m[4]) || !validBuildIdentifiers(m[5]) {
+		return npmVersion{}
+	}
 	major, _ := strconv.Atoi(m[1])
 	minor, _ := strconv.Atoi(m[2])
 	patch, _ := strconv.Atoi(m[3])
@@ -205,6 +211,37 @@ func parseVersion(v string) npmVersion {
 		pre = strings.Split(m[4], ".")
 	}
 	return npmVersion{major: major, minor: minor, patch: patch, prerelease: pre, ok: true}
+}
+
+func numericHasLeadingZero(s string) bool {
+	return len(s) > 1 && strings.HasPrefix(s, "0")
+}
+
+func validPrereleaseIdentifiers(pre string) bool {
+	if pre == "" {
+		return true
+	}
+	for _, id := range strings.Split(pre, ".") {
+		if id == "" {
+			return false
+		}
+		if _, numeric := numericIdentifier(id); numeric && numericHasLeadingZero(id) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBuildIdentifiers(build string) bool {
+	if build == "" {
+		return true
+	}
+	for _, id := range strings.Split(build, ".") {
+		if id == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func compareVersion(a, b string) int {
@@ -279,11 +316,29 @@ func numericIdentifier(s string) (int, bool) {
 
 func satisfies(version, spec string) bool {
 	spec = strings.TrimSpace(spec)
-	if spec == "" || spec == "*" || spec == "latest" {
-		return len(parseVersion(version).prerelease) == 0
-	}
 	v := parseVersion(version)
-	for _, disjunct := range strings.Split(spec, "||") {
+	if !v.ok {
+		return false
+	}
+	if spec == "" || spec == "*" {
+		return len(v.prerelease) == 0
+	}
+	disjuncts := strings.Split(spec, "||")
+	hasEmptyDisjunct := false
+	for _, disjunct := range disjuncts {
+		disjunct = strings.TrimSpace(disjunct)
+		if disjunct == "" {
+			hasEmptyDisjunct = true
+			continue
+		}
+		if !validRangeDisjunct(disjunct) {
+			return false
+		}
+	}
+	if hasEmptyDisjunct {
+		return len(v.prerelease) == 0
+	}
+	for _, disjunct := range disjuncts {
 		disjunct = strings.TrimSpace(disjunct)
 		if len(v.prerelease) > 0 && !allowsPrerelease(version, disjunct) {
 			continue
@@ -293,6 +348,171 @@ func satisfies(version, spec string) bool {
 		}
 	}
 	return false
+}
+
+func validRangeDisjunct(spec string) bool {
+	spec = normalizeHyphenRange(spec)
+	spec = comparatorTrimRe.ReplaceAllString(spec, "$1")
+	spec = rangePrefixTrimRe.ReplaceAllString(spec, "$1")
+	parts := strings.Fields(spec)
+	if len(parts) == 0 {
+		return true
+	}
+	for _, part := range parts {
+		if !validRangeComparator(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRangeComparator(spec string) bool {
+	spec = strings.TrimSpace(strings.ReplaceAll(spec, " ", ""))
+	if spec == "" || spec == "*" || spec == "x" || spec == "X" {
+		return true
+	}
+	if strings.HasPrefix(spec, "^") {
+		return validRangePartial(strings.TrimPrefix(spec, "^"))
+	}
+	if strings.HasPrefix(spec, "~>") {
+		return validRangePartial(strings.TrimPrefix(spec, "~>"))
+	}
+	if strings.HasPrefix(spec, "~") {
+		return validRangePartial(strings.TrimPrefix(spec, "~"))
+	}
+	for _, op := range []string{">=", "<=", ">", "<", "="} {
+		if strings.HasPrefix(spec, op) {
+			return validComparatorTarget(strings.TrimSpace(strings.TrimPrefix(spec, op)))
+		}
+	}
+	if partialLooksLikeRange(spec) || strings.ContainsAny(spec, "xX*") {
+		return validRangePartial(spec)
+	}
+	return parseVersion(spec).ok
+}
+
+func validComparatorTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	if strings.ContainsAny(target, "xX*") || partialLooksLikeRange(target) {
+		return validRangePartial(target)
+	}
+	return parseVersion(target).ok
+}
+
+func validRangePartial(spec string) bool {
+	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
+	return m != nil && validPartialMatch(m)
+}
+
+func rangeIntersects(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return true
+	}
+	if !validRangeSpec(a) || !validRangeSpec(b) {
+		return false
+	}
+	candidates := append(rangeCandidateVersions(a), rangeCandidateVersions(b)...)
+	for _, version := range candidates {
+		if satisfies(version, a) && satisfies(version, b) {
+			return true
+		}
+	}
+	return false
+}
+
+func validRangeSpec(spec string) bool {
+	for _, disjunct := range strings.Split(spec, "||") {
+		disjunct = strings.TrimSpace(disjunct)
+		if disjunct == "" {
+			continue
+		}
+		if !validRangeDisjunct(disjunct) {
+			return false
+		}
+	}
+	return true
+}
+
+func rangeCandidateVersions(spec string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(version string) {
+		if parseVersion(version).ok && !seen[version] {
+			seen[version] = true
+			out = append(out, version)
+		}
+	}
+	add("0.0.0")
+	for _, disjunct := range strings.Split(spec, "||") {
+		disjunct = normalizeHyphenRange(strings.TrimSpace(disjunct))
+		disjunct = comparatorTrimRe.ReplaceAllString(disjunct, "$1")
+		disjunct = rangePrefixTrimRe.ReplaceAllString(disjunct, "$1")
+		for _, part := range strings.Fields(disjunct) {
+			for _, version := range comparatorCandidateVersions(part) {
+				add(version)
+			}
+		}
+	}
+	return out
+}
+
+func comparatorCandidateVersions(spec string) []string {
+	spec = strings.TrimSpace(strings.ReplaceAll(spec, " ", ""))
+	if spec == "" || spec == "*" || spec == "x" || spec == "X" {
+		return []string{"0.0.0"}
+	}
+	if strings.HasPrefix(spec, "^") {
+		return partialLowerCandidates(strings.TrimPrefix(spec, "^"))
+	}
+	if strings.HasPrefix(spec, "~>") {
+		return partialLowerCandidates(strings.TrimPrefix(spec, "~>"))
+	}
+	if strings.HasPrefix(spec, "~") {
+		return partialLowerCandidates(strings.TrimPrefix(spec, "~"))
+	}
+	for _, op := range []string{">=", "<=", ">", "<", "="} {
+		if strings.HasPrefix(spec, op) {
+			target := strings.TrimSpace(strings.TrimPrefix(spec, op))
+			if op == ">" {
+				return nextComparatorCandidates(target)
+			}
+			return partialLowerCandidates(target)
+		}
+	}
+	return partialLowerCandidates(spec)
+}
+
+func partialLowerCandidates(spec string) []string {
+	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
+	if m == nil || !validPartialMatch(m) {
+		if parseVersion(spec).ok {
+			return []string{spec}
+		}
+		return nil
+	}
+	return []string{versionLowerBound(normalizePartial(spec))}
+}
+
+func nextComparatorCandidates(target string) []string {
+	candidates := partialLowerCandidates(target)
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		v := parseVersion(candidate)
+		if !v.ok {
+			continue
+		}
+		if len(v.prerelease) > 0 {
+			out = append(out, fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch+1))
+	}
+	return out
 }
 
 func satisfiesAll(version, spec string) bool {
@@ -379,6 +599,9 @@ func comparatorTarget(spec string) string {
 }
 
 func compareOp(version, op, target string) bool {
+	if m := partialRe.FindStringSubmatch(strings.TrimSpace(target)); m != nil && !validPartialMatch(m) {
+		return false
+	}
 	if bounds, ok := partialComparatorBounds(target); ok {
 		switch op {
 		case ">=":
@@ -427,6 +650,9 @@ type partialBounds struct {
 func partialComparatorBounds(target string) (partialBounds, bool) {
 	m := partialRe.FindStringSubmatch(strings.TrimSpace(target))
 	if m == nil {
+		return partialBounds{}, false
+	}
+	if !validPartialMatch(m) {
 		return partialBounds{}, false
 	}
 	if m[2] != "" && m[3] != "" && !isWild(m[1]) && !isWild(m[2]) && !isWild(m[3]) {
@@ -499,6 +725,9 @@ func satisfiesWildcard(version, spec string) bool {
 	if !v.ok {
 		return false
 	}
+	if m := partialRe.FindStringSubmatch(strings.TrimSpace(spec)); m != nil && !validPartialMatch(m) {
+		return false
+	}
 	parts := strings.Split(spec, ".")
 	if len(parts) > 0 && isWild(parts[0]) {
 		return true
@@ -520,6 +749,9 @@ func normalizePartial(spec string) npmVersion {
 	if m == nil {
 		return npmVersion{}
 	}
+	if !validPartialMatch(m) {
+		return npmVersion{}
+	}
 	v := npmVersion{major: atoi(m[1]), ok: true}
 	if m[2] != "" && !isWild(m[2]) {
 		v.minor = atoi(m[2])
@@ -536,6 +768,9 @@ func normalizePartial(spec string) npmVersion {
 func caretUpperBound(spec string) (string, bool) {
 	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
 	if m == nil {
+		return "", false
+	}
+	if !validPartialMatch(m) {
 		return "", false
 	}
 	if isWild(m[1]) {
@@ -561,6 +796,9 @@ func caretUpperBound(spec string) (string, bool) {
 func tildeUpperBound(spec string) (string, bool) {
 	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
 	if m == nil {
+		return "", false
+	}
+	if !validPartialMatch(m) {
 		return "", false
 	}
 	if isWild(m[1]) {
@@ -596,6 +834,9 @@ func lowerHyphenBound(spec string) string {
 func upperHyphenBound(spec string) (string, bool) {
 	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
 	if m == nil {
+		return spec, true
+	}
+	if !validPartialMatch(m) {
 		return spec, true
 	}
 	if m[2] == "" || isWild(m[2]) {
@@ -640,6 +881,9 @@ func completeComparatorTarget(target, op string) string {
 	if m == nil {
 		return target
 	}
+	if !validPartialMatch(m) {
+		return target
+	}
 	if m[2] == "" {
 		if op == "<" || op == "<=" {
 			return fmt.Sprintf("%s.0.0", m[1])
@@ -656,6 +900,9 @@ func completeComparatorTarget(target, op string) string {
 }
 
 func wildcardComparatorTarget(target, op string) string {
+	if m := partialRe.FindStringSubmatch(strings.TrimSpace(target)); m != nil && !validPartialMatch(m) {
+		return target
+	}
 	parts := strings.Split(target, ".")
 	for len(parts) < 3 {
 		parts = append(parts, "x")
@@ -689,4 +936,19 @@ func isWild(s string) bool {
 func atoi(s string) int {
 	i, _ := strconv.Atoi(strings.TrimSpace(s))
 	return i
+}
+
+func validPartialMatch(m []string) bool {
+	if len(m) < 5 {
+		return false
+	}
+	for _, id := range m[1:4] {
+		if id == "" || isWild(id) {
+			continue
+		}
+		if numericHasLeadingZero(id) {
+			return false
+		}
+	}
+	return validPrereleaseIdentifiers(m[4])
 }

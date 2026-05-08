@@ -196,6 +196,142 @@ func TestPrereleaseRangesRequireMatchingTupleComparator(t *testing.T) {
 	}
 }
 
+func TestStrictVersionParsingMatchesNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		ok      bool
+	}{
+		{"1.2.3", true},
+		{"v1.2.3", true},
+		{"1.2.3-alpha.1", true},
+		{"1.2.3+build.01", true},
+		{"01.2.3", false},
+		{"1.02.3", false},
+		{"1.2.03", false},
+		{"1.2.3-alpha.01", false},
+		{"1.2.3-alpha..1", false},
+		{"1.2.3+build..1", false},
+	}
+	for _, tc := range tests {
+		if got := parseVersion(tc.version).ok; got != tc.ok {
+			t.Fatalf("parseVersion(%q).ok = %v want %v", tc.version, got, tc.ok)
+		}
+	}
+}
+
+func TestPickVersionIgnoresInvalidPackumentVersions(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.2.3"},
+		Versions: map[string]VersionManifest{
+			"1.2.3":          {},
+			"1.2.4-alpha.01": {},
+			"01.9.9":         {},
+		},
+	}
+
+	got, err := pickVersion(pack, ">=1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.2.3" {
+		t.Fatalf("got %s want valid semver 1.2.3", got)
+	}
+	if satisfies("1.2.3-alpha.1", ">=1.2.3-alpha.01") {
+		t.Fatalf("range with invalid prerelease comparator should not satisfy")
+	}
+}
+
+func TestInvalidPartialRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+	}{
+		{"1.2.3", "01"},
+		{"1.2.3", "1.02"},
+		{"1.2.3", "1.2.03"},
+		{"1.2.3", "01.x"},
+		{"1.2.3", "1.02.x"},
+		{"1.2.3", "~01.2.3"},
+		{"1.2.3", "^1.02.3"},
+		{"2.0.0", ">01.2.3"},
+		{"1.2.3", ">=1.2.3-alpha.01"},
+	}
+	for _, tc := range tests {
+		if satisfies(tc.version, tc.spec) {
+			t.Fatalf("satisfies(%q, %q) = true want false", tc.version, tc.spec)
+		}
+	}
+}
+
+func TestInvalidRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+	}{
+		{"1.2.3", ">"},
+		{"1.2.3", "<"},
+		{"1.2.3", ">="},
+		{"1.2.3", "<="},
+		{"1.2.3", "="},
+		{"1.2.3", ">bad"},
+		{"1.2.3", "<bad"},
+		{"1.2.3", ">=bad"},
+		{"1.2.3", "=bad"},
+		{"1.2.3", "bad"},
+		{"1.2.3", "bad || 1.2.3"},
+		{"1.2.3", "bad ||"},
+		{"bad", "*"},
+		{"01.2.3", "*"},
+		{"1.2.3", "latest"},
+	}
+	for _, tc := range tests {
+		if satisfies(tc.version, tc.spec) {
+			t.Fatalf("satisfies(%q, %q) = true want false", tc.version, tc.spec)
+		}
+	}
+}
+
+func TestEmptyORDisjunctMatchesNpmSemverWildcard(t *testing.T) {
+	tests := []string{
+		"1.2.3 ||",
+		"|| 1.2.3",
+		"1.2.3 || || 2.0.0",
+	}
+	for _, spec := range tests {
+		if !satisfies("1.2.3", spec) || !satisfies("2.0.0", spec) {
+			t.Fatalf("empty OR disjunct %q should behave as wildcard for stable versions", spec)
+		}
+		if satisfies("2.0.0-beta.1", spec) {
+			t.Fatalf("empty OR disjunct %q should not include prerelease without prerelease comparator", spec)
+		}
+	}
+}
+
+func TestRangeIntersectsMatchesNpmSemverCases(t *testing.T) {
+	tests := []struct {
+		a    string
+		b    string
+		want bool
+	}{
+		{"^1.2.0", "^1.0.0", true},
+		{"1.2.0", "^1.0.0", true},
+		{">1.2.0", "<1.2.2", true},
+		{"1.2.0", "2.0.0", false},
+		{"^1.0.0", "^2.0.0", false},
+		{">=1 <2", ">=3", false},
+		{"bad || 1.2.3", "1.2.3", false},
+	}
+	for _, tc := range tests {
+		if got := rangeIntersects(tc.a, tc.b); got != tc.want {
+			t.Fatalf("rangeIntersects(%q, %q) = %v want %v", tc.a, tc.b, got, tc.want)
+		}
+		if got := rangeIntersects(tc.b, tc.a); got != tc.want {
+			t.Fatalf("rangeIntersects(%q, %q) = %v want %v", tc.b, tc.a, got, tc.want)
+		}
+	}
+}
+
 func TestCaretPartialRangesMatchNpmSemver(t *testing.T) {
 	tests := []struct {
 		version string
@@ -325,5 +461,15 @@ func TestParsePackageSpecAlias(t *testing.T) {
 	}
 	if name != "@scope/real" || spec != "^2.0.0" {
 		t.Fatalf("got %s %s", name, spec)
+	}
+}
+
+func TestParsePackageSpecAliasWithoutSpecDefaultsToWildcard(t *testing.T) {
+	name, spec, err := parsePackageSpec("alias", "npm:real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "real" || spec != "*" {
+		t.Fatalf("got %s %s, want real *", name, spec)
 	}
 }

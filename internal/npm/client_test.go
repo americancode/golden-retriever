@@ -94,6 +94,31 @@ func TestClientAppliesScopedRegistryAndAuth(t *testing.T) {
 	}
 }
 
+func TestClientIgnoresNonObjectEnginesMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+  "name": "demo",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "demo",
+      "version": "1.0.0",
+      "engines": ["node >= 18"]
+    }
+  }
+}`)
+	}))
+	defer srv.Close()
+
+	pack, err := NewClient(srv.URL).Packument(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pack.Versions["1.0.0"].Engines) != 0 {
+		t.Fatalf("array engines metadata should be ignored: %#v", pack.Versions["1.0.0"].Engines)
+	}
+}
+
 func TestClientRevalidatesStalePackumentWithETag(t *testing.T) {
 	var ifNoneMatch string
 	var hits int64

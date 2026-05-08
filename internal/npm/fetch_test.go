@@ -356,6 +356,49 @@ func TestResolveAliasSpecFromMockRegistry(t *testing.T) {
 	}
 }
 
+func TestResolveAliasWithoutSpecUsesWildcardSelection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/real":
+			fmt.Fprintf(w, `{
+  "name": "real",
+  "dist-tags": {"latest": "2.0.0"},
+  "versions": {
+    "1.5.0": {
+      "name": "real",
+      "version": "1.5.0",
+      "dist": {"tarball": "%s/real/-/real-1.5.0.tgz"}
+    },
+    "2.0.0": {
+      "name": "real",
+      "version": "2.0.0",
+      "deprecated": "use maintained release",
+      "dist": {"tarball": "%s/real/-/real-2.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"alias":"npm:real"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgs := graph.Packages()
+	if len(pkgs) != 1 || pkgs[0].Name != "real" || pkgs[0].Version != "1.5.0" {
+		t.Fatalf("alias without spec should use wildcard manifest selection: %#v", pkgs)
+	}
+}
+
 func TestFetchRetriesTransientFailure(t *testing.T) {
 	tgz := []byte("retry tarball")
 	integrity := sri(tgz)
