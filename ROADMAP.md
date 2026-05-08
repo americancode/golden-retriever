@@ -16,25 +16,30 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Lockfile v1 nested dependency import and v2/v3 `packages` import work for `package-lock.json` and `npm-shrinkwrap.json`.
 - Directory inputs prioritize `npm-shrinkwrap.json` over `package-lock.json`, then fall back to `package.json`.
 - Lockfile imports derive default registry tarball URLs for registry package entries that omit `resolved`, while preserving integrity metadata.
-- `package.json` inputs now fail explicitly on unsupported dependency specs such as `file:`, `link:`, git, hosted git, tarball URL, and `workspace:` specs instead of silently omitting them.
+- `package.json` inputs now fail explicitly on invalid package names, invalid registry tag names, and unsupported dependency specs such as `file:`, `link:`, git, hosted git, directory, tarball URL, and `workspace:` specs instead of silently omitting them.
 - `package.json` registry dependency walking works for basic registry semver specs.
 - npm alias specs like `npm:pkg@range` are supported for tarball acquisition.
-- Range support now covers more npm-style cases, including partial versions, hyphen ranges, prerelease ordering, and deprecated-version avoidance.
+- Range support now covers more npm-style cases, including partial versions, caret and tilde partial ranges, hyphen ranges, prerelease ordering, wildcard range handling, and deprecated-version avoidance.
 - Registry packument requests are coalesced so concurrent requests for the same package share one in-flight fetch.
 - Dependency resolution now resolves independent child dependencies concurrently.
 - Resolved graphs now retain root placement, dependency edges, edge types, and peer dependency edges in addition to the flat tarball set.
 - Non-optional peer dependencies can be auto-placed at the parent location when no ancestor satisfies them.
 - Optional peer dependencies are recorded without auto-installing when unsatisfied.
+- Optional peer dependency conflicts are not treated as problem conflicts in normal mode, while `--strict-peer-deps` still fails them.
+- Optional peer dependencies prefer an existing satisfying graph node over an incompatible ancestor when one is available.
+- Optional peer edges that were initially missing are reconciled to an already-present satisfying node after dependency resolution completes.
+- Auto-placed peer dependencies can be reconciled to a version satisfying multiple overlapping peer ranges at the same placement.
 - Peer conflicts are detected when an ancestor/root candidate exists but does not satisfy the requested peer range.
 - `--legacy-peer-deps` ignores peer dependencies.
 - `--strict-peer-deps` fails on optional peer conflicts in addition to required peer conflicts.
 - Resolver skips `bundleDependencies` / `bundledDependencies` child tarballs because npm expects those contents to be provided by the parent tarball.
 - Resolver treats duplicate `optionalDependencies` entries as overriding `dependencies`.
-- Resolver applies npm-style `os` and `cpu` platform filters, skipping incompatible optional packages and failing incompatible required packages.
-- Resolver applies `engines.node` checks when `--node-version` is provided: strict mode fails incompatible required packages, while incompatible optional packages are skipped.
+- Resolver applies npm-style `os`, `cpu`, and explicit `libc` platform filters, including `"any"` platform rules, skipping incompatible optional packages and failing incompatible required packages.
+- Resolver applies `engines.node` checks when `--node-version` is provided: manifest selection prefers engine-compatible range matches, strict mode fails incompatible required packages, while incompatible optional packages are skipped.
 - Resolver ignores failed optional dependency resolution and rolls back failed optional subtrees so missing optional packages do not enter the tarball set.
 - Semver prerelease range handling now follows npm's same-version-tuple rule for prerelease candidates.
-- Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies.
+- Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, version-qualified parent selectors, more-specific child selectors, nested and top-level `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies, devDependencies, optionalDependencies, and peerDependencies.
+- Override empty strings and empty override objects are coerced to wildcard `*`, matching npm Arborist override behavior.
 - Packument metadata can be cached on disk with `--metadata-cache`.
 - Cached packuments support freshness control with `--metadata-cache-ttl`.
 - Stale cached packuments revalidate with `If-None-Match` / `If-Modified-Since`, and `304 Not Modified` refreshes cache timestamps.
@@ -76,22 +81,22 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 
 ## Resolution Parity Work
 
-- Port npm package spec parsing behavior from `npm-package-arg`.
+- Continue porting npm package spec parsing behavior from `npm-package-arg` beyond current registry, alias, invalid-name, invalid-tag, and unsupported-spec classification.
 - Port npm manifest selection behavior from `npm-pick-manifest`.
 - Replace the current minimal semver implementation with npm-compatible semver behavior.
 - Expand alias handling beyond registry aliases if npm requires it.
-- Continue hardening dist-tags, exact versions, ranges, prereleases, wildcards, hyphen ranges, and OR ranges against npm parity fixtures.
+- Continue hardening dist-tags, exact versions, ranges, prereleases, hyphen ranges, and OR ranges against npm parity fixtures.
 - Continue hardening `overrides`, including full selector semantics and npm parity fixtures.
 - Continue hardening `peerDependencies`.
 - Continue hardening `peerDependenciesMeta.optional`.
-- Continue reproducing npm Arborist peer conflict behavior, peer set grouping, and strict/legacy peer mode edge cases.
+- Continue reproducing npm Arborist peer conflict behavior, advanced peer set grouping, and strict/legacy peer mode edge cases.
 - Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
 - Expand bundled dependency parity for complete metadata, legacy bundling fixtures, and root bundler cases.
 - Finish npm `--omit` / `--include` parity edge cases, including engine/platform check interactions.
 - Support `workspaces`.
 - Support `workspace:` specs if needed for package tree inputs, or keep explicit unsupported errors with parity tests.
 - Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs where required, or continue hardening explicit unsupported errors with parity tests.
-- Add `libc` platform filtering.
+- Continue hardening platform filter parity with npm fixtures, including automatic libc detection if needed.
 - Finish `engines` handling for warning/report behavior and omit/include interactions.
 - Support deprecation metadata handling where npm uses it for selection or warnings.
 - Finish ancient lockfile edge cases and incomplete lock metadata behavior.
@@ -149,10 +154,10 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 
 - Arborist ideal tree parity from `workspaces/arborist/test/arborist/build-ideal-tree.js`:
   - Engine checks: expand coverage for warnings when engine strict is false and respect omit flags for dev/optional/peer dependency engine checks.
-  - Platform checks: expand root/transitive coverage and add `libc`.
+  - Platform checks: expand root/transitive coverage and automatic libc detection if needed.
   - Peer dependency placement: overlap cases, nested peers, unresolvable peers, cyclic peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
-  - Peer optional re-resolution: issue #8726 cases where optional peer constraints force a previously chosen dependency version to be re-resolved, including fresh install and lockfile cases.
-  - Peer optional existing-node preference: issue #9249 behavior where existing tree nodes are preferred over registry fetches when satisfying peer optional edges.
+  - Peer optional re-resolution: expand issue #8726 coverage beyond current missing-then-satisfied reconciliation, including cases where optional peer constraints force a previously chosen dependency version to be re-resolved and lockfile cases.
+  - Peer optional existing-node preference: expand issue #9249 coverage beyond the current existing-satisfying-node fixture, including hoisting behavior where it changes placement.
   - Dedupe and placement modes: default placement, `preferDedupe`, `legacyBundling`, duplicated transitive deps, and explicit request placement behavior where they change selected package versions.
   - Bundle dependency cases: complete bundle metadata, bundled metadata dependency duplication, root bundler, two bundled deps, and legacy bundling bundle fixtures.
   - Shrinkwrapped dependency behavior: do not add/update shrinkwrapped deps by default, behavior with `complete:true`, bad shrinkwrap handling, and legacy shrinkwrap resolution.
@@ -161,16 +166,11 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 
 - Arborist placement and peer internals from `workspaces/arborist/test/place-dep.js`, `can-place-dep.js`, and `peer-entry-sets.js`:
   - Can-place decision matrix for keeping, replacing, nesting, and conflicting dependency candidates.
-  - Peer entry set grouping for overlapping peer sets and conflict detection.
+  - Peer entry set grouping beyond current basic overlapping peer range reconciliation.
   - Placement tests where the same package name appears at multiple depths with incompatible ranges.
 
 - Overrides from `workspaces/arborist/test/override-set.js` and `workspaces/arborist/test/arborist/build-ideal-tree.js`:
-  - Empty-string override coerces to `*`.
-  - Version-qualified parent override selectors.
-  - More-specific child override priority.
   - Parent spec mismatch should not apply an override.
-  - Direct dependency, devDependency, and peerDependency override conflict errors.
-  - Override references with `$dependency`, including top-level identifier omitted.
   - Override semantic conflict detection when ranges intersect or do not intersect.
   - Alias, directory, file, and git override specs should be explicitly supported or explicitly rejected with tests.
   - Overrides inside cyclic dependency chains and overrides that fix peer ERESOLVE cases.
@@ -184,10 +184,10 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
   - Decide and test whether hidden lockfiles under `node_modules/.package-lock.json` are intentionally unsupported.
 
 - Package spec and dependency validation from `workspaces/arborist/test/dep-valid.js`, `node_modules/npm-package-arg/lib/npa.js`, and `node_modules/npm-pick-manifest/lib/index.js`:
-  - Registry specs for scoped packages, aliases, exact versions, dist-tags, wildcard ranges, hyphen ranges, prerelease ranges, and conflicting ranges.
-  - Invalid tag names and invalid requests.
-  - Unsupported spec classes: file, link, git, hosted git, remote tarball URL, and directory specs should have tests documenting skip/error behavior for this air-gap registry use case.
-  - Deprecated version selection and latest-dist-tag preference behavior.
+  - Registry specs for scoped packages, aliases, exact versions, dist-tags, hyphen ranges, prerelease ranges, and conflicting ranges.
+  - Expand invalid tag name and invalid request coverage.
+  - Expand unsupported spec class coverage for file, link, git, hosted git, remote tarball URL, and directory specs beyond current deterministic root validation tests.
+  - Expand deprecated version selection and latest-dist-tag preference fixtures beyond the current wildcard/latest/range coverage.
   - Dist-tag and prerelease publish/install interactions where npm avoids unsafe `latest` selection.
 
 - Optional dependency and omit/include behavior from `workspaces/arborist/test/optional-set.js`, `build-ideal-tree.js`, and install command tests:

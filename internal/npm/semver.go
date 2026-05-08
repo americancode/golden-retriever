@@ -55,8 +55,12 @@ func splitNameSpec(spec string) (string, string) {
 }
 
 func pickVersion(pack *Packument, spec string) (string, error) {
+	return pickVersionWithOptions(pack, spec, ResolveOptions{})
+}
+
+func pickVersionWithOptions(pack *Packument, spec string, opts ResolveOptions) (string, error) {
 	spec = strings.TrimSpace(spec)
-	if spec == "" || spec == "*" {
+	if spec == "" {
 		spec = "latest"
 	}
 	if tag, ok := pack.DistTags[spec]; ok {
@@ -69,7 +73,7 @@ func pickVersion(pack *Packument, spec string) (string, error) {
 	rangeSpec := spec
 	defaultVer := pack.DistTags["latest"]
 	if defaultVer != "" && satisfies(defaultVer, rangeSpec) {
-		if manifest, ok := pack.Versions[defaultVer]; ok && manifest.Deprecated == nil {
+		if manifest, ok := pack.Versions[defaultVer]; ok && manifest.Deprecated == nil && manifestEngineOK(manifest, opts) {
 			return defaultVer, nil
 		}
 	}
@@ -84,8 +88,18 @@ func pickVersion(pack *Packument, spec string) (string, error) {
 	sort.Slice(versions, func(i, j int) bool {
 		mi := pack.Versions[versions[i]]
 		mj := pack.Versions[versions[j]]
+		engOKi := manifestEngineOK(mi, opts)
+		engOKj := manifestEngineOK(mj, opts)
 		notDepri := mi.Deprecated == nil
 		notDeprj := mj.Deprecated == nil
+		notDeprEngOKi := notDepri && engOKi
+		notDeprEngOKj := notDeprj && engOKj
+		if notDeprEngOKi != notDeprEngOKj {
+			return notDeprEngOKi
+		}
+		if engOKi != engOKj {
+			return engOKi
+		}
 		if notDepri != notDeprj {
 			return notDepri
 		}
@@ -97,6 +111,53 @@ func pickVersion(pack *Packument, spec string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no version of %s satisfies %q", pack.Name, spec)
+}
+
+func pickVersionSatisfyingAll(pack *Packument, specs []string, opts ResolveOptions) (string, bool) {
+	versions := make([]string, 0, len(pack.Versions))
+	for version := range pack.Versions {
+		if parseVersion(version).ok {
+			versions = append(versions, version)
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		mi := pack.Versions[versions[i]]
+		mj := pack.Versions[versions[j]]
+		engOKi := manifestEngineOK(mi, opts)
+		engOKj := manifestEngineOK(mj, opts)
+		notDepri := mi.Deprecated == nil
+		notDeprj := mj.Deprecated == nil
+		notDeprEngOKi := notDepri && engOKi
+		notDeprEngOKj := notDeprj && engOKj
+		if notDeprEngOKi != notDeprEngOKj {
+			return notDeprEngOKi
+		}
+		if engOKi != engOKj {
+			return engOKi
+		}
+		if notDepri != notDeprj {
+			return notDepri
+		}
+		return compareVersion(versions[i], versions[j]) > 0
+	})
+	for _, version := range versions {
+		matches := true
+		for _, spec := range specs {
+			if !satisfies(version, spec) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return version, true
+		}
+	}
+	return "", false
+}
+
+func manifestEngineOK(manifest VersionManifest, opts ResolveOptions) bool {
+	ok, _ := engineCompatible(manifest, opts)
+	return ok
 }
 
 type npmVersion struct {
@@ -314,13 +375,11 @@ func satisfiesCaret(version, base string) bool {
 	if compareVersion(version, versionLowerBound(b)) < 0 {
 		return false
 	}
-	if b.major > 0 {
-		return v.major == b.major
+	upper, ok := caretUpperBound(base)
+	if !ok {
+		return true
 	}
-	if b.minor > 0 {
-		return v.major == 0 && v.minor == b.minor
-	}
-	return v.major == 0 && v.minor == 0 && v.patch == b.patch
+	return compareVersion(version, upper) < 0
 }
 
 func satisfiesTilde(version, base string) bool {
@@ -332,11 +391,11 @@ func satisfiesTilde(version, base string) bool {
 	if compareVersion(version, versionLowerBound(b)) < 0 {
 		return false
 	}
-	parts := strings.Split(base, ".")
-	if len(parts) == 1 {
-		return v.major == b.major
+	upper, ok := tildeUpperBound(base)
+	if !ok {
+		return true
 	}
-	return v.major == b.major && v.minor == b.minor
+	return compareVersion(version, upper) < 0
 }
 
 func versionLowerBound(v npmVersion) string {
@@ -384,6 +443,46 @@ func normalizePartial(spec string) npmVersion {
 		v.prerelease = strings.Split(m[4], ".")
 	}
 	return v
+}
+
+func caretUpperBound(spec string) (string, bool) {
+	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
+	if m == nil {
+		return "", false
+	}
+	if isWild(m[1]) {
+		return "", false
+	}
+	major := atoi(m[1])
+	if major > 0 {
+		return fmt.Sprintf("%d.0.0", major+1), true
+	}
+	if m[2] == "" || isWild(m[2]) {
+		return "1.0.0", true
+	}
+	minor := atoi(m[2])
+	if minor > 0 {
+		return fmt.Sprintf("0.%d.0", minor+1), true
+	}
+	if m[3] == "" || isWild(m[3]) {
+		return "0.1.0", true
+	}
+	return fmt.Sprintf("0.0.%d", atoi(m[3])+1), true
+}
+
+func tildeUpperBound(spec string) (string, bool) {
+	m := partialRe.FindStringSubmatch(strings.TrimSpace(spec))
+	if m == nil {
+		return "", false
+	}
+	if isWild(m[1]) {
+		return "", false
+	}
+	major := atoi(m[1])
+	if m[2] == "" || isWild(m[2]) {
+		return fmt.Sprintf("%d.0.0", major+1), true
+	}
+	return fmt.Sprintf("%d.%d.0", major, atoi(m[2])+1), true
 }
 
 func normalizeHyphenRange(spec string) string {

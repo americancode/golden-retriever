@@ -149,7 +149,7 @@ func TestResolverOmitPeerSkipsPeerResolution(t *testing.T) {
 	}
 }
 
-func TestResolverOptionalPeerConflictRecordsByDefault(t *testing.T) {
+func TestResolverOptionalPeerConflictIsNotProblemByDefault(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
 
@@ -161,7 +161,7 @@ func TestResolverOptionalPeerConflictRecordsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(graph.PeerConflicts) != 1 {
+	if len(graph.PeerConflicts) != 0 {
 		t.Fatalf("peer conflicts = %#v", graph.PeerConflicts)
 	}
 	plugin := findNode(t, graph, "optional-plugin")
@@ -183,6 +183,91 @@ func TestResolverStrictPeerDepsErrorsOnOptionalPeerConflict(t *testing.T) {
 	var conflict *PeerConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("got %v, want PeerConflictError", err)
+	}
+}
+
+func TestResolverReconcilesOverlappingPeerRanges(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "wide-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "exact-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared-peer@1.3.0") {
+		t.Fatalf("initial broad peer choice should be replaced: %#v", graph.Packages())
+	}
+	if !graph.Has("shared-peer@1.2.0") {
+		t.Fatalf("expected combined peer set to select shared-peer@1.2.0: %#v", graph.Packages())
+	}
+	wide := findNode(t, graph, "wide-peer-plugin")
+	exact := findNode(t, graph, "exact-peer-plugin")
+	if wide.Peers["shared-peer"].To.Version != "1.2.0" || exact.Peers["shared-peer"].To.Version != "1.2.0" {
+		t.Fatalf("peer edges not reconciled: wide=%#v exact=%#v", wide.Peers["shared-peer"], exact.Peers["shared-peer"])
+	}
+}
+
+func TestResolverDoesNotReconcileDisjointPeerRanges(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "wide-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "disjoint-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	var conflict *PeerConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("got %v, want PeerConflictError", err)
+	}
+	if conflict.PeerName != "shared-peer" || conflict.PeerSpec != "^2.0.0" || conflict.FoundVersion != "1.3.0" {
+		t.Fatalf("unexpected conflict: %#v", conflict)
+	}
+}
+
+func TestResolverOptionalPeerPrefersExistingSatisfyingNode(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "shared-peer", Spec: "1.3.0", Type: EdgeProd},
+		{Name: "peer-provider", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "optional-existing-peer-plugin", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "optional-existing-peer-plugin")
+	peer := plugin.Peers["shared-peer"]
+	if peer == nil || !peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("optional peer should use existing satisfying node, got %#v", peer)
+	}
+	if len(graph.PeerConflicts) != 0 {
+		t.Fatalf("optional peer existing-node preference should not record conflicts: %#v", graph.PeerConflicts)
+	}
+}
+
+func TestResolverReconcilesPreviouslyMissingOptionalPeer(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "missing-then-satisfied-optional-peer", Spec: "1.0.0", Type: EdgeProd},
+		{Name: "peer-provider", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "missing-then-satisfied-optional-peer")
+	peer := plugin.Peers["shared-peer"]
+	if peer == nil || !peer.Satisfied || !peer.PeerOptional || peer.To == nil || peer.To.Version != "1.2.0" {
+		t.Fatalf("optional peer should be reconciled after satisfying node appears, got %#v", peer)
 	}
 }
 
@@ -270,6 +355,20 @@ func TestResolverSkipsIncompatibleOptionalDependency(t *testing.T) {
 	}
 }
 
+func TestResolverAcceptsAnyPlatformRule(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, Libc: "glibc"}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"any-platform": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("any-platform@1.0.0") {
+		t.Fatalf("any-platform should resolve: %#v", graph.Packages())
+	}
+}
+
 func TestResolverErrorsOnIncompatibleProdDependency(t *testing.T) {
 	srv := platformRegistry(t)
 	defer srv.Close()
@@ -279,6 +378,52 @@ func TestResolverErrorsOnIncompatibleProdDependency(t *testing.T) {
 	var platformErr *PackagePlatformError
 	if !errors.As(err, &platformErr) {
 		t.Fatalf("got %v, want PackagePlatformError", err)
+	}
+}
+
+func TestResolverAppliesLibcFilter(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, Libc: "glibc"}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"libc-compatible": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("libc-compatible@1.0.0") {
+		t.Fatalf("libc-compatible should resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverErrorsOnIncompatibleLibcProdDependency(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, Libc: "glibc"}}
+	_, err := resolver.Resolve(context.Background(), map[string]string{"libc-incompatible": "1.0.0"})
+	var platformErr *PackagePlatformError
+	if !errors.As(err, &platformErr) {
+		t.Fatalf("got %v, want PackagePlatformError", err)
+	}
+	if platformErr.Field != "libc" {
+		t.Fatalf("field = %s want libc", platformErr.Field)
+	}
+}
+
+func TestResolverSkipsIncompatibleOptionalLibcDependency(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, Libc: "glibc"}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"libc-parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("libc-incompatible@1.0.0") {
+		t.Fatalf("incompatible optional libc dependency should be skipped: %#v", graph.Packages())
+	}
+	if !graph.Has("libc-compatible@1.0.0") {
+		t.Fatalf("compatible optional libc dependency should resolve: %#v", graph.Packages())
 	}
 }
 
@@ -314,6 +459,23 @@ func TestResolverAllowsEngineMismatchWhenNotStrict(t *testing.T) {
 	}
 	if !graph.Has("engine-package@1.0.0") {
 		t.Fatalf("non-strict engine mismatch should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverPrefersEngineCompatibleRangeVersion(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{NodeVersion: "12.18.4"}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"engine-range-package": "^1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("engine-range-package@1.1.0") {
+		t.Fatalf("expected engine-compatible version, got %#v", graph.Packages())
+	}
+	if graph.Has("engine-range-package@1.2.0") {
+		t.Fatalf("engine-incompatible latest should not be selected: %#v", graph.Packages())
 	}
 }
 
@@ -399,6 +561,82 @@ func TestResolvePackageJSONErrorsOnUnsupportedRootSpec(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONErrorsOnInvalidPackageName(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"bad space":"^1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var nameErr *InvalidPackageNameError
+	if !errors.As(err, &nameErr) {
+		t.Fatalf("got %v, want InvalidPackageNameError", err)
+	}
+	if nameErr.Name != "bad space" || nameErr.Spec != "^1.0.0" {
+		t.Fatalf("unexpected name error: %#v", nameErr)
+	}
+}
+
+func TestResolvePackageJSONErrorsOnInvalidTagName(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"left-pad":"bad tag"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var tagErr *InvalidTagNameError
+	if !errors.As(err, &tagErr) {
+		t.Fatalf("got %v, want InvalidTagNameError", err)
+	}
+	if tagErr.Name != "left-pad" || tagErr.Spec != "bad tag" {
+		t.Fatalf("unexpected tag error: %#v", tagErr)
+	}
+}
+
+func TestResolvePackageJSONErrorsOnInvalidAliasTargetName(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"dependencies":{"alias":"npm:bad space@^1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+	var nameErr *InvalidPackageNameError
+	if !errors.As(err, &nameErr) {
+		t.Fatalf("got %v, want InvalidPackageNameError", err)
+	}
+	if nameErr.Name != "bad space" || nameErr.Spec != "npm:bad space@^1.0.0" {
+		t.Fatalf("unexpected name error: %#v", nameErr)
+	}
+}
+
+func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
+	tests := map[string]string{
+		"workspace": "workspace:*",
+		"link":      "link:../local",
+		"git":       "git+https://github.com/acme/pkg.git",
+		"hosted":    "github:acme/pkg",
+		"tarball":   "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
+		"directory": "../local",
+	}
+	for name, spec := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "package.json")
+			if err := os.WriteFile(input, []byte(fmt.Sprintf(`{"dependencies":{"pkg":%q}}`, spec)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ResolvePackageJSON(context.Background(), NewClient("https://example.test"), input, ResolveOptions{IncludeOptional: true})
+			var specErr *UnsupportedSpecError
+			if !errors.As(err, &specErr) {
+				t.Fatalf("got %v, want UnsupportedSpecError", err)
+			}
+			if specErr.Name != "pkg" || specErr.Spec != spec || specErr.Type != "prod" {
+				t.Fatalf("unexpected spec error: %#v", specErr)
+			}
+		})
+	}
+}
+
 func TestResolverErrorsOnUnsupportedProdTransitiveSpec(t *testing.T) {
 	srv := unsupportedSpecRegistry(t)
 	defer srv.Close()
@@ -476,6 +714,103 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"host": "^1.0.0"},
       "peerDependenciesMeta": {"host": {"optional": true}},
       "dist": {"tarball": "%s/optional-plugin/-/optional-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/wide-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "wide-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "wide-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "^1.0.0"},
+      "dist": {"tarball": "%s/wide-peer-plugin/-/wide-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/exact-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "exact-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "exact-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "1.2.0"},
+      "dist": {"tarball": "%s/exact-peer-plugin/-/exact-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/disjoint-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "disjoint-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "disjoint-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "^2.0.0"},
+      "dist": {"tarball": "%s/disjoint-peer-plugin/-/disjoint-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/shared-peer":
+			fmt.Fprintf(w, `{
+  "name": "shared-peer",
+  "dist-tags": {"latest": "1.3.0"},
+  "versions": {
+    "1.2.0": {
+      "name": "shared-peer",
+      "version": "1.2.0",
+      "dist": {"tarball": "%s/shared-peer/-/shared-peer-1.2.0.tgz"}
+    },
+    "1.3.0": {
+      "name": "shared-peer",
+      "version": "1.3.0",
+      "dist": {"tarball": "%s/shared-peer/-/shared-peer-1.3.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
+		case "/peer-provider":
+			fmt.Fprintf(w, `{
+  "name": "peer-provider",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "peer-provider",
+      "version": "1.0.0",
+      "dependencies": {"shared-peer": "1.2.0"},
+      "dist": {"tarball": "%s/peer-provider/-/peer-provider-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-existing-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "optional-existing-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-existing-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "1.2.0"},
+      "peerDependenciesMeta": {"shared-peer": {"optional": true}},
+      "dist": {"tarball": "%s/optional-existing-peer-plugin/-/optional-existing-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/missing-then-satisfied-optional-peer":
+			fmt.Fprintf(w, `{
+  "name": "missing-then-satisfied-optional-peer",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "missing-then-satisfied-optional-peer",
+      "version": "1.0.0",
+      "peerDependencies": {"shared-peer": "1.2.0"},
+      "peerDependenciesMeta": {"shared-peer": {"optional": true}},
+      "dist": {"tarball": "%s/missing-then-satisfied-optional-peer/-/missing-then-satisfied-optional-peer-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
@@ -626,6 +961,25 @@ func engineRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/engine-range-package":
+			fmt.Fprintf(w, `{
+  "name": "engine-range-package",
+  "dist-tags": {"latest": "1.2.0"},
+  "versions": {
+    "1.1.0": {
+      "name": "engine-range-package",
+      "version": "1.1.0",
+      "engines": {"node": ">=1"},
+      "dist": {"tarball": "%s/engine-range-package/-/engine-range-package-1.1.0.tgz"}
+    },
+    "1.2.0": {
+      "name": "engine-range-package",
+      "version": "1.2.0",
+      "engines": {"node": ">=20"},
+      "dist": {"tarball": "%s/engine-range-package/-/engine-range-package-1.2.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}
@@ -677,6 +1031,60 @@ func platformRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, currentOS, serverURL(r))
+		case "/any-platform":
+			fmt.Fprintf(w, `{
+  "name": "any-platform",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "any-platform",
+      "version": "1.0.0",
+      "os": ["any"],
+      "cpu": ["any"],
+      "libc": ["any"],
+      "dist": {"tarball": "%s/any-platform/-/any-platform-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/libc-parent":
+			fmt.Fprintf(w, `{
+  "name": "libc-parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "libc-parent",
+      "version": "1.0.0",
+      "optionalDependencies": {"libc-incompatible": "1.0.0", "libc-compatible": "1.0.0"},
+      "dist": {"tarball": "%s/libc-parent/-/libc-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/libc-incompatible":
+			fmt.Fprintf(w, `{
+  "name": "libc-incompatible",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "libc-incompatible",
+      "version": "1.0.0",
+      "libc": ["musl"],
+      "dist": {"tarball": "%s/libc-incompatible/-/libc-incompatible-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/libc-compatible":
+			fmt.Fprintf(w, `{
+  "name": "libc-compatible",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "libc-compatible",
+      "version": "1.0.0",
+      "libc": ["glibc"],
+      "dist": {"tarball": "%s/libc-compatible/-/libc-compatible-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}

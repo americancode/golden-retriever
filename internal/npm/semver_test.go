@@ -79,6 +79,60 @@ func TestPickVersionAvoidsDeprecatedLatest(t *testing.T) {
 	}
 }
 
+func TestPickVersionWildcardAvoidsDeprecatedLatest(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.2.0"},
+		Versions: map[string]VersionManifest{
+			"1.1.0": {},
+			"1.2.0": {Deprecated: "bad"},
+		},
+	}
+
+	got, err := pickVersion(pack, "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("got %s want non-deprecated 1.1.0", got)
+	}
+
+	got, err = pickVersion(pack, "latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.2.0" {
+		t.Fatalf("explicit latest got %s want deprecated dist-tag 1.2.0", got)
+	}
+}
+
+func TestPickVersionPrefersEngineCompatibleManifest(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.2.0"},
+		Versions: map[string]VersionManifest{
+			"1.1.0": {Engines: map[string]string{"node": ">=1"}},
+			"1.2.0": {Engines: map[string]string{"node": ">=99"}},
+		},
+	}
+
+	got, err := pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{NodeVersion: "20.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("got %s want engine-compatible 1.1.0", got)
+	}
+
+	got, err = pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{NodeVersion: "100.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.2.0" {
+		t.Fatalf("got %s want latest-compatible 1.2.0", got)
+	}
+}
+
 func TestPrereleaseRangesRequireMatchingTupleComparator(t *testing.T) {
 	tests := []struct {
 		version string
@@ -93,6 +147,56 @@ func TestPrereleaseRangesRequireMatchingTupleComparator(t *testing.T) {
 		{"3.0.0-beta.2", "^3.0.0-beta", true},
 		{"3.0.0-beta.1", ">=2.0.0-beta || >=3.0.0-beta", true},
 		{"3.0.0-beta.1", ">=2.0.0-beta || >=3.1.0-beta", false},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestCaretPartialRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"0.0.0", "^0.0.x", true},
+		{"0.0.1", "^0.0.x", true},
+		{"0.1.0", "^0.0.x", false},
+		{"0.0.3", "^0.0.3", true},
+		{"0.0.4", "^0.0.3", false},
+		{"0.1.0", "^0.1.x", true},
+		{"0.1.1", "^0.1.x", true},
+		{"0.2.0", "^0.1.x", false},
+		{"0.1.1", "^0.x", true},
+		{"1.0.0", "^0.x", false},
+		{"1.9.0", "^1.2.x", true},
+		{"2.0.0", "^1.2.x", false},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestTildePartialRangesMatchNpmSemver(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"0.0.0", "~0.0.x", true},
+		{"0.0.1", "~0.0.x", true},
+		{"0.1.0", "~0.0.x", false},
+		{"0.1.0", "~0.x", true},
+		{"1.0.0", "~0.x", false},
+		{"1.2.0", "~1.2.x", true},
+		{"1.2.9", "~1.2.x", true},
+		{"1.3.0", "~1.2.x", false},
+		{"1.3.0", "~1", true},
+		{"2.0.0", "~1", false},
 	}
 	for _, tc := range tests {
 		if got := satisfies(tc.version, tc.spec); got != tc.want {

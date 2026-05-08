@@ -48,10 +48,31 @@ func ParseOverrides(raw json.RawMessage, rootSpecs map[string]string) (*Override
 	if err := overrides.parseObject(nil, obj); err != nil {
 		return nil, err
 	}
+	if err := overrides.validateRootConflicts(); err != nil {
+		return nil, err
+	}
 	if len(overrides.rules) == 0 {
 		return nil, nil
 	}
 	return overrides, nil
+}
+
+func (o *Overrides) validateRootConflicts() error {
+	for i := range o.rules {
+		rule := &o.rules[i]
+		if len(rule.Ancestors) > 0 || isOverrideReference(rule.Spec) {
+			continue
+		}
+		rawSpec := o.rootSpecs[rule.Target.Name]
+		if rawSpec == "" {
+			continue
+		}
+		spec := o.resolveSpec(rule.Spec)
+		if spec != rawSpec {
+			return &OverrideConflictError{Name: rule.Target.Name, RawSpec: rawSpec, Spec: spec}
+		}
+	}
+	return nil
 }
 
 func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any) error {
@@ -64,6 +85,9 @@ func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any
 			if !ok {
 				return fmt.Errorf("override %q must be a string", key)
 			}
+			if spec == "" {
+				spec = "*"
+			}
 			target := ancestors[len(ancestors)-1]
 			o.addRule(ancestors[:len(ancestors)-1], target, spec)
 			continue
@@ -72,12 +96,22 @@ func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any
 		selector := parseOverrideSelector(key)
 		switch typed := value.(type) {
 		case string:
+			if typed == "" {
+				typed = "*"
+			}
 			o.addRule(ancestors, selector, typed)
 		case map[string]any:
+			if len(typed) == 0 {
+				o.addRule(ancestors, selector, "*")
+				continue
+			}
 			if self, ok := typed["."]; ok {
 				spec, ok := self.(string)
 				if !ok {
 					return fmt.Errorf("override %q self rule must be a string", key)
+				}
+				if spec == "" {
+					spec = "*"
 				}
 				o.addRule(ancestors, selector, spec)
 			}
@@ -101,7 +135,7 @@ func (o *Overrides) parseObject(ancestors []OverrideSelector, obj map[string]any
 }
 
 func (o *Overrides) addRule(ancestors []OverrideSelector, target OverrideSelector, spec string) {
-	if target.Name == "" || spec == "" {
+	if target.Name == "" {
 		return
 	}
 	o.rules = append(o.rules, OverrideRule{
@@ -132,7 +166,7 @@ func (o *Overrides) ResolveWithRule(parent *Node, name, spec string) (string, *O
 		if !matchAncestors(parent, rule.Ancestors) {
 			continue
 		}
-		if best == nil || len(rule.Ancestors) > len(best.Ancestors) {
+		if best == nil || moreSpecificOverride(rule, best) {
 			best = rule
 		}
 	}
@@ -140,6 +174,31 @@ func (o *Overrides) ResolveWithRule(parent *Node, name, spec string) (string, *O
 		return "", nil
 	}
 	return o.resolveSpec(best.Spec), best
+}
+
+func moreSpecificOverride(candidate, current *OverrideRule) bool {
+	if len(candidate.Ancestors) != len(current.Ancestors) {
+		return len(candidate.Ancestors) > len(current.Ancestors)
+	}
+	candidateScore := overrideSpecificity(candidate)
+	currentScore := overrideSpecificity(current)
+	if candidateScore != currentScore {
+		return candidateScore > currentScore
+	}
+	return false
+}
+
+func overrideSpecificity(rule *OverrideRule) int {
+	score := 0
+	if rule.Target.Spec != "" {
+		score += 2
+	}
+	for _, ancestor := range rule.Ancestors {
+		if ancestor.Spec != "" {
+			score++
+		}
+	}
+	return score
 }
 
 func (o *Overrides) resolveSpec(spec string) string {

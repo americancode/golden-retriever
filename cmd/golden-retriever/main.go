@@ -67,6 +67,7 @@ func mirror(args []string) error {
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
+	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	syncTarget := fs.Bool("sync-target", false, "query target registry first and rebuild target-present state for the resolved package set")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	fetchConcurrency := fs.Int("fetch-concurrency", max(8, runtime.NumCPU()*4), "parallel tarball download count")
@@ -102,6 +103,7 @@ func mirror(args []string) error {
 		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
+		Libc:               *libc,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -234,6 +236,7 @@ func fetch(args []string) error {
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
+	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -258,6 +261,7 @@ func fetch(args []string) error {
 		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
+		Libc:               *libc,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -295,6 +299,7 @@ func resolve(args []string) error {
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
+	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -316,6 +321,7 @@ func resolve(args []string) error {
 		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
+		Libc:               *libc,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -361,6 +367,7 @@ func stateSyncTarget(args []string) error {
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
+	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
@@ -390,6 +397,7 @@ func stateSyncTarget(args []string) error {
 		OmitPeer:           dependencySet.omitPeer,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
+		Libc:               *libc,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -41,6 +42,24 @@ type UnsupportedSpecError struct {
 
 func (e *UnsupportedSpecError) Error() string {
 	return fmt.Sprintf("%s dependency %s uses unsupported spec %q", e.Type, e.Name, e.Spec)
+}
+
+type InvalidPackageNameError struct {
+	Name string
+	Spec string
+}
+
+func (e *InvalidPackageNameError) Error() string {
+	return fmt.Sprintf("invalid package name %q for dependency spec %q", e.Name, e.Spec)
+}
+
+type InvalidTagNameError struct {
+	Name string
+	Spec string
+}
+
+func (e *InvalidTagNameError) Error() string {
+	return fmt.Sprintf("invalid tag name %q for package %s", e.Spec, e.Name)
 }
 
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
@@ -121,42 +140,142 @@ func rootDependencySpecs(root packageJSON) map[string]string {
 			specs[name] = spec
 		}
 	}
+	for name, spec := range root.PeerDependencies {
+		if specs[name] == "" {
+			specs[name] = spec
+		}
+	}
 	return specs
 }
 
 func mergeDeps(dst, src map[string]string) error {
 	for name, spec := range src {
-		if isRegistrySpec(spec) {
-			dst[name] = spec
-			continue
+		if err := validateDependencySpec(name, spec, EdgeProd); err != nil {
+			return err
 		}
-		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(EdgeProd)}
+		dst[name] = spec
 	}
 	return nil
 }
 
 func appendDeps(dst []DependencyRequest, src map[string]string, edgeType EdgeType) ([]DependencyRequest, error) {
 	for name, spec := range src {
-		if isRegistrySpec(spec) {
-			dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
-			continue
+		if err := validateDependencySpec(name, spec, edgeType); err != nil {
+			return nil, err
 		}
-		return nil, &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+		dst = append(dst, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
 	}
 	return dst, nil
 }
 
-func isRegistrySpec(spec string) bool {
+var gitSSHSpecRe = regexp.MustCompile(`^[^@]+@[^:.]+\.[^:]+:.+$`)
+
+func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return false
+	if !validPackageName(name) {
+		return &InvalidPackageNameError{Name: name, Spec: spec}
 	}
-	if strings.HasPrefix(spec, "npm:") {
+	if spec == "" {
+		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+	}
+	if strings.HasPrefix(strings.ToLower(spec), "npm:") {
+		actual, wanted, err := parsePackageSpec(name, spec)
+		if err != nil {
+			return err
+		}
+		if !validPackageName(actual) {
+			return &InvalidPackageNameError{Name: actual, Spec: spec}
+		}
+		return validateRegistryWanted(actual, wanted, edgeType)
+	}
+	return validateRegistryWanted(name, spec, edgeType)
+}
+
+func validateRegistryWanted(name, spec string, edgeType EdgeType) error {
+	spec = strings.TrimSpace(spec)
+	if unsupportedSpecClass(spec) {
+		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+	}
+	if registryTagLike(spec) && !validTagName(spec) {
+		return &InvalidTagNameError{Name: name, Spec: spec}
+	}
+	return nil
+}
+
+func isRegistrySpec(spec string) bool {
+	return validateDependencySpec("pkg", spec, EdgeProd) == nil
+}
+
+func unsupportedSpecClass(spec string) bool {
+	lower := strings.ToLower(strings.TrimSpace(spec))
+	blockedPrefixes := []string{"file:", "link:", "git:", "git+", "github:", "gitlab:", "bitbucket:", "http:", "https:", "workspace:"}
+	for _, prefix := range blockedPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") {
 		return true
 	}
-	blockedPrefixes := []string{"file:", "link:", "git:", "git+", "github:", "http:", "https:"}
-	for _, prefix := range blockedPrefixes {
-		if strings.HasPrefix(spec, prefix) {
+	if strings.Contains(spec, "/") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar") {
+		return true
+	}
+	return gitSSHSpecRe.MatchString(spec)
+}
+
+func registryTagLike(spec string) bool {
+	if spec == "" || spec == "*" || strings.Contains(spec, "||") || strings.ContainsAny(spec, "<>=~^xX*") {
+		return false
+	}
+	if parseVersion(spec).ok || partialLooksLikeRange(spec) || strings.Contains(spec, " - ") {
+		return false
+	}
+	return true
+}
+
+func validTagName(tag string) bool {
+	return tag != "" && encodeURIComponentSafe(tag)
+}
+
+func validPackageName(name string) bool {
+	if name == "" || strings.TrimSpace(name) != name {
+		return false
+	}
+	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "-") || strings.HasPrefix(name, "_") {
+		return false
+	}
+	if strings.EqualFold(name, "node_modules") || strings.EqualFold(name, "favicon.ico") {
+		return false
+	}
+	if strings.HasPrefix(name, "@") {
+		scope, pkg, ok := strings.Cut(name, "/")
+		return ok && validPackageNamePart(strings.TrimPrefix(scope, "@")) && validPackageNamePart(pkg) && !strings.HasPrefix(pkg, ".")
+	}
+	return validPackageNamePart(name)
+}
+
+func validPackageNamePart(part string) bool {
+	if part == "" || strings.TrimSpace(part) != part {
+		return false
+	}
+	return encodeURIComponentSafe(part)
+}
+
+func encodeURIComponentSafe(value string) bool {
+	for _, r := range value {
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', '!', '~', '*', '\'', '(', ')':
+			continue
+		default:
 			return false
 		}
 	}

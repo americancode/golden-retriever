@@ -42,7 +42,7 @@ func (e *PackagePlatformError) Error() string {
 	return fmt.Sprintf("%s is incompatible with %s=%s allowed=%v", e.Package, e.Field, e.Value, e.Allowed)
 }
 
-func platformCompatible(manifest VersionManifest) (bool, *PackagePlatformError) {
+func platformCompatible(manifest VersionManifest, opts ResolveOptions) (bool, *PackagePlatformError) {
 	pkg := manifest.Name + "@" + manifest.Version
 	osValue := npmOS(runtime.GOOS)
 	if !matchesPlatformList(osValue, manifest.OS) {
@@ -52,11 +52,17 @@ func platformCompatible(manifest VersionManifest) (bool, *PackagePlatformError) 
 	if !matchesPlatformList(cpuValue, manifest.CPU) {
 		return false, &PackagePlatformError{Package: pkg, Field: "cpu", Value: cpuValue, Allowed: manifest.CPU}
 	}
+	if opts.Libc != "" && !matchesPlatformList(opts.Libc, manifest.Libc) {
+		return false, &PackagePlatformError{Package: pkg, Field: "libc", Value: opts.Libc, Allowed: manifest.Libc}
+	}
 	return true, nil
 }
 
 func matchesPlatformList(value string, rules []string) bool {
 	if len(rules) == 0 {
+		return true
+	}
+	if len(rules) == 1 && strings.TrimSpace(rules[0]) == "any" {
 		return true
 	}
 	allowAny := true
