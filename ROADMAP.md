@@ -36,6 +36,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Resolver treats duplicate `optionalDependencies` entries as overriding `dependencies`.
 - Resolver applies npm-style `os`, `cpu`, and explicit `libc` platform filters, including `"any"` platform rules, skipping incompatible optional packages and failing incompatible required packages.
 - Resolver applies `engines.node` checks when `--node-version` is provided: manifest selection prefers engine-compatible range matches, strict mode fails incompatible required packages, while incompatible optional packages are skipped.
+- Omitted dev, optional, and peer dependencies are not resolved and therefore skip engine/platform install checks for those omitted dependency types.
 - Resolver ignores failed optional dependency resolution and rolls back failed optional subtrees so missing optional packages do not enter the tarball set.
 - Semver prerelease range handling now follows npm's same-version-tuple rule for prerelease candidates.
 - Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, version-qualified parent selectors, more-specific child selectors, nested and top-level `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies, devDependencies, optionalDependencies, and peerDependencies.
@@ -92,7 +93,7 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Continue reproducing npm Arborist peer conflict behavior, advanced peer set grouping, and strict/legacy peer mode edge cases.
 - Finish optional dependency shared-subtree semantics from Arborist `optional-set.js`.
 - Expand bundled dependency parity for complete metadata, legacy bundling fixtures, and root bundler cases.
-- Finish npm `--omit` / `--include` parity edge cases, including engine/platform check interactions.
+- Finish npm `--omit` / `--include` parity edge cases beyond current dev/optional/peer engine and platform check coverage.
 - Support `workspaces`.
 - Support `workspace:` specs if needed for package tree inputs, or keep explicit unsupported errors with parity tests.
 - Support `file:`, `link:`, tarball URL, Git, GitHub, and hosted Git specs where required, or continue hardening explicit unsupported errors with parity tests.
@@ -153,8 +154,8 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 These should be implemented as Go unit tests or npm-backed parity fixtures where they affect package resolution, tarball acquisition, target publish behavior, or CI auth. The local reference files are under `cli-11.14.0`.
 
 - Arborist ideal tree parity from `workspaces/arborist/test/arborist/build-ideal-tree.js`:
-  - Engine checks: expand coverage for warnings when engine strict is false and respect omit flags for dev/optional/peer dependency engine checks.
-  - Platform checks: expand root/transitive coverage and automatic libc detection if needed.
+  - Engine checks: expand coverage for warnings when engine strict is false beyond current strict omit fixtures.
+  - Platform checks: expand root/transitive coverage beyond current omit fixtures and add automatic libc detection if needed.
   - Peer dependency placement: overlap cases, nested peers, unresolvable peers, cyclic peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
   - Peer optional re-resolution: expand issue #8726 coverage beyond current missing-then-satisfied reconciliation, including cases where optional peer constraints force a previously chosen dependency version to be re-resolved and lockfile cases.
   - Peer optional existing-node preference: expand issue #9249 coverage beyond the current existing-satisfying-node fixture, including hoisting behavior where it changes placement.
@@ -193,7 +194,7 @@ These should be implemented as Go unit tests or npm-backed parity fixtures where
 - Optional dependency and omit/include behavior from `workspaces/arborist/test/optional-set.js`, `build-ideal-tree.js`, and install command tests:
   - Expand optional failure coverage for tarball download failures and shared optional subtrees.
   - Optional metadependency failures are ignored only when the optional ancestor is the reason for inclusion; add shared-subtree cases from `optional-set.js`.
-  - Expand `--omit=dev`, `--omit=optional`, `--omit=peer` and matching `--include` coverage for engine/platform checks and lockfile parity.
+  - Expand matching `--include` coverage for engine/platform checks and lockfile parity.
 
 - Registry/auth/config behavior from `workspaces/config/test/nerf-dart.js`, `env-replace.js`, `parse-field.js`, and npm publish command auth tests:
   - Full nerf-dart matching for registry auth keys, including path-specific registry auth and scoped registries.

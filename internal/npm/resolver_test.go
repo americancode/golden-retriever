@@ -427,6 +427,56 @@ func TestResolverSkipsIncompatibleOptionalLibcDependency(t *testing.T) {
 	}
 }
 
+func TestResolvePackageJSONSkipsOmittedDevPlatformMismatch(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"devDependencies":{"incompatible":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("incompatible@1.0.0") {
+		t.Fatalf("omitted dev dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONSkipsOmittedOptionalPlatformMismatch(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"optionalDependencies":{"incompatible":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("incompatible@1.0.0") {
+		t.Fatalf("omitted optional dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsOmittedPeerPlatformMismatch(t *testing.T) {
+	srv := platformRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, OmitPeer: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"platform-peer-plugin": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("incompatible@1.0.0") {
+		t.Fatalf("omitted peer dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
 func TestResolverErrorsOnEngineMismatchWhenStrict(t *testing.T) {
 	srv := engineRegistry(t)
 	defer srv.Close()
@@ -497,6 +547,87 @@ func TestResolverSkipsOptionalEngineMismatch(t *testing.T) {
 	}
 	if !graph.Has("engine-parent@1.0.0") {
 		t.Fatalf("parent should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONSkipsOmittedDevEngineMismatch(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"devDependencies":{"engine-package":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+		EngineStrict: true,
+		NodeVersion:  "12.18.4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("engine-package@1.0.0") {
+		t.Fatalf("omitted dev dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolvePackageJSONFailsIncludedDevEngineMismatch(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"devDependencies":{"engine-package":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+		IncludeDev:   true,
+		EngineStrict: true,
+		NodeVersion:  "12.18.4",
+	})
+	var engineErr *PackageEngineError
+	if !errors.As(err, &engineErr) {
+		t.Fatalf("got %v, want PackageEngineError", err)
+	}
+}
+
+func TestResolvePackageJSONSkipsOmittedOptionalEngineMismatch(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, []byte(`{"optionalDependencies":{"engine-package":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolvePackageJSON(context.Background(), NewClient(srv.URL), input, ResolveOptions{
+		EngineStrict: true,
+		NodeVersion:  "12.18.4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("engine-package@1.0.0") {
+		t.Fatalf("omitted optional dependency should not resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsOmittedPeerEngineMismatch(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{
+		IncludeOptional: true,
+		OmitPeer:        true,
+		EngineStrict:    true,
+		NodeVersion:     "12.18.4",
+	}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"engine-peer-plugin": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("engine-package@1.0.0") {
+		t.Fatalf("omitted peer dependency should not resolve: %#v", graph.Packages())
 	}
 }
 
@@ -980,6 +1111,19 @@ func engineRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r), serverURL(r))
+		case "/engine-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "engine-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "engine-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"engine-package": "1.0.0"},
+      "dist": {"tarball": "%s/engine-peer-plugin/-/engine-peer-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1082,6 +1226,19 @@ func platformRegistry(t *testing.T) *httptest.Server {
       "version": "1.0.0",
       "libc": ["glibc"],
       "dist": {"tarball": "%s/libc-compatible/-/libc-compatible-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/platform-peer-plugin":
+			fmt.Fprintf(w, `{
+  "name": "platform-peer-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "platform-peer-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"incompatible": "1.0.0"},
+      "dist": {"tarball": "%s/platform-peer-plugin/-/platform-peer-plugin-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
