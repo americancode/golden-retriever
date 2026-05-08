@@ -18,6 +18,7 @@ type ResolveOptions struct {
 	OmitPeer           bool
 	EngineStrict       bool
 	NodeVersion        string
+	Libc               string
 	ResolveConcurrency int
 }
 
