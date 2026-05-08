@@ -19,10 +19,15 @@ type ResolveOptions struct {
 	LegacyPeerDeps     bool
 	StrictPeerDeps     bool
 	OmitPeer           bool
+	PreferDedupe       bool
 	EngineStrict       bool
 	NodeVersion        string
 	Libc               string
 	Before             time.Time
+	DefaultTag         string
+	IncludeStaged      bool
+	Avoid              string
+	AvoidStrict        bool
 	ResolveConcurrency int
 }
 
@@ -370,6 +375,7 @@ func sortedDependencyNames(deps map[string]string) []string {
 
 var gitSSHSpecRe = regexp.MustCompile(`^[^@]+@[^:.]+\.[^:]+:.+$`)
 var windowsDriveSpecRe = regexp.MustCompile(`^[a-zA-Z]:`)
+var npaURLSpecRe = regexp.MustCompile(`^(?i:(?:git\+)?[a-z]+:)`)
 
 func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 	spec = strings.TrimSpace(spec)
@@ -380,12 +386,16 @@ func validateDependencySpec(name, spec string, edgeType EdgeType) error {
 		return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
 	}
 	if strings.HasPrefix(strings.ToLower(spec), "npm:") {
-		aliasTarget := strings.TrimSpace(spec[4:])
+		aliasTarget := strings.TrimSpace(spec[len("npm:"):])
 		if strings.HasPrefix(strings.ToLower(aliasTarget), "npm:") {
 			return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
 		}
 		actual, wanted, err := parsePackageSpec(name, spec)
 		if err != nil {
+			var aliasErr *nonRegistryAliasError
+			if errors.As(err, &aliasErr) {
+				return &UnsupportedSpecError{Name: name, Spec: spec, Type: string(edgeType)}
+			}
 			return err
 		}
 		if !validPackageName(actual) {
@@ -416,13 +426,16 @@ func isRegistrySpec(spec string) bool {
 
 func unsupportedSpecClass(spec string) bool {
 	lower := strings.ToLower(strings.TrimSpace(spec))
-	blockedPrefixes := []string{"file:", "link:", "git:", "git+", "github:", "gitlab:", "bitbucket:", "gist:", "http:", "https:", "ssh:", "svn:", "workspace:"}
+	blockedPrefixes := []string{"file:", "link:", "github:", "gitlab:", "bitbucket:", "gist:", "ssh:", "svn:", "workspace:"}
 	for _, prefix := range blockedPrefixes {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
 	}
 	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~/") || windowsDriveSpecRe.MatchString(spec) {
+		return true
+	}
+	if npaURLSpecRe.MatchString(spec) {
 		return true
 	}
 	if strings.Contains(spec, "/") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar") {

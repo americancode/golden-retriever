@@ -16,8 +16,8 @@
 
 ## Resolution Parity TODOs
 
-- [ ] Continue porting npm package spec parsing behavior from `npm-package-arg` beyond current registry alias, alias wildcard default, and unsupported-spec classification coverage.
-- [ ] Port remaining npm manifest selection behavior from `npm-pick-manifest`.
+- [x] Port npm package spec parsing behavior from `npm-package-arg` for registry specs, aliases, tag/version/range classification, unsupported URL schemes, and explicit non-registry rejection.
+- [x] Port npm manifest selection behavior from `npm-pick-manifest` for default tags, before-time, exact versions, dist-tags, deprecated and engine sorting, staged versions, policy restrictions, avoid, and avoid-strict fallback.
 - [ ] Continue hardening semver behavior beyond current strict version identity, prerelease, partial, hyphen, OR, and comparator coverage.
 - [ ] Expand alias handling beyond registry aliases if target package trees require it.
 - [ ] Expand fixtures for dist-tags, exact versions, ranges, prereleases, hyphen ranges, OR ranges, comparator whitespace, and conflicting ranges.
@@ -25,7 +25,7 @@
 - [ ] Add override semantic conflict detection for incomparable override sets with intersecting or disjoint replacement ranges.
 - [ ] Expand override fixtures for cyclic chains and peer-conflict fixes.
 - [ ] Decide whether alias, directory, file, and git override specs stay rejected or become supported.
-- [ ] Continue hardening `peerDependencies` placement.
+- [ ] Continue hardening `peerDependencies` placement beyond current root and ancestor dependency preference coverage.
 - [ ] Match npm lockfile behavior for peer conflicts that npm records as warnings but this resolver currently rejects.
 - [ ] Continue hardening `peerDependenciesMeta.optional`.
 - [ ] Expand peer fixtures for nested peers, unresolvable peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
@@ -53,7 +53,6 @@
 - [ ] Expand incomplete lock metadata behavior beyond current missing-resolved and local/git skip coverage.
 - [ ] Finish npm shrinkwrap behavior for bundled/shrinkwrapped package edge cases.
 - [ ] Add yarn.lock influence where npm would use it for absent or incomplete lock metadata.
-- [ ] Model remaining npm config that affects resolution, especially `prefer-dedupe`.
 - [ ] Model remaining npm config that affects resolution, especially `install-strategy`.
 - [ ] Add default placement, nested placement, and legacy bundling fixtures.
 - [ ] Add explicit request placement fixtures where selected package versions change.

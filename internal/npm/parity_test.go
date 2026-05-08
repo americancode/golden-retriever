@@ -62,7 +62,7 @@ func TestNPMParityFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts")
+			cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
 			cmd.Dir = dir
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -77,10 +77,12 @@ func TestNPMParityFixtures(t *testing.T) {
 			}
 			got := resolvedPackageSet(graph.Packages())
 			if !equalStringSlices(got.Keys, want.Keys) {
-				t.Fatalf("package set mismatch\ngot:  %v\nwant: %v", got.Keys, want.Keys)
+				missing, extra := stringSetDiff(want.Keys, got.Keys)
+				t.Fatalf("package set mismatch missing=%v extra=%v", missing, extra)
 			}
 			if !equalStringSlices(got.Tarballs, want.Tarballs) {
-				t.Fatalf("tarball set mismatch\ngot:  %v\nwant: %v", got.Tarballs, want.Tarballs)
+				missing, extra := stringSetDiff(want.Tarballs, got.Tarballs)
+				t.Fatalf("tarball set mismatch missing=%v extra=%v", missing, extra)
 			}
 		})
 	}
@@ -107,7 +109,7 @@ func TestNPMParityRealPackageJSONFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts")
+			cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
 			cmd.Dir = dir
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -122,10 +124,12 @@ func TestNPMParityRealPackageJSONFixtures(t *testing.T) {
 			}
 			got := resolvedPackageSet(graph.Packages())
 			if !equalStringSlices(got.Keys, want.Keys) {
-				t.Fatalf("package set mismatch\ngot:  %v\nwant: %v", got.Keys, want.Keys)
+				missing, extra := stringSetDiff(want.Keys, got.Keys)
+				t.Fatalf("package set mismatch missing=%v extra=%v", missing, extra)
 			}
 			if !equalStringSlices(got.Tarballs, want.Tarballs) {
-				t.Fatalf("tarball set mismatch\ngot:  %v\nwant: %v", got.Tarballs, want.Tarballs)
+				missing, extra := stringSetDiff(want.Tarballs, got.Tarballs)
+				t.Fatalf("tarball set mismatch missing=%v extra=%v", missing, extra)
 			}
 
 			outDir := filepath.Join(dir, "tgzs")
@@ -188,6 +192,8 @@ func lockPackageSet(t *testing.T, path string) parityPackageSet {
 		t.Fatal(err)
 	}
 	var out parityPackageSet
+	keys := map[string]bool{}
+	tarballs := map[string]bool{}
 	for loc, pkg := range lock.Packages {
 		if loc == "" || pkg.Version == "" {
 			continue
@@ -196,8 +202,13 @@ func lockPackageSet(t *testing.T, path string) parityPackageSet {
 		if name == "" {
 			name = nameFromNodeModulesPath(loc)
 		}
-		out.Keys = append(out.Keys, name+"@"+pkg.Version)
-		if pkg.Resolved != "" {
+		key := name + "@" + pkg.Version
+		if !keys[key] {
+			keys[key] = true
+			out.Keys = append(out.Keys, key)
+		}
+		if pkg.Resolved != "" && !tarballs[pkg.Resolved] {
+			tarballs[pkg.Resolved] = true
 			out.Tarballs = append(out.Tarballs, pkg.Resolved)
 		}
 	}
@@ -208,9 +219,15 @@ func lockPackageSet(t *testing.T, path string) parityPackageSet {
 
 func resolvedPackageSet(pkgs []Package) parityPackageSet {
 	var out parityPackageSet
+	keys := map[string]bool{}
+	tarballs := map[string]bool{}
 	for _, pkg := range pkgs {
-		out.Keys = append(out.Keys, pkg.Key())
-		if pkg.Tarball != "" {
+		if key := pkg.Key(); !keys[key] {
+			keys[key] = true
+			out.Keys = append(out.Keys, key)
+		}
+		if pkg.Tarball != "" && !tarballs[pkg.Tarball] {
+			tarballs[pkg.Tarball] = true
 			out.Tarballs = append(out.Tarballs, pkg.Tarball)
 		}
 	}
@@ -229,4 +246,28 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func stringSetDiff(want, got []string) ([]string, []string) {
+	wantSet := map[string]bool{}
+	gotSet := map[string]bool{}
+	for _, item := range want {
+		wantSet[item] = true
+	}
+	for _, item := range got {
+		gotSet[item] = true
+	}
+	var missing []string
+	for _, item := range want {
+		if !gotSet[item] {
+			missing = append(missing, item)
+		}
+	}
+	var extra []string
+	for _, item := range got {
+		if !wantSet[item] {
+			extra = append(extra, item)
+		}
+	}
+	return missing, extra
 }

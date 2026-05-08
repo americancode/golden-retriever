@@ -66,10 +66,21 @@ func NewClientWithConfig(cfg *Config) *Client {
 }
 
 type Packument struct {
-	Name     string                     `json:"name"`
-	DistTags map[string]string          `json:"dist-tags"`
-	Versions map[string]VersionManifest `json:"versions"`
-	Time     map[string]string          `json:"time"`
+	Name               string             `json:"name"`
+	DistTags           map[string]string  `json:"dist-tags"`
+	Versions           versionManifestMap `json:"versions"`
+	Time               map[string]string  `json:"time"`
+	StagedVersions     stagedVersions     `json:"stagedVersions"`
+	PolicyRestrictions struct {
+		Versions versionManifestMap `json:"versions"`
+		Message  string             `json:"message"`
+	} `json:"policyRestrictions"`
+}
+
+type versionManifestMap map[string]VersionManifest
+
+type stagedVersions struct {
+	Versions versionManifestMap `json:"versions"`
 }
 
 type VersionManifest struct {

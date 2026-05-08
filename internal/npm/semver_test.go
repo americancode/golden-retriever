@@ -44,6 +44,51 @@ func TestPickVersionRanges(t *testing.T) {
 	}
 }
 
+func TestParsePackageSpecMatchesNPARegistryAliases(t *testing.T) {
+	tests := []struct {
+		spec       string
+		wantName   string
+		wantWanted string
+	}{
+		{spec: "npm:left-pad@1.0.0", wantName: "left-pad", wantWanted: "1.0.0"},
+		{spec: "NPM:left-pad@1.0.0", wantName: "left-pad", wantWanted: "1.0.0"},
+		{spec: "npm:left-pad", wantName: "left-pad", wantWanted: "*"},
+		{spec: "npm:left-pad@", wantName: "left-pad", wantWanted: "*"},
+		{spec: "npm:@scope/pkg", wantName: "@scope/pkg", wantWanted: "*"},
+		{spec: "npm:@scope/pkg@^1", wantName: "@scope/pkg", wantWanted: "^1"},
+		{spec: "npm:CAPS@1", wantName: "CAPS", wantWanted: "1"},
+		{spec: "npm:@scope/_private@1", wantName: "@scope/_private", wantWanted: "1"},
+		{spec: "npm:@scope/-dash@1", wantName: "@scope/-dash", wantWanted: "1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.spec, func(t *testing.T) {
+			name, wanted, err := parsePackageSpec("alias", tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name != tc.wantName || wanted != tc.wantWanted {
+				t.Fatalf("parsePackageSpec(%q) = %q, %q; want %q, %q", tc.spec, name, wanted, tc.wantName, tc.wantWanted)
+			}
+		})
+	}
+}
+
+func TestParsePackageSpecRejectsNonRegistryAliases(t *testing.T) {
+	for _, spec := range []string{
+		"npm:file:../local",
+		"npm:https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
+		"npm:foo/bar",
+		"npm:foo@file:../local",
+		"npm:foo:bar",
+	} {
+		t.Run(spec, func(t *testing.T) {
+			if _, _, err := parsePackageSpec("alias", spec); err == nil {
+				t.Fatalf("parsePackageSpec(%q) = nil, want error", spec)
+			}
+		})
+	}
+}
+
 func TestPickVersionPrefersLatestWhenItSatisfies(t *testing.T) {
 	pack := &Packument{
 		Name:     "demo",
@@ -63,6 +108,25 @@ func TestPickVersionPrefersLatestWhenItSatisfies(t *testing.T) {
 	}
 }
 
+func TestPickVersionHonorsDefaultTag(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "2.0.0", "beta": "3.0.0-beta.1"},
+		Versions: map[string]VersionManifest{
+			"2.0.0":        {},
+			"3.0.0-beta.1": {},
+		},
+	}
+
+	got, err := pickVersionWithOptions(pack, "", ResolveOptions{DefaultTag: "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "3.0.0-beta.1" {
+		t.Fatalf("got %s want beta dist-tag", got)
+	}
+}
+
 func TestPickVersionAvoidsDeprecatedLatest(t *testing.T) {
 	pack := &Packument{
 		Name:     "demo",
@@ -79,6 +143,123 @@ func TestPickVersionAvoidsDeprecatedLatest(t *testing.T) {
 	}
 	if got != "1.1.0" {
 		t.Fatalf("got %s want non-deprecated 1.1.0", got)
+	}
+}
+
+func TestPickVersionHonorsStagedVersions(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.1.0"},
+		Versions: map[string]VersionManifest{
+			"1.0.0": {Version: "1.0.0"},
+		},
+	}
+	pack.StagedVersions.Versions = map[string]VersionManifest{
+		"1.1.0": {Version: "1.1.0"},
+	}
+
+	got, err := pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.0.0" {
+		t.Fatalf("without include-staged got %s want normal 1.0.0", got)
+	}
+	if _, err := pickVersionWithOptions(pack, "latest", ResolveOptions{}); err == nil {
+		t.Fatalf("explicit staged dist-tag should fail without include-staged")
+	}
+	got, err = pickVersionWithOptions(pack, "latest", ResolveOptions{IncludeStaged: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("explicit staged dist-tag got %s want 1.1.0", got)
+	}
+	got, err = pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{IncludeStaged: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.0.0" {
+		t.Fatalf("range should prefer non-staged version before semver, got %s", got)
+	}
+}
+
+func TestPickVersionAvoidsPolicyRestrictedLatest(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.2.0"},
+		Versions: map[string]VersionManifest{
+			"1.1.0": {},
+			"1.2.0": {},
+		},
+	}
+	pack.PolicyRestrictions.Versions = map[string]VersionManifest{"1.2.0": {}}
+
+	got, err := pickVersion(pack, "^1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.1.0" {
+		t.Fatalf("got %s want non-restricted 1.1.0", got)
+	}
+
+	if _, err := pickVersion(pack, "latest"); err == nil {
+		t.Fatalf("explicit restricted dist-tag should fail")
+	}
+}
+
+func TestPickVersionErrorsWhenOnlyPolicyRestrictedVersionMatches(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.2.0"},
+		Versions: map[string]VersionManifest{
+			"1.0.0": {},
+		},
+	}
+	pack.PolicyRestrictions.Versions = map[string]VersionManifest{"1.2.0": {Version: "1.2.0"}}
+
+	if _, err := pickVersion(pack, "^1.2.0"); err == nil {
+		t.Fatalf("restricted-only match should fail")
+	}
+}
+
+func TestPickVersionAvoidRange(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.3.0"},
+		Versions: map[string]VersionManifest{
+			"1.1.0": {},
+			"1.2.0": {},
+			"1.3.0": {},
+		},
+	}
+
+	got, err := pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{Avoid: ">=1.3.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.2.0" {
+		t.Fatalf("got %s want non-avoided 1.2.0", got)
+	}
+}
+
+func TestPickVersionAvoidStrictFallsBackOutsideRequestedRange(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "1.1.0"},
+		Versions: map[string]VersionManifest{
+			"1.0.0": {},
+			"1.1.0": {},
+			"2.0.0": {},
+		},
+	}
+
+	got, err := pickVersionWithOptions(pack, "^1.0.0", ResolveOptions{Avoid: "^1.0.0", AvoidStrict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "2.0.0" {
+		t.Fatalf("got %s want avoid-strict star fallback 2.0.0", got)
 	}
 }
 

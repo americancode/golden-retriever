@@ -67,6 +67,102 @@ func TestResolverAutoPlacesMissingPeerDependency(t *testing.T) {
 	}
 }
 
+func TestResolverUsesRootDependencyToSatisfyPeerResolvedEarlier(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "peer-first-plugin", Spec: "1.0.0", Type: EdgeDev},
+		{Name: "vite-peer", Spec: "^5.0.0", Type: EdgeDev},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "peer-first-plugin")
+	peer := plugin.Peers["vite-peer"]
+	if peer == nil || !peer.Satisfied || peer.To == nil || peer.To.Version != "5.4.0" {
+		t.Fatalf("peer should use explicit root dependency version, got %#v", peer)
+	}
+	if graph.Has("vite-peer@7.0.0") {
+		t.Fatalf("resolver should not auto-install newer peer when root request satisfies it: %#v", graph.Packages())
+	}
+	rootEdge := graph.Root.Dependencies["vite-peer"]
+	if rootEdge == nil || rootEdge.Type != EdgeDev || rootEdge.To == nil || rootEdge.To.Version != "5.4.0" {
+		t.Fatalf("root vite-peer edge should preserve original dependency type: %#v", rootEdge)
+	}
+}
+
+func TestResolverUsesAncestorDependencyToSatisfyPeerResolvedEarlier(t *testing.T) {
+	srv := peerRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.ResolveRoot(context.Background(), []DependencyRequest{
+		{Name: "peer-parent", Spec: "1.0.0", Type: EdgeProd},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := findNode(t, graph, "peer-first-plugin")
+	peer := plugin.Peers["vite-peer"]
+	if peer == nil || !peer.Satisfied || peer.To == nil || peer.To.Version != "5.4.0" {
+		t.Fatalf("peer should use parent dependency version, got %#v", peer)
+	}
+	if graph.Has("vite-peer@7.0.0") {
+		t.Fatalf("resolver should not auto-install newer peer when parent request satisfies it: %#v", graph.Packages())
+	}
+	parent := findNode(t, graph, "peer-parent")
+	parentEdge := parent.Dependencies["vite-peer"]
+	if parentEdge == nil || parentEdge.Type != EdgeProd || parentEdge.To == nil || parentEdge.To.Version != "5.4.0" {
+		t.Fatalf("parent vite-peer edge should preserve dependency type: %#v", parentEdge)
+	}
+}
+
+func TestResolverDoesNotReuseSiblingDependencyForNormalPlacement(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{
+		"novelty-a": "1.0.0",
+		"novelty-c": "1.0.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("shared@1.2.0") || !graph.Has("shared@1.3.0") {
+		t.Fatalf("npm-compatible placement should keep both sibling-selected versions: %#v", graph.Packages())
+	}
+	c := findNode(t, graph, "novelty-c")
+	edge := c.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.3.0" {
+		t.Fatalf("novelty-c should not reuse novelty-a's sibling dependency: %#v", edge)
+	}
+}
+
+func TestResolverPreferDedupeReusesSiblingDependency(t *testing.T) {
+	srv := dedupeRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true, PreferDedupe: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{
+		"novelty-a": "1.0.0",
+		"novelty-c": "1.0.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("shared@1.3.0") {
+		t.Fatalf("prefer-dedupe should reuse the existing satisfying sibling version: %#v", graph.Packages())
+	}
+	c := findNode(t, graph, "novelty-c")
+	edge := c.Dependencies["shared"]
+	if edge == nil || edge.To == nil || edge.To.Version != "1.2.0" {
+		t.Fatalf("novelty-c should reuse novelty-a's shared version with prefer-dedupe: %#v", edge)
+	}
+}
+
 func TestResolverRecordsUnsatisfiedOptionalPeerDependency(t *testing.T) {
 	srv := peerRegistry(t)
 	defer srv.Close()
@@ -390,7 +486,7 @@ func TestResolverOptionalDependenciesOverrideDependencies(t *testing.T) {
 	}
 }
 
-func TestResolverSkipsIncompatibleOptionalDependency(t *testing.T) {
+func TestResolverIncludesIncompatibleOptionalPlatformDependencyForLockParity(t *testing.T) {
 	srv := platformRegistry(t)
 	defer srv.Close()
 
@@ -399,11 +495,16 @@ func TestResolverSkipsIncompatibleOptionalDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if graph.Has("incompatible@1.0.0") {
-		t.Fatalf("incompatible optional dependency should be skipped: %#v", graph.Packages())
+	if !graph.Has("incompatible@1.0.0") {
+		t.Fatalf("incompatible optional platform dependency should be mirrored for lock parity: %#v", graph.Packages())
 	}
 	if !graph.Has("compatible@1.0.0") {
 		t.Fatalf("compatible optional dependency should be resolved: %#v", graph.Packages())
+	}
+	parent := findNode(t, graph, "parent")
+	edge := parent.Dependencies["incompatible"]
+	if edge == nil || edge.Type != EdgeOptional || edge.To == nil {
+		t.Fatalf("incompatible optional platform dependency should keep an optional edge: %#v", edge)
 	}
 }
 
@@ -462,7 +563,7 @@ func TestResolverErrorsOnIncompatibleLibcProdDependency(t *testing.T) {
 	}
 }
 
-func TestResolverSkipsIncompatibleOptionalLibcDependency(t *testing.T) {
+func TestResolverIncludesIncompatibleOptionalLibcDependencyForLockParity(t *testing.T) {
 	srv := platformRegistry(t)
 	defer srv.Close()
 
@@ -471,8 +572,8 @@ func TestResolverSkipsIncompatibleOptionalLibcDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if graph.Has("libc-incompatible@1.0.0") {
-		t.Fatalf("incompatible optional libc dependency should be skipped: %#v", graph.Packages())
+	if !graph.Has("libc-incompatible@1.0.0") {
+		t.Fatalf("incompatible optional libc dependency should be mirrored for lock parity: %#v", graph.Packages())
 	}
 	if !graph.Has("libc-compatible@1.0.0") {
 		t.Fatalf("compatible optional libc dependency should resolve: %#v", graph.Packages())
@@ -917,6 +1018,30 @@ func TestResolvePackageJSONErrorsOnInvalidTagName(t *testing.T) {
 	}
 }
 
+func TestValidateDependencySpecMatchesNPAURLAndTagBoundary(t *testing.T) {
+	unsupported := []string{"foo:bar", "git+foo:bar", "ftp://example.test/pkg.tgz"}
+	for _, spec := range unsupported {
+		t.Run("unsupported/"+spec, func(t *testing.T) {
+			err := validateDependencySpec("pkg", spec, EdgeProd)
+			var specErr *UnsupportedSpecError
+			if !errors.As(err, &specErr) {
+				t.Fatalf("got %v, want UnsupportedSpecError", err)
+			}
+		})
+	}
+
+	invalidTags := []string{"foo1:bar", "foo.bar:baz", "foo-bar:baz", "foo+baz:bar"}
+	for _, spec := range invalidTags {
+		t.Run("tag/"+spec, func(t *testing.T) {
+			err := validateDependencySpec("pkg", spec, EdgeProd)
+			var tagErr *InvalidTagNameError
+			if !errors.As(err, &tagErr) {
+				t.Fatalf("got %v, want InvalidTagNameError", err)
+			}
+		})
+	}
+}
+
 func TestResolvePackageJSONErrorsOnInvalidAliasTargetName(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "package.json")
@@ -938,6 +1063,8 @@ func TestResolvePackageJSONErrorsOnUnsupportedAliasTargetSpec(t *testing.T) {
 		"file":   "npm:file:../local",
 		"remote": "npm:https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
 		"nested": "npm:npm:real@1.0.0",
+		"slash":  "npm:foo/bar",
+		"scheme": "npm:foo:bar",
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -960,16 +1087,18 @@ func TestResolvePackageJSONErrorsOnUnsupportedAliasTargetSpec(t *testing.T) {
 
 func TestResolvePackageJSONErrorsOnUnsupportedRootSpecClasses(t *testing.T) {
 	tests := map[string]string{
-		"workspace": "workspace:*",
-		"link":      "link:../local",
-		"git":       "git+https://github.com/acme/pkg.git",
-		"hosted":    "github:acme/pkg",
-		"gist":      "gist:acme/1234",
-		"ssh-url":   "ssh://git@github.com/acme/pkg.git",
-		"tarball":   "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
-		"directory": "../local",
-		"home-dir":  "~/local",
-		"windows":   "C:\\local\\pkg",
+		"workspace":  "workspace:*",
+		"link":       "link:../local",
+		"git":        "git+https://github.com/acme/pkg.git",
+		"git-scheme": "git+foo:bar",
+		"hosted":     "github:acme/pkg",
+		"gist":       "gist:acme/1234",
+		"ssh-url":    "ssh://git@github.com/acme/pkg.git",
+		"tarball":    "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
+		"scheme":     "foo:bar",
+		"directory":  "../local",
+		"home-dir":   "~/local",
+		"windows":    "C:\\local\\pkg",
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1339,6 +1468,52 @@ func peerRegistry(t *testing.T) *httptest.Server {
     }
   }
 }`, serverURL(r))
+		case "/peer-first-plugin":
+			fmt.Fprintf(w, `{
+  "name": "peer-first-plugin",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "peer-first-plugin",
+      "version": "1.0.0",
+      "peerDependencies": {"vite-peer": "^5.0.0 || ^6.0.0 || ^7.0.0"},
+      "dist": {"tarball": "%s/peer-first-plugin/-/peer-first-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/peer-parent":
+			fmt.Fprintf(w, `{
+  "name": "peer-parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "peer-parent",
+      "version": "1.0.0",
+      "dependencies": {
+        "peer-first-plugin": "1.0.0",
+        "vite-peer": "5.4.0"
+      },
+      "dist": {"tarball": "%s/peer-parent/-/peer-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/vite-peer":
+			fmt.Fprintf(w, `{
+  "name": "vite-peer",
+  "dist-tags": {"latest": "7.0.0"},
+  "versions": {
+    "5.4.0": {
+      "name": "vite-peer",
+      "version": "5.4.0",
+      "dist": {"tarball": "%s/vite-peer/-/vite-peer-5.4.0.tgz"}
+    },
+    "7.0.0": {
+      "name": "vite-peer",
+      "version": "7.0.0",
+      "dist": {"tarball": "%s/vite-peer/-/vite-peer-7.0.0.tgz"}
+    }
+  }
+}`, serverURL(r), serverURL(r))
 		case "/wide-peer-plugin":
 			fmt.Fprintf(w, `{
   "name": "wide-peer-plugin",
@@ -1998,6 +2173,32 @@ func dedupeRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/novelty-a":
+			fmt.Fprintf(w, `{
+  "name": "novelty-a",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "novelty-a",
+      "version": "1.0.0",
+      "dependencies": {"shared": "1.2.0"},
+      "dist": {"tarball": "%s/novelty-a/-/novelty-a-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/novelty-c":
+			fmt.Fprintf(w, `{
+  "name": "novelty-c",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "novelty-c",
+      "version": "1.0.0",
+      "dependencies": {"shared": "^1.0.0"},
+      "dist": {"tarball": "%s/novelty-c/-/novelty-c-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
 		case "/consumer":
 			fmt.Fprintf(w, `{
   "name": "consumer",

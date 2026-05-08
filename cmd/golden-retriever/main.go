@@ -127,10 +127,15 @@ func mirror(args []string) error {
 	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
+	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
+	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
+	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
+	avoid := fs.String("avoid", "", "semver range of versions to avoid during manifest selection")
+	avoidStrict := fs.Bool("avoid-strict", false, "allow npm-pick-manifest style outside-range fallback when all matching versions are avoided")
 	syncTarget := fs.Bool("sync-target", false, "query target registry first and rebuild target-present state for the resolved package set")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	fetchConcurrency := fs.Int("fetch-concurrency", max(8, runtime.NumCPU()*4), "parallel tarball download count")
@@ -171,10 +176,15 @@ func mirror(args []string) error {
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
+		PreferDedupe:       *preferDedupe,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
 		Before:             before,
+		DefaultTag:         *defaultTag,
+		IncludeStaged:      *includeStaged,
+		Avoid:              *avoid,
+		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -345,10 +355,15 @@ func fetch(args []string) error {
 	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
+	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
+	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
+	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
+	avoid := fs.String("avoid", "", "semver range of versions to avoid during manifest selection")
+	avoidStrict := fs.Bool("avoid-strict", false, "allow npm-pick-manifest style outside-range fallback when all matching versions are avoided")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
@@ -376,10 +391,15 @@ func fetch(args []string) error {
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
+		PreferDedupe:       *preferDedupe,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
 		Before:             before,
+		DefaultTag:         *defaultTag,
+		IncludeStaged:      *includeStaged,
+		Avoid:              *avoid,
+		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -431,10 +451,15 @@ func resolve(args []string) error {
 	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
+	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
+	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
+	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
+	avoid := fs.String("avoid", "", "semver range of versions to avoid during manifest selection")
+	avoidStrict := fs.Bool("avoid-strict", false, "allow npm-pick-manifest style outside-range fallback when all matching versions are avoided")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -458,10 +483,15 @@ func resolve(args []string) error {
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
+		PreferDedupe:       *preferDedupe,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
 		Before:             before,
+		DefaultTag:         *defaultTag,
+		IncludeStaged:      *includeStaged,
+		Avoid:              *avoid,
+		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {
@@ -555,10 +585,15 @@ func stateSyncTarget(args []string) error {
 	include := fs.String("include", "", "comma-separated dependency types to include after omit: dev, optional, peer")
 	legacyPeerDeps := fs.Bool("legacy-peer-deps", false, "ignore peerDependencies")
 	strictPeerDeps := fs.Bool("strict-peer-deps", false, "fail on peer dependency conflicts")
+	preferDedupe := fs.Bool("prefer-dedupe", false, "prefer reusing existing satisfying package versions during resolution")
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
+	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
+	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
+	avoid := fs.String("avoid", "", "semver range of versions to avoid during manifest selection")
+	avoidStrict := fs.Bool("avoid-strict", false, "allow npm-pick-manifest style outside-range fallback when all matching versions are avoided")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel source registry metadata fetch count")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel target registry query count")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
@@ -591,10 +626,15 @@ func stateSyncTarget(args []string) error {
 		LegacyPeerDeps:     *legacyPeerDeps,
 		StrictPeerDeps:     *strictPeerDeps,
 		OmitPeer:           dependencySet.omitPeer,
+		PreferDedupe:       *preferDedupe,
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
 		Before:             before,
+		DefaultTag:         *defaultTag,
+		IncludeStaged:      *includeStaged,
+		Avoid:              *avoid,
+		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
 	})
 	if err != nil {

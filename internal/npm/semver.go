@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+type nonRegistryAliasError struct {
+	DepName string
+}
+
+func (e *nonRegistryAliasError) Error() string {
+	return fmt.Sprintf("%s: aliases only work for registry deps", e.DepName)
+}
+
 var (
 	versionRe         = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
 	partialRe         = regexp.MustCompile(`^v?([0-9xX*]+)(?:\.([0-9xX*]+))?(?:\.([0-9xX*]+))?(?:-([0-9A-Za-z.-]+))?$`)
@@ -19,21 +27,63 @@ var (
 
 func parsePackageSpec(depName, spec string) (string, string, error) {
 	spec = strings.TrimSpace(spec)
-	if !strings.HasPrefix(spec, "npm:") {
+	if !strings.HasPrefix(strings.ToLower(spec), "npm:") {
 		return depName, spec, nil
 	}
-	rest := strings.TrimPrefix(spec, "npm:")
-	if rest == "" {
-		return "", "", fmt.Errorf("%s: empty npm alias spec", depName)
+	rest := spec[len("npm:"):]
+	name, wanted, registry, err := parseRegistryPackageArg(rest)
+	if err != nil {
+		return "", "", err
 	}
-	name, wanted := splitNameSpec(rest)
+	if !registry {
+		return "", "", &nonRegistryAliasError{DepName: depName}
+	}
 	if name == "" {
-		return "", "", fmt.Errorf("%s: invalid npm alias spec %q", depName, spec)
+		if registryTagLike(wanted) && !validTagName(wanted) {
+			return "", "", &InvalidTagNameError{Name: depName, Spec: spec}
+		}
+		return "", "", fmt.Errorf("%s: aliases must have a name", depName)
 	}
-	if wanted == "" {
-		wanted = "*"
+	if strings.HasPrefix(strings.ToLower(wanted), "npm:") {
+		return "", "", fmt.Errorf("%s: nested aliases not supported", depName)
+	}
+	if unsupportedSpecClass(wanted) {
+		return "", "", &nonRegistryAliasError{DepName: depName}
 	}
 	return name, wanted, nil
+}
+
+func parseRegistryPackageArg(arg string) (string, string, bool, error) {
+	arg = strings.TrimSpace(arg)
+	if strings.HasPrefix(strings.ToLower(arg), "npm:") {
+		return "", "", false, fmt.Errorf("nested aliases not supported")
+	}
+	nameEndsAt := strings.Index(arg[1:], "@")
+	if nameEndsAt >= 0 {
+		nameEndsAt++
+	}
+	namePart := arg
+	if nameEndsAt > 0 {
+		namePart = arg[:nameEndsAt]
+	}
+	if npaURLSpecRe.MatchString(arg) || gitSSHSpecRe.MatchString(arg) {
+		return "", "", false, nil
+	}
+	lower := strings.ToLower(namePart)
+	if !strings.HasPrefix(namePart, "@") && (strings.Contains(namePart, "/") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar")) {
+		return "", "", false, nil
+	}
+	if nameEndsAt > 0 {
+		wanted := arg[nameEndsAt+1:]
+		if wanted == "" {
+			wanted = "*"
+		}
+		return namePart, wanted, true, nil
+	}
+	if validPackageName(arg) {
+		return arg, "*", true, nil
+	}
+	return "", arg, true, nil
 }
 
 func splitNameSpec(spec string) (string, string) {
@@ -63,40 +113,80 @@ func pickVersion(pack *Packument, spec string) (string, error) {
 
 func pickVersionWithOptions(pack *Packument, spec string, opts ResolveOptions) (string, error) {
 	spec = strings.TrimSpace(spec)
+	defaultTag := opts.DefaultTag
+	if defaultTag == "" {
+		defaultTag = "latest"
+	}
 	if spec == "" {
-		spec = "latest"
+		spec = defaultTag
+	}
+	if opts.AvoidStrict {
+		looseOpts := opts
+		looseOpts.AvoidStrict = false
+		version, err := pickVersionWithOptions(pack, spec, looseOpts)
+		if err != nil || !versionAvoided(version, opts.Avoid) {
+			return version, err
+		}
+		version, err = pickVersionWithOptions(pack, "^"+version, looseOpts)
+		if err != nil || !versionAvoided(version, opts.Avoid) {
+			return version, err
+		}
+		version, err = pickVersionWithOptions(pack, "*", looseOpts)
+		if err != nil || !versionAvoided(version, opts.Avoid) {
+			return version, err
+		}
+		return "", fmt.Errorf("no avoidable versions for %s", pack.Name)
 	}
 	if tag, ok := pack.DistTags[spec]; ok {
 		if versionBefore(pack, tag, opts.Before) {
+			if pack.versionRestricted(tag) || !pack.versionAvailable(tag, opts) {
+				return "", fmt.Errorf("version %s@%s is restricted by registry policy", pack.Name, tag)
+			}
 			return tag, nil
 		}
 		return pickVersionWithOptions(pack, "<="+tag, opts)
 	}
-	if _, ok := pack.Versions[spec]; ok {
-		if !versionBefore(pack, spec, opts.Before) {
+	if parsed := parseVersion(spec); parsed.ok {
+		version := parsed.clean()
+		if !versionBefore(pack, version, opts.Before) {
 			return "", fmt.Errorf("no version of %s satisfies %q before %s", pack.Name, spec, opts.Before.Format(time.RFC3339))
 		}
-		return spec, nil
+		if pack.versionRestricted(version) || !pack.versionAvailable(version, opts) {
+			return "", fmt.Errorf("version %s@%s is restricted by registry policy", pack.Name, version)
+		}
+		return version, nil
 	}
 
 	rangeSpec := spec
-	defaultVer := pack.DistTags["latest"]
+	defaultVer := pack.DistTags[defaultTag]
 	if defaultVer != "" && satisfies(defaultVer, rangeSpec) {
-		if manifest, ok := pack.Versions[defaultVer]; ok && versionBefore(pack, defaultVer, opts.Before) && manifest.Deprecated == nil && manifestEngineOK(manifest, opts) {
+		if manifest, ok := pack.versionManifest(defaultVer, opts); ok && !pack.versionRestricted(defaultVer) && !pack.versionStaged(defaultVer) && !versionAvoided(defaultVer, opts.Avoid) && versionBefore(pack, defaultVer, opts.Before) && manifest.Deprecated == nil && manifestEngineOK(manifest, opts) {
 			return defaultVer, nil
 		}
 	}
 
-	versions := make([]string, 0, len(pack.Versions))
-	for version, manifest := range pack.Versions {
-		if parseVersion(version).ok && versionBefore(pack, version, opts.Before) {
-			versions = append(versions, version)
-			_ = manifest
-		}
+	versions := pack.candidateVersions(opts, true)
+	if len(versions) == 0 {
+		return "", fmt.Errorf("no versions available for %s", pack.Name)
 	}
 	sort.Slice(versions, func(i, j int) bool {
-		mi := pack.Versions[versions[i]]
-		mj := pack.Versions[versions[j]]
+		mi, _ := pack.versionManifest(versions[i], opts)
+		mj, _ := pack.versionManifest(versions[j], opts)
+		avoidI := !versionAvoided(versions[i], opts.Avoid)
+		avoidJ := !versionAvoided(versions[j], opts.Avoid)
+		if avoidI != avoidJ {
+			return avoidI
+		}
+		restrictedI := !pack.versionRestricted(versions[i])
+		restrictedJ := !pack.versionRestricted(versions[j])
+		if restrictedI != restrictedJ {
+			return restrictedI
+		}
+		stagedI := !pack.versionStaged(versions[i])
+		stagedJ := !pack.versionStaged(versions[j])
+		if stagedI != stagedJ {
+			return stagedI
+		}
 		engOKi := manifestEngineOK(mi, opts)
 		engOKj := manifestEngineOK(mj, opts)
 		notDepri := mi.Deprecated == nil
@@ -116,10 +206,81 @@ func pickVersionWithOptions(pack *Packument, spec string, opts ResolveOptions) (
 	})
 	for _, version := range versions {
 		if satisfies(version, spec) {
+			if pack.versionRestricted(version) {
+				return "", fmt.Errorf("version %s@%s is restricted by registry policy", pack.Name, version)
+			}
 			return version, nil
 		}
 	}
 	return "", fmt.Errorf("no version of %s satisfies %q", pack.Name, spec)
+}
+
+func (pack *Packument) versionAvailable(version string, opts ResolveOptions) bool {
+	_, ok := pack.versionManifest(version, opts)
+	return ok
+}
+
+func (pack *Packument) versionManifest(version string, opts ResolveOptions) (VersionManifest, bool) {
+	if pack == nil {
+		return VersionManifest{}, false
+	}
+	if manifest, ok := pack.Versions[version]; ok {
+		return manifest, true
+	}
+	if opts.IncludeStaged {
+		if manifest, ok := pack.StagedVersions.Versions[version]; ok {
+			return manifest, true
+		}
+	}
+	if manifest, ok := pack.PolicyRestrictions.Versions[version]; ok {
+		return manifest, true
+	}
+	return VersionManifest{}, false
+}
+
+func (pack *Packument) versionRestricted(version string) bool {
+	if pack == nil || pack.PolicyRestrictions.Versions == nil {
+		return false
+	}
+	_, ok := pack.PolicyRestrictions.Versions[version]
+	return ok
+}
+
+func (pack *Packument) versionStaged(version string) bool {
+	if pack == nil || pack.StagedVersions.Versions == nil {
+		return false
+	}
+	_, ok := pack.StagedVersions.Versions[version]
+	return ok
+}
+
+func (pack *Packument) candidateVersions(opts ResolveOptions, includeRestricted bool) []string {
+	seen := map[string]bool{}
+	versions := make([]string, 0, len(pack.Versions)+len(pack.StagedVersions.Versions)+len(pack.PolicyRestrictions.Versions))
+	add := func(version string) {
+		if !seen[version] && parseVersion(version).ok && versionBefore(pack, version, opts.Before) {
+			seen[version] = true
+			versions = append(versions, version)
+		}
+	}
+	for version := range pack.Versions {
+		add(version)
+	}
+	if opts.IncludeStaged {
+		for version := range pack.StagedVersions.Versions {
+			add(version)
+		}
+	}
+	if includeRestricted {
+		for version := range pack.PolicyRestrictions.Versions {
+			add(version)
+		}
+	}
+	return versions
+}
+
+func versionAvoided(version, avoid string) bool {
+	return strings.TrimSpace(avoid) != "" && satisfies(version, avoid)
 }
 
 func versionBefore(pack *Packument, version string, before time.Time) bool {
@@ -138,15 +299,20 @@ func versionBefore(pack *Packument, version string, before time.Time) bool {
 }
 
 func pickVersionSatisfyingAll(pack *Packument, specs []string, opts ResolveOptions) (string, bool) {
-	versions := make([]string, 0, len(pack.Versions))
-	for version := range pack.Versions {
-		if parseVersion(version).ok && versionBefore(pack, version, opts.Before) {
-			versions = append(versions, version)
-		}
-	}
+	versions := pack.candidateVersions(opts, false)
 	sort.Slice(versions, func(i, j int) bool {
-		mi := pack.Versions[versions[i]]
-		mj := pack.Versions[versions[j]]
+		mi, _ := pack.versionManifest(versions[i], opts)
+		mj, _ := pack.versionManifest(versions[j], opts)
+		avoidI := !versionAvoided(versions[i], opts.Avoid)
+		avoidJ := !versionAvoided(versions[j], opts.Avoid)
+		if avoidI != avoidJ {
+			return avoidI
+		}
+		stagedI := !pack.versionStaged(versions[i])
+		stagedJ := !pack.versionStaged(versions[j])
+		if stagedI != stagedJ {
+			return stagedI
+		}
 		engOKi := manifestEngineOK(mi, opts)
 		engOKj := manifestEngineOK(mj, opts)
 		notDepri := mi.Deprecated == nil
@@ -190,6 +356,17 @@ type npmVersion struct {
 	patch      int
 	prerelease []string
 	ok         bool
+}
+
+func (v npmVersion) clean() string {
+	if !v.ok {
+		return ""
+	}
+	out := fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	if len(v.prerelease) > 0 {
+		out += "-" + strings.Join(v.prerelease, ".")
+	}
+	return out
 }
 
 func parseVersion(v string) npmVersion {
