@@ -79,6 +79,48 @@ func TestPickVersionAvoidsDeprecatedLatest(t *testing.T) {
 	}
 }
 
+func TestPrereleaseRangesRequireMatchingTupleComparator(t *testing.T) {
+	tests := []struct {
+		version string
+		spec    string
+		want    bool
+	}{
+		{"3.0.0-beta.1", ">=3.0.0-beta <4", true},
+		{"3.0.1-beta.1", ">=3.0.0-beta <4", false},
+		{"3.0.1-beta.1", ">=3.0.1-beta <4", true},
+		{"3.1.0-beta.1", "^3.0.0-beta", false},
+		{"3.0.1", "^3.0.0-beta", true},
+		{"3.0.0-beta.2", "^3.0.0-beta", true},
+		{"3.0.0-beta.1", ">=2.0.0-beta || >=3.0.0-beta", true},
+		{"3.0.0-beta.1", ">=2.0.0-beta || >=3.1.0-beta", false},
+	}
+	for _, tc := range tests {
+		if got := satisfies(tc.version, tc.spec); got != tc.want {
+			t.Fatalf("satisfies(%q, %q) = %v want %v", tc.version, tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestPickVersionDoesNotSelectUnmatchedPrereleaseTuple(t *testing.T) {
+	pack := &Packument{
+		Name:     "demo",
+		DistTags: map[string]string{"latest": "2.0.0"},
+		Versions: map[string]VersionManifest{
+			"3.0.0-beta.1": {},
+			"3.0.1-beta.1": {},
+			"3.1.0-beta.1": {},
+		},
+	}
+
+	got, err := pickVersion(pack, ">=3.0.0-beta <4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "3.0.0-beta.1" {
+		t.Fatalf("got %s want 3.0.0-beta.1", got)
+	}
+}
+
 func TestParsePackageSpecAlias(t *testing.T) {
 	name, spec, err := parsePackageSpec("alias", "npm:@scope/real@^2.0.0")
 	if err != nil {

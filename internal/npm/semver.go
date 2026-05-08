@@ -197,11 +197,13 @@ func satisfies(version, spec string) bool {
 	if spec == "" || spec == "*" || spec == "latest" {
 		return len(parseVersion(version).prerelease) == 0
 	}
-	if len(parseVersion(version).prerelease) > 0 && !strings.Contains(spec, "-") {
-		return false
-	}
+	v := parseVersion(version)
 	for _, disjunct := range strings.Split(spec, "||") {
-		if satisfiesAll(version, strings.TrimSpace(disjunct)) {
+		disjunct = strings.TrimSpace(disjunct)
+		if len(v.prerelease) > 0 && !allowsPrerelease(version, disjunct) {
+			continue
+		}
+		if satisfiesAll(version, disjunct) {
 			return true
 		}
 	}
@@ -248,6 +250,44 @@ func satisfiesOne(version, spec string) bool {
 	return compareVersion(version, spec) == 0
 }
 
+func allowsPrerelease(version, spec string) bool {
+	v := parseVersion(version)
+	if !v.ok || len(v.prerelease) == 0 {
+		return true
+	}
+	spec = normalizeHyphenRange(spec)
+	for _, part := range strings.Fields(spec) {
+		target := comparatorTarget(part)
+		if target == "" {
+			continue
+		}
+		p := parseVersion(target)
+		if !p.ok || len(p.prerelease) == 0 {
+			continue
+		}
+		if p.major == v.major && p.minor == v.minor && p.patch == v.patch {
+			return true
+		}
+	}
+	return false
+}
+
+func comparatorTarget(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return ""
+	}
+	if strings.HasPrefix(spec, "^") || strings.HasPrefix(spec, "~") {
+		return strings.TrimSpace(spec[1:])
+	}
+	for _, op := range []string{">=", "<=", ">", "<", "="} {
+		if strings.HasPrefix(spec, op) {
+			return strings.TrimSpace(strings.TrimPrefix(spec, op))
+		}
+	}
+	return spec
+}
+
 func compareOp(version, op, target string) bool {
 	target = completeComparatorTarget(target, op)
 	cmp := compareVersion(version, target)
@@ -271,7 +311,7 @@ func satisfiesCaret(version, base string) bool {
 	if !v.ok || !b.ok {
 		return false
 	}
-	if compareVersion(version, fmt.Sprintf("%d.%d.%d", b.major, b.minor, b.patch)) < 0 {
+	if compareVersion(version, versionLowerBound(b)) < 0 {
 		return false
 	}
 	if b.major > 0 {
@@ -289,7 +329,7 @@ func satisfiesTilde(version, base string) bool {
 	if !v.ok || !b.ok {
 		return false
 	}
-	if compareVersion(version, fmt.Sprintf("%d.%d.%d", b.major, b.minor, b.patch)) < 0 {
+	if compareVersion(version, versionLowerBound(b)) < 0 {
 		return false
 	}
 	parts := strings.Split(base, ".")
@@ -297,6 +337,14 @@ func satisfiesTilde(version, base string) bool {
 		return v.major == b.major
 	}
 	return v.major == b.major && v.minor == b.minor
+}
+
+func versionLowerBound(v npmVersion) string {
+	base := fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	if len(v.prerelease) > 0 {
+		return base + "-" + strings.Join(v.prerelease, ".")
+	}
+	return base
 }
 
 func satisfiesWildcard(version, spec string) bool {

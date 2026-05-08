@@ -28,6 +28,9 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Resolver skips `bundleDependencies` / `bundledDependencies` child tarballs because npm expects those contents to be provided by the parent tarball.
 - Resolver treats duplicate `optionalDependencies` entries as overriding `dependencies`.
 - Resolver applies npm-style `os` and `cpu` platform filters, skipping incompatible optional packages and failing incompatible required packages.
+- Resolver applies `engines.node` checks when `--node-version` is provided: strict mode fails incompatible required packages, while incompatible optional packages are skipped.
+- Resolver ignores failed optional dependency resolution and rolls back failed optional subtrees so missing optional packages do not enter the tarball set.
+- Semver prerelease range handling now follows npm's same-version-tuple rule for prerelease candidates.
 - Root `package.json#overrides` supports top-level package overrides, nested ancestry overrides, object `"."` self overrides, `$` references to root dependency specs, and direct-dependency conflict checks for registry dependencies.
 - Packument metadata can be cached on disk with `--metadata-cache`.
 - Cached packuments support freshness control with `--metadata-cache-ttl`.
@@ -141,13 +144,81 @@ The npm CLI 11.14.0 source in `cli-11.14.0` is the local behavioral reference. T
 - Add fixtures for overrides.
 - Add fixtures for aliases.
 - Add fixtures for scoped packages.
-- Add fixtures for dist-tags and prereleases.
+- Expand fixtures for dist-tags and prereleases.
 - Add fixtures for conflicting ranges.
 - Add fixtures for lockfile v1, v2, and v3.
 - Add fixtures for workspaces.
 - Expand fixtures for platform-filtered packages, including CPU combinations and real npm parity cases.
 - Add large-package-tree performance benchmark.
 - Add benchmark comparing this downloader against npm cache/package acquisition where practical.
+
+## Missing Tests From Local npm CLI 11.14.0 Audit
+
+These should be implemented as Go unit tests or npm-backed parity fixtures where they affect package resolution, tarball acquisition, target publish behavior, or CI auth. The local reference files are under `cli-11.14.0`.
+
+- Arborist ideal tree parity from `workspaces/arborist/test/arborist/build-ideal-tree.js`:
+  - Engine checks: expand coverage for warnings when engine strict is false and respect omit flags for dev/optional/peer dependency engine checks.
+  - Platform checks: fail required incompatible packages and ignore optional incompatible packages, with both root and transitive cases.
+  - Peer dependency placement: overlap cases, nested peers, unresolvable peers, cyclic peers, peer set conflicts/warnings, and legacy shrinkwrap peer cases.
+  - Peer optional re-resolution: issue #8726 cases where optional peer constraints force a previously chosen dependency version to be re-resolved, including fresh install and lockfile cases.
+  - Peer optional existing-node preference: issue #9249 behavior where existing tree nodes are preferred over registry fetches when satisfying peer optional edges.
+  - Dedupe and placement modes: default placement, `preferDedupe`, `legacyBundling`, duplicated transitive deps, and explicit request placement behavior where they change selected package versions.
+  - Bundle dependency cases: empty bundle metadata, complete bundle metadata, bundled metadata dependency duplication, root bundler, two bundled deps, and legacy bundling bundle fixtures.
+  - Shrinkwrapped dependency behavior: do not add/update shrinkwrapped deps by default, behavior with `complete:true`, bad shrinkwrap handling, and legacy shrinkwrap resolution.
+  - Yarn lock influence: use `yarn.lock` versions/resolutions where npm would when package lock data is absent or incomplete.
+  - Workspace resolution: simple/non-simplistic workspaces, workspace root links, workspace overrides, conflicting workspace dev deps, and workspace-specific peer set behavior.
+
+- Arborist placement and peer internals from `workspaces/arborist/test/place-dep.js`, `can-place-dep.js`, and `peer-entry-sets.js`:
+  - Can-place decision matrix for keeping, replacing, nesting, and conflicting dependency candidates.
+  - Peer entry set grouping for overlapping peer sets and conflict detection.
+  - Placement tests where the same package name appears at multiple depths with incompatible ranges.
+
+- Overrides from `workspaces/arborist/test/override-set.js` and `workspaces/arborist/test/arborist/build-ideal-tree.js`:
+  - Empty-string override coerces to `*`.
+  - Version-qualified parent override selectors.
+  - More-specific child override priority.
+  - Parent spec mismatch should not apply an override.
+  - Direct dependency, devDependency, and peerDependency override conflict errors.
+  - Override references with `$dependency`, including top-level identifier omitted.
+  - Override semantic conflict detection when ranges intersect or do not intersect.
+  - Alias, directory, file, and git override specs should be explicitly supported or explicitly rejected with tests.
+  - Overrides inside cyclic dependency chains and overrides that fix peer ERESOLVE cases.
+
+- Lockfile and shrinkwrap parity from `workspaces/arborist/test/shrinkwrap.js` and `spec-from-lock.js`:
+  - Prioritize `npm-shrinkwrap.json` over `package-lock.json`.
+  - Import v1, v2, v3, and ancient lockfile shapes.
+  - Handle package entries missing `dependencies`, `resolved`, or `integrity`.
+  - Preserve/derive integrity when lock metadata only has one of `resolved` or `integrity`.
+  - Ignore malformed lockfiles or fail deterministically according to npm-compatible input mode.
+  - Resolve from lock metadata for aliased packages and scoped packages.
+  - Decide and test whether hidden lockfiles under `node_modules/.package-lock.json` are intentionally unsupported.
+
+- Package spec and dependency validation from `workspaces/arborist/test/dep-valid.js`, `node_modules/npm-package-arg/lib/npa.js`, and `node_modules/npm-pick-manifest/lib/index.js`:
+  - Registry specs for scoped packages, aliases, exact versions, dist-tags, wildcard ranges, hyphen ranges, prerelease ranges, and conflicting ranges.
+  - Invalid tag names and invalid requests.
+  - Unsupported spec classes: file, link, git, hosted git, remote tarball URL, and directory specs should have tests documenting skip/error behavior for this air-gap registry use case.
+  - Deprecated version selection and latest-dist-tag preference behavior.
+  - Dist-tag and prerelease publish/install interactions where npm avoids unsafe `latest` selection.
+
+- Optional dependency and omit/include behavior from `workspaces/arborist/test/optional-set.js`, `build-ideal-tree.js`, and install command tests:
+  - Expand optional failure coverage for tarball download failures and shared optional subtrees.
+  - Optional metadependency failures are ignored only when the optional ancestor is the reason for inclusion; add shared-subtree cases from `optional-set.js`.
+  - `--omit=dev`, `--omit=optional`, `--omit=peer` and matching `--include` behavior should match npm's dependency graph and engine/platform checks.
+
+- Registry/auth/config behavior from `workspaces/config/test/nerf-dart.js`, `env-replace.js`, `parse-field.js`, and npm publish command auth tests:
+  - Full nerf-dart matching for registry auth keys, including path-specific registry auth and scoped registries.
+  - Environment replacement edge cases in `.npmrc`.
+  - Token, `_auth`, username/password, bare `_auth`, scoped `_auth`, and auth precedence tests for source and target registries.
+  - Auth missing behavior for default, configured, and scoped registries.
+
+- Publish/push parity from `workspaces/libnpmpublish/test/publish.js` and `test/lib/commands/publish.js`:
+  - Scoped publish endpoint/body shape.
+  - Restricted access for scoped packages and refusal of `restricted` access for unscoped packages.
+  - Refuse private packages and bad semver manifests.
+  - Conflict/existing version handling.
+  - `publishConfig.registry` behavior should be explicitly supported or intentionally ignored in favor of `--target-registry`.
+  - Prerelease dist-tag safety behavior should be considered for push, even though this tool mainly mirrors existing tarballs.
+  - GitLab OIDC/provenance tests are not required for initial target push, but should remain a documented non-goal unless added later.
 
 ## CLI Work
 

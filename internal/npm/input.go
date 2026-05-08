@@ -14,6 +14,8 @@ type ResolveOptions struct {
 	IncludeOptional    bool
 	LegacyPeerDeps     bool
 	StrictPeerDeps     bool
+	EngineStrict       bool
+	NodeVersion        string
 	ResolveConcurrency int
 }
 

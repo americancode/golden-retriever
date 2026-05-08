@@ -135,6 +135,46 @@ func (g *Graph) AddPeerConflict(from, found *Node, name, spec string) {
 	})
 }
 
+func clonePackages(in map[string]Package) map[string]Package {
+	out := map[string]Package{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneNodes(in map[string]*Node) map[string]*Node {
+	out := map[string]*Node{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneResolved(in map[string]*Node) map[string]*Node {
+	out := map[string]*Node{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneEdges(in map[string]*Edge) map[string]*Edge {
+	if in == nil {
+		return nil
+	}
+	out := map[string]*Edge{}
+	for key, value := range in {
+		if value == nil {
+			out[key] = nil
+			continue
+		}
+		edge := *value
+		out[key] = &edge
+	}
+	return out
+}
+
 type Node struct {
 	ID           string
 	Name         string

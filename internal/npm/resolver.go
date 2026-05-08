@@ -68,6 +68,9 @@ func (r *Resolver) resolveDeps(ctx context.Context, parent *Node, deps map[strin
 	for name, spec := range deps {
 		requests = append(requests, DependencyRequest{Name: name, Spec: spec, Type: edgeType})
 	}
+	if edgeType == EdgeOptional {
+		return r.resolveOptionalRequests(ctx, parent, requests)
+	}
 	return r.resolveRequests(ctx, parent, requests)
 }
 
@@ -75,6 +78,16 @@ func (r *Resolver) resolveRequests(ctx context.Context, parent *Node, deps []Dep
 	for _, dep := range deps {
 		if _, err := r.resolveDep(ctx, parent, dep.Name, dep.Spec, dep.Type); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (r *Resolver) resolveOptionalRequests(ctx context.Context, parent *Node, deps []DependencyRequest) error {
+	for _, dep := range deps {
+		snapshot := r.snapshot()
+		if _, err := r.resolveDep(ctx, parent, dep.Name, dep.Spec, dep.Type); err != nil {
+			r.restore(snapshot)
 		}
 	}
 	return nil
@@ -130,6 +143,56 @@ func (r *Resolver) resolveDep(ctx context.Context, parent *Node, name, spec stri
 	return node, err
 }
 
+type resolverSnapshot struct {
+	graph         graphSnapshot
+	resolved      map[string]*Node
+	parentByID    map[string]*Node
+	depsByID      map[string]map[string]*Edge
+	peersByID     map[string]map[string]*Edge
+	peerConflicts []PeerConflict
+}
+
+type graphSnapshot struct {
+	packages map[string]Package
+	nodes    map[string]*Node
+}
+
+func (r *Resolver) snapshot() resolverSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := resolverSnapshot{
+		graph: graphSnapshot{
+			packages: clonePackages(r.graph.packages),
+			nodes:    cloneNodes(r.graph.nodes),
+		},
+		resolved:      cloneResolved(r.resolved),
+		parentByID:    map[string]*Node{},
+		depsByID:      map[string]map[string]*Edge{},
+		peersByID:     map[string]map[string]*Edge{},
+		peerConflicts: append([]PeerConflict(nil), r.graph.PeerConflicts...),
+	}
+	for id, node := range r.graph.nodes {
+		s.parentByID[id] = node.Parent
+		s.depsByID[id] = cloneEdges(node.Dependencies)
+		s.peersByID[id] = cloneEdges(node.Peers)
+	}
+	return s
+}
+
+func (r *Resolver) restore(s resolverSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.graph.packages = s.graph.packages
+	r.graph.nodes = s.graph.nodes
+	r.graph.PeerConflicts = s.peerConflicts
+	r.resolved = s.resolved
+	for id, node := range r.graph.nodes {
+		node.Parent = s.parentByID[id]
+		node.Dependencies = s.depsByID[id]
+		node.Peers = s.peersByID[id]
+	}
+}
+
 func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, rawSpec, depSpec string, edgeType EdgeType, actualName, version string, pack *Packument) (*Node, error) {
 	manifest, ok := pack.Versions[version]
 	if !ok {
@@ -148,6 +211,14 @@ func (r *Resolver) resolveManifest(ctx context.Context, parent *Node, depName, r
 			return nil, nil
 		}
 		return nil, platformErr
+	}
+	if compatible, engineErr := engineCompatible(manifest, r.Options); !compatible {
+		if edgeType == EdgeOptional {
+			return nil, nil
+		}
+		if r.Options.EngineStrict {
+			return nil, engineErr
+		}
 	}
 
 	pkg := Package{

@@ -262,6 +262,107 @@ func TestResolverErrorsOnIncompatibleProdDependency(t *testing.T) {
 	}
 }
 
+func TestResolverErrorsOnEngineMismatchWhenStrict(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{
+		EngineStrict: true,
+		NodeVersion:  "12.18.4",
+	}}
+	_, err := resolver.Resolve(context.Background(), map[string]string{"engine-package": "1.0.0"})
+	var engineErr *PackageEngineError
+	if !errors.As(err, &engineErr) {
+		t.Fatalf("got %v, want PackageEngineError", err)
+	}
+	if engineErr.Wanted != ">=20" || engineErr.Current != "12.18.4" {
+		t.Fatalf("unexpected engine error: %#v", engineErr)
+	}
+}
+
+func TestResolverAllowsEngineMismatchWhenNotStrict(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{
+		EngineStrict: false,
+		NodeVersion:  "12.18.4",
+	}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"engine-package": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("engine-package@1.0.0") {
+		t.Fatalf("non-strict engine mismatch should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsOptionalEngineMismatch(t *testing.T) {
+	srv := engineRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{
+		IncludeOptional: true,
+		EngineStrict:    true,
+		NodeVersion:     "12.18.4",
+	}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"engine-parent": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("engine-package@1.0.0") {
+		t.Fatalf("optional engine mismatch should be skipped: %#v", graph.Packages())
+	}
+	if !graph.Has("engine-parent@1.0.0") {
+		t.Fatalf("parent should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverSkipsMissingOptionalDependency(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"optional-root": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("missing-optional@1.0.0") {
+		t.Fatalf("missing optional dependency should be skipped: %#v", graph.Packages())
+	}
+	if !graph.Has("optional-root@1.0.0") {
+		t.Fatalf("root package should still resolve: %#v", graph.Packages())
+	}
+}
+
+func TestResolverErrorsOnMissingProdDependency(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	_, err := resolver.Resolve(context.Background(), map[string]string{"prod-root": "1.0.0"})
+	if err == nil {
+		t.Fatalf("missing prod dependency should fail")
+	}
+}
+
+func TestResolverRollsBackOptionalMetadependencyFailure(t *testing.T) {
+	srv := optionalFailureRegistry(t)
+	defer srv.Close()
+
+	resolver := &Resolver{Client: NewClient(srv.URL), Options: ResolveOptions{IncludeOptional: true}}
+	graph, err := resolver.Resolve(context.Background(), map[string]string{"optional-meta-root": "1.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Has("optional-wrapper@1.0.0") || graph.Has("missing-meta@1.0.0") {
+		t.Fatalf("failed optional subtree should be rolled back: %#v", graph.Packages())
+	}
+	if !graph.Has("optional-meta-root@1.0.0") {
+		t.Fatalf("root package should still resolve: %#v", graph.Packages())
+	}
+}
+
 func peerRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +408,104 @@ func peerRegistry(t *testing.T) *httptest.Server {
       "peerDependencies": {"host": "^1.0.0"},
       "peerDependenciesMeta": {"host": {"optional": true}},
       "dist": {"tarball": "%s/optional-plugin/-/optional-plugin-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func optionalFailureRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/optional-root":
+			fmt.Fprintf(w, `{
+  "name": "optional-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-root",
+      "version": "1.0.0",
+      "optionalDependencies": {"missing-optional": "1.0.0"},
+      "dist": {"tarball": "%s/optional-root/-/optional-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/prod-root":
+			fmt.Fprintf(w, `{
+  "name": "prod-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "prod-root",
+      "version": "1.0.0",
+      "dependencies": {"missing-prod": "1.0.0"},
+      "dist": {"tarball": "%s/prod-root/-/prod-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-meta-root":
+			fmt.Fprintf(w, `{
+  "name": "optional-meta-root",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-meta-root",
+      "version": "1.0.0",
+      "optionalDependencies": {"optional-wrapper": "1.0.0"},
+      "dist": {"tarball": "%s/optional-meta-root/-/optional-meta-root-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/optional-wrapper":
+			fmt.Fprintf(w, `{
+  "name": "optional-wrapper",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "optional-wrapper",
+      "version": "1.0.0",
+      "dependencies": {"missing-meta": "1.0.0"},
+      "dist": {"tarball": "%s/optional-wrapper/-/optional-wrapper-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func engineRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/engine-parent":
+			fmt.Fprintf(w, `{
+  "name": "engine-parent",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "engine-parent",
+      "version": "1.0.0",
+      "optionalDependencies": {"engine-package": "1.0.0"},
+      "dist": {"tarball": "%s/engine-parent/-/engine-parent-1.0.0.tgz"}
+    }
+  }
+}`, serverURL(r))
+		case "/engine-package":
+			fmt.Fprintf(w, `{
+  "name": "engine-package",
+  "dist-tags": {"latest": "1.0.0"},
+  "versions": {
+    "1.0.0": {
+      "name": "engine-package",
+      "version": "1.0.0",
+      "engines": {"node": ">=20"},
+      "dist": {"tarball": "%s/engine-package/-/engine-package-1.0.0.tgz"}
     }
   }
 }`, serverURL(r))
