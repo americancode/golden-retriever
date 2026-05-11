@@ -1,0 +1,11 @@
+ARG GO_VERSION=1.24
+ARG ALPINE_VERSION=3.22
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}
+
+RUN apk add --no-cache nodejs npm ca-certificates git \
+  && npm install -g npm@latest \
+  && npm --version \
+  && node --version \
+  && go version
+
+WORKDIR /workspace

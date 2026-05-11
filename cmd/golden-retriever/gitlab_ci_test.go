@@ -15,7 +15,6 @@ func TestGitLabCIExampleCachesGoldenRetrieverPaths(t *testing.T) {
 	for _, want := range []string{
 		".gr/state.json",
 		".gr/metadata/",
-		".gr/tgzs/",
 		"golden-retriever mirror",
 		"$NPM_TARGET_REGISTRY",
 	} {

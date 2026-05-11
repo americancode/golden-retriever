@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golden-retriever/internal/npm"
@@ -111,6 +113,8 @@ func cacheClear(args []string) error {
 func mirror(args []string) error {
 	fs := flag.NewFlagSet("mirror", flag.ExitOnError)
 	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
+	inputs := fs.String("inputs", "", "comma-separated package.json/package-lock.json/npm-shrinkwrap.json paths")
+	projectConcurrency := fs.Int("project-concurrency", max(1, runtime.NumCPU()/2), "parallel project workflow count when using --inputs")
 	out := fs.String("out", ".gr/tgzs", "target directory for downloaded package tarballs")
 	statePath := fs.String("state", ".gr/state.json", "state inventory file")
 	registry := fs.String("registry", "", "source npm registry base URL override")
@@ -156,6 +160,10 @@ func mirror(args []string) error {
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
+	resolvedInputs, err := resolveInputs(*input, *inputs)
+	if err != nil {
+		return err
+	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
 	if err != nil {
 		return err
@@ -168,6 +176,52 @@ func mirror(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	tracef := newTraceLogger(*trace)
+	if len(resolvedInputs) > 1 {
+		tracef("mirror:batch:start projects=%d target=%s timeout=%s", len(resolvedInputs), *targetRegistry, *timeout)
+		return mirrorMany(ctx, mirrorManyOptions{
+			Inputs:             resolvedInputs,
+			ProjectConcurrency: *projectConcurrency,
+			OutBase:            *out,
+			StateBase:          *statePath,
+			Registry:           *registry,
+			TargetRegistry:     *targetRegistry,
+			NPMRC:              *npmrc,
+			TargetNPMRC:        *targetNPMRC,
+			MetadataCacheBase:  *metadataCache,
+			MetadataCacheTTL:   *metadataCacheTTL,
+			MetadataRetries:    *metadataRetries,
+			Offline:            *offline,
+			FetchConcurrency:   *fetchConcurrency,
+			PushConcurrency:    *pushConcurrency,
+			TargetConcurrency:  *targetConcurrency,
+			MaxRetries:         *maxRetries,
+			PublishRetries:     *publishRetries,
+			Tag:                *tag,
+			Access:             *access,
+			SyncTarget:         *syncTarget,
+			OutputNaming:       *outputNaming,
+			ResolveOptions: npm.ResolveOptions{
+				IncludeDev:         dependencySet.includeDev,
+				IncludeOptional:    dependencySet.includeOptional,
+				LegacyPeerDeps:     *legacyPeerDeps,
+				StrictPeerDeps:     *strictPeerDeps,
+				OmitPeer:           dependencySet.omitPeer,
+				PreferDedupe:       *preferDedupe,
+				InstallStrategy:    *installStrategy,
+				EngineStrict:       *engineStrict,
+				NodeVersion:        *nodeVersion,
+				Libc:               *libc,
+				Before:             before,
+				DefaultTag:         *defaultTag,
+				IncludeStaged:      *includeStaged,
+				Avoid:              *avoid,
+				AvoidStrict:        *avoidStrict,
+				ResolveConcurrency: *resolveConcurrency,
+			},
+			JSONOut: *jsonOut,
+			Tracef:  tracef,
+		})
+	}
 	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
 
 	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
@@ -356,6 +410,8 @@ func push(args []string) error {
 func fetch(args []string) error {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
+	inputs := fs.String("inputs", "", "comma-separated package.json/package-lock.json/npm-shrinkwrap.json paths")
+	projectConcurrency := fs.Int("project-concurrency", max(1, runtime.NumCPU()/2), "parallel project workflow count when using --inputs")
 	out := fs.String("out", "tgzs", "target directory for downloaded package tarballs")
 	state := fs.String("state", ".gr/state.json", "persistent state file")
 	registry := fs.String("registry", "", "npm registry base URL override")
@@ -390,6 +446,10 @@ func fetch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	resolvedInputs, err := resolveInputs(*input, *inputs)
+	if err != nil {
+		return err
+	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
 	if err != nil {
 		return err
@@ -402,6 +462,44 @@ func fetch(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	tracef := newTraceLogger(*trace)
+	if len(resolvedInputs) > 1 {
+		tracef("fetch:batch:start projects=%d timeout=%s", len(resolvedInputs), *timeout)
+		return fetchMany(ctx, fetchManyOptions{
+			Inputs:             resolvedInputs,
+			ProjectConcurrency: *projectConcurrency,
+			OutBase:            *out,
+			StateBase:          *state,
+			Registry:           *registry,
+			NPMRC:              *npmrc,
+			MetadataCacheBase:  *metadataCache,
+			MetadataCacheTTL:   *metadataCacheTTL,
+			MetadataRetries:    *metadataRetries,
+			Offline:            *offline,
+			FetchConcurrency:   *concurrency,
+			MaxRetries:         *maxRetries,
+			OutputNaming:       *outputNaming,
+			ResolveOptions: npm.ResolveOptions{
+				IncludeDev:         dependencySet.includeDev,
+				IncludeOptional:    dependencySet.includeOptional,
+				LegacyPeerDeps:     *legacyPeerDeps,
+				StrictPeerDeps:     *strictPeerDeps,
+				OmitPeer:           dependencySet.omitPeer,
+				PreferDedupe:       *preferDedupe,
+				InstallStrategy:    *installStrategy,
+				EngineStrict:       *engineStrict,
+				NodeVersion:        *nodeVersion,
+				Libc:               *libc,
+				Before:             before,
+				DefaultTag:         *defaultTag,
+				IncludeStaged:      *includeStaged,
+				Avoid:              *avoid,
+				AvoidStrict:        *avoidStrict,
+				ResolveConcurrency: *resolveConcurrency,
+			},
+			JSONOut: *jsonOut,
+			Tracef:  tracef,
+		})
+	}
 	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
 
 	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
@@ -842,6 +940,240 @@ func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL ti
 	return client, nil
 }
 
+type fetchManyOptions struct {
+	Inputs             []string
+	ProjectConcurrency int
+	OutBase            string
+	StateBase          string
+	Registry           string
+	NPMRC              string
+	MetadataCacheBase  string
+	MetadataCacheTTL   time.Duration
+	MetadataRetries    int
+	Offline            bool
+	FetchConcurrency   int
+	MaxRetries         int
+	OutputNaming       string
+	ResolveOptions     npm.ResolveOptions
+	JSONOut            bool
+	Tracef             func(format string, args ...any)
+}
+
+func fetchMany(ctx context.Context, opts fetchManyOptions) error {
+	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
+		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
+		client, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+		if err != nil {
+			return nil, err
+		}
+		return npm.LoadInput(ctx, client, input, opts.ResolveOptions)
+	})
+	if err != nil {
+		return err
+	}
+	primaryInput := opts.Inputs[0]
+	client, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+	if err != nil {
+		return err
+	}
+	report, err := npm.FetchAll(ctx, client, packages, npm.FetchOptions{
+		OutDir:             opts.OutBase,
+		StatePath:          opts.StateBase,
+		Concurrency:        opts.FetchConcurrency,
+		MaxRetries:         opts.MaxRetries,
+		OutputNameStrategy: opts.OutputNaming,
+		Progress:           opts.Tracef,
+	})
+	if err != nil {
+		return err
+	}
+	if opts.JSONOut {
+		return printJSON(struct {
+			Command            string          `json:"command"`
+			Inputs             []string        `json:"inputs"`
+			UniquePackages     int             `json:"uniquePackages"`
+			PerProject         map[string]int  `json:"perProjectPackages"`
+			Fetch              npm.FetchReport `json:"fetch"`
+			Out                string          `json:"out"`
+			State              string          `json:"state"`
+			ProjectConcurrency int             `json:"projectConcurrency"`
+		}{
+			Command: "fetch", Inputs: opts.Inputs, UniquePackages: len(packages), PerProject: perProjectCounts,
+			Fetch: report, Out: opts.OutBase, State: opts.StateBase, ProjectConcurrency: opts.ProjectConcurrency,
+		})
+	}
+	fmt.Printf("fetch inputs=%d unique_packages=%d downloaded=%d local_skipped=%d target_skipped=%d failed=%d elapsed=%s out=%s state=%s\n",
+		len(opts.Inputs), len(packages), report.Downloaded, report.Skipped, report.TargetSkipped, report.Failed, report.Elapsed, opts.OutBase, opts.StateBase)
+	return nil
+}
+
+type mirrorManyOptions struct {
+	Inputs             []string
+	ProjectConcurrency int
+	OutBase            string
+	StateBase          string
+	Registry           string
+	TargetRegistry     string
+	NPMRC              string
+	TargetNPMRC        string
+	MetadataCacheBase  string
+	MetadataCacheTTL   time.Duration
+	MetadataRetries    int
+	Offline            bool
+	FetchConcurrency   int
+	PushConcurrency    int
+	TargetConcurrency  int
+	MaxRetries         int
+	PublishRetries     int
+	Tag                string
+	Access             string
+	SyncTarget         bool
+	OutputNaming       string
+	ResolveOptions     npm.ResolveOptions
+	JSONOut            bool
+	Tracef             func(format string, args ...any)
+}
+
+func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
+	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
+		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
+		sourceClient, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+		if err != nil {
+			return nil, err
+		}
+		return npm.LoadInput(ctx, sourceClient, input, opts.ResolveOptions)
+	})
+	if err != nil {
+		return err
+	}
+	primaryInput := opts.Inputs[0]
+	sourceClient, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+	if err != nil {
+		return err
+	}
+	targetClient, err := newClient(primaryInput, opts.TargetRegistry, firstNonEmpty(opts.TargetNPMRC, opts.NPMRC), "", 0, opts.MetadataRetries, false)
+	if err != nil {
+		return err
+	}
+	targetClient.UseStaleOnFailure = false
+
+	if opts.SyncTarget {
+		state, err := npm.LoadState(opts.StateBase)
+		if err != nil {
+			return err
+		}
+		_, err = npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
+			Concurrency: opts.TargetConcurrency,
+			Source:      opts.TargetRegistry,
+		})
+		if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
+			err = saveErr
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	fetchReport, err := npm.FetchAll(ctx, sourceClient, packages, npm.FetchOptions{
+		OutDir:             opts.OutBase,
+		StatePath:          opts.StateBase,
+		Concurrency:        opts.FetchConcurrency,
+		MaxRetries:         opts.MaxRetries,
+		OutputNameStrategy: opts.OutputNaming,
+		Progress:           opts.Tracef,
+	})
+	if err != nil {
+		return err
+	}
+	state, err := npm.LoadState(opts.StateBase)
+	if err != nil {
+		return err
+	}
+	pushReport, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
+		Concurrency: opts.PushConcurrency,
+		Source:      opts.TargetRegistry,
+		Tag:         opts.Tag,
+		Access:      opts.Access,
+		MaxRetries:  opts.PublishRetries,
+		Progress:    opts.Tracef,
+	})
+	if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
+		err = saveErr
+	}
+	if err != nil {
+		return err
+	}
+	if opts.JSONOut {
+		return printJSON(struct {
+			Command            string            `json:"command"`
+			Inputs             []string          `json:"inputs"`
+			UniquePackages     int               `json:"uniquePackages"`
+			PerProject         map[string]int    `json:"perProjectPackages"`
+			Fetch              npm.FetchReport   `json:"fetch"`
+			Push               npm.PublishReport `json:"push"`
+			Out                string            `json:"out"`
+			State              string            `json:"state"`
+			ProjectConcurrency int               `json:"projectConcurrency"`
+		}{
+			Command: "mirror", Inputs: opts.Inputs, UniquePackages: len(packages), PerProject: perProjectCounts,
+			Fetch: fetchReport, Push: pushReport, Out: opts.OutBase, State: opts.StateBase, ProjectConcurrency: opts.ProjectConcurrency,
+		})
+	}
+	fmt.Printf("mirror inputs=%d unique_packages=%d downloaded=%d target_skipped=%d local_skipped=%d fetch_failed=%d pushed=%d already_present=%d push_skipped=%d push_failed=%d out=%s state=%s target=%s\n",
+		len(opts.Inputs), len(packages), fetchReport.Downloaded, fetchReport.TargetSkipped, fetchReport.Skipped, fetchReport.Failed,
+		pushReport.Pushed, pushReport.Present, pushReport.Skipped, pushReport.Failed, opts.OutBase, opts.StateBase, opts.TargetRegistry)
+	return nil
+}
+
+func resolveProjectsParallel(ctx context.Context, inputs []string, workers int, resolveFn func(input string) (*npm.Graph, error)) ([]npm.Package, map[string]int, error) {
+	type result struct {
+		input string
+		graph *npm.Graph
+		err   error
+	}
+	jobs := make(chan string)
+	results := make(chan result, len(inputs))
+	var wg sync.WaitGroup
+
+	for i := 0; i < max(1, workers); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for input := range jobs {
+				graph, err := resolveFn(input)
+				results <- result{input: input, graph: graph, err: err}
+			}
+		}()
+	}
+	for _, input := range inputs {
+		jobs <- input
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	unique := map[string]npm.Package{}
+	perProject := map[string]int{}
+	for res := range results {
+		if res.err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", res.input, res.err)
+		}
+		pkgs := res.graph.Packages()
+		perProject[res.input] = len(pkgs)
+		for _, pkg := range pkgs {
+			unique[pkg.Key()] = pkg
+		}
+	}
+	merged := make([]npm.Package, 0, len(unique))
+	for _, pkg := range unique {
+		merged = append(merged, pkg)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Key() < merged[j].Key()
+	})
+	return merged, perProject, nil
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `golden-retriever collects npm tarballs for air-gapped installs.
 
@@ -870,6 +1202,67 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func resolveInputs(input, inputs string) ([]string, error) {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(v string) error {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil
+		}
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[abs]; ok {
+			return nil
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+		return nil
+	}
+	if err := add(input); err != nil {
+		return nil, err
+	}
+	for _, part := range strings.Split(inputs, ",") {
+		if err := add(part); err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func projectSlug(input string) string {
+	base := filepath.Base(input)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	dir := filepath.Base(filepath.Dir(input))
+	slug := dir + "-" + base
+	slug = strings.ToLower(slug)
+	var b strings.Builder
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func multiProjectPaths(input, outBase, stateBase, metadataBase string) (string, string, string) {
+	slug := projectSlug(input)
+	out := filepath.Join(outBase, slug)
+	metadata := filepath.Join(metadataBase, slug)
+	state := stateBase
+	if strings.HasSuffix(stateBase, ".json") {
+		state = filepath.Join(filepath.Dir(stateBase), strings.TrimSuffix(filepath.Base(stateBase), ".json"), slug+".json")
+	} else {
+		state = filepath.Join(stateBase, slug+".json")
+	}
+	return out, state, metadata
 }
 
 func envBool(key string) bool {
