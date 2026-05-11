@@ -38,6 +38,8 @@ func run(args []string) error {
 		return push(args[1:])
 	case "resolve":
 		return resolve(args[1:])
+	case "scan":
+		return scan(args[1:])
 	case "state":
 		return stateCmd(args[1:])
 	case "cache":
@@ -149,8 +151,22 @@ func mirror(args []string) error {
 	outputNaming := fs.String("output-naming", "flat", "tarball output naming strategy: flat or registry")
 	maxRetries := fs.Int("max-retries", 3, "tarball download retry count for transient failures")
 	publishRetries := fs.Int("publish-retries", 3, "target registry publish retry count for transient failures")
+	scanEnforce := fs.Bool("scan-enforce", false, "require local tarballs to pass scan gate before publishing")
+	scanAuto := fs.Bool("scan-auto", true, "run scan stage after fetch and before publish")
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
+	scanDenyPackagePrefixes := fs.String("scan-deny-package-prefixes", "", "comma-separated package name prefixes to block")
+	scanDenyScripts := fs.String("scan-deny-scripts", "preinstall,install,postinstall", "comma-separated lifecycle scripts to block")
+	scanOSV := fs.Bool("scan-osv", true, "query OSV for known vulnerable package versions")
+	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
+	scanOSVBatchSize := fs.Int("scan-osv-batch-size", 200, "OSV query batch size")
+	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
+	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
+	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
+	scanOSVConcurrency := fs.Int("scan-osv-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV vulnerability detail lookup count")
+	scanDenyPackages := fs.String("scan-deny-packages", "", "comma-separated exact package names to block")
+	scanDenyPackageVersions := fs.String("scan-deny-package-versions", "", "comma-separated exact package@version entries to block")
+	scanReportPath := fs.String("scan-report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	timeout := fs.Duration("timeout", 30*time.Minute, "workflow timeout")
@@ -218,8 +234,22 @@ func mirror(args []string) error {
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
 			},
-			JSONOut: *jsonOut,
-			Tracef:  tracef,
+			JSONOut:                 *jsonOut,
+			Tracef:                  tracef,
+			ScanAuto:                *scanAuto,
+			ScanEnforce:             *scanEnforce,
+			ScanDenyPrefixes:        csvList(*scanDenyPackagePrefixes),
+			ScanDenyScripts:         csvList(*scanDenyScripts),
+			ScanOSV:                 *scanOSV,
+			ScanOSVEndpoint:         *scanOSVEndpoint,
+			ScanOSVBatchSize:        *scanOSVBatchSize,
+			ScanDenyPackages:        csvList(*scanDenyPackages),
+			ScanDenyPackageVersions: csvList(*scanDenyPackageVersions),
+			ScanReportPath:          *scanReportPath,
+			ScanMinSeverity:         *scanMinSeverity,
+			ScanUnknownSeverity:     *scanUnknownSeverity,
+			ScanExceptionsPath:      *scanExceptions,
+			ScanOSVConcurrency:      *scanOSVConcurrency,
 		})
 	}
 	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
@@ -299,6 +329,31 @@ func mirror(args []string) error {
 		return err
 	}
 	tracef("mirror:fetch:done downloaded=%d target_skipped=%d local_skipped=%d failed=%d", fetchReport.Downloaded, fetchReport.TargetSkipped, fetchReport.Skipped, fetchReport.Failed)
+	if *scanAuto {
+		scanReport, scanErr := npm.ScanState(ctx, npm.ScanOptions{
+			StatePath:         *statePath,
+			Concurrency:       *fetchConcurrency,
+			DenyPackages:      csvList(*scanDenyPackages),
+			DenyPackageKeys:   csvList(*scanDenyPackageVersions),
+			DenyPackagePrefix: csvList(*scanDenyPackagePrefixes),
+			DenyScriptKeys:    csvList(*scanDenyScripts),
+			UseOSV:            *scanOSV,
+			OSVEndpoint:       *scanOSVEndpoint,
+			OSVBatchSize:      *scanOSVBatchSize,
+			MinSeverity:       *scanMinSeverity,
+			UnknownSeverity:   *scanUnknownSeverity,
+			ExceptionsPath:    *scanExceptions,
+			OSVConcurrency:    *scanOSVConcurrency,
+		})
+		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
+			scanErr = writeErr
+		}
+		fmt.Printf("scan total=%d passed=%d failed=%d errors=%d report=%s\n", scanReport.Total, scanReport.Passed, scanReport.Failed, scanReport.Errors, *scanReportPath)
+		tracef("mirror:scan:done total=%d passed=%d failed=%d errors=%d elapsed=%s", scanReport.Total, scanReport.Passed, scanReport.Failed, scanReport.Errors, scanReport.Elapsed)
+		if scanErr != nil && *scanEnforce {
+			return scanErr
+		}
+	}
 
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
@@ -306,12 +361,13 @@ func mirror(args []string) error {
 	}
 	tracef("mirror:publish:start")
 	pushReport, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
-		Concurrency: *pushConcurrency,
-		Source:      *targetRegistry,
-		Tag:         *tag,
-		Access:      *access,
-		MaxRetries:  *publishRetries,
-		Progress:    tracef,
+		Concurrency:     *pushConcurrency,
+		Source:          *targetRegistry,
+		Tag:             *tag,
+		Access:          *access,
+		MaxRetries:      *publishRetries,
+		Progress:        tracef,
+		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -356,6 +412,7 @@ func push(args []string) error {
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
 	maxRetries := fs.Int("max-retries", 3, "target registry publish retry count for transient failures")
+	scanEnforce := fs.Bool("scan-enforce", false, "require local tarballs to pass scan gate before publishing")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	timeout := fs.Duration("timeout", 10*time.Minute, "network timeout")
@@ -381,12 +438,13 @@ func push(args []string) error {
 	}
 	targetClient.UseStaleOnFailure = false
 	report, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
-		Concurrency: *concurrency,
-		Source:      *targetRegistry,
-		Tag:         *tag,
-		Access:      *access,
-		MaxRetries:  *maxRetries,
-		Progress:    tracef,
+		Concurrency:     *concurrency,
+		Source:          *targetRegistry,
+		Tag:             *tag,
+		Access:          *access,
+		MaxRetries:      *maxRetries,
+		Progress:        tracef,
+		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -630,6 +688,60 @@ func resolve(args []string) error {
 		fmt.Printf("%s@%s %s\n", pkg.Name, pkg.Version, pkg.Tarball)
 	}
 	return nil
+}
+
+func scan(args []string) error {
+	fs := flag.NewFlagSet("scan", flag.ExitOnError)
+	statePath := fs.String("state", ".gr/state.json", "state inventory file")
+	source := fs.String("source", "local", "scan source: local, target, or both")
+	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel scan worker count")
+	denyPackages := fs.String("deny-packages", "", "comma-separated exact package names to block")
+	denyPackageVersions := fs.String("deny-package-versions", "", "comma-separated exact package@version entries to block")
+	denyPrefixes := fs.String("deny-package-prefixes", "", "comma-separated package name prefixes to block")
+	denyScripts := fs.String("deny-scripts", "preinstall,install,postinstall", "comma-separated lifecycle scripts to block")
+	useOSV := fs.Bool("osv", true, "query OSV for known vulnerable package versions")
+	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
+	osvBatchSize := fs.Int("osv-batch-size", 200, "OSV query batch size")
+	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
+	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
+	exceptions := fs.String("exceptions", "", "path to scan exceptions JSON file")
+	osvConcurrency := fs.Int("osv-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV vulnerability detail lookup count")
+	reportPath := fs.String("report", ".gr/scan-report.json", "scan report JSON output path")
+	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := npm.ScanState(context.Background(), npm.ScanOptions{
+		StatePath:         *statePath,
+		Concurrency:       *concurrency,
+		Source:            *source,
+		DenyPackages:      csvList(*denyPackages),
+		DenyPackageKeys:   csvList(*denyPackageVersions),
+		DenyPackagePrefix: csvList(*denyPrefixes),
+		DenyScriptKeys:    csvList(*denyScripts),
+		UseOSV:            *useOSV,
+		OSVEndpoint:       *osvEndpoint,
+		OSVBatchSize:      *osvBatchSize,
+		MinSeverity:       *minSeverity,
+		UnknownSeverity:   *unknownSeverity,
+		ExceptionsPath:    *exceptions,
+		OSVConcurrency:    *osvConcurrency,
+	})
+	if writeErr := writeScanReport(*reportPath, *statePath, report); writeErr != nil && err == nil {
+		err = writeErr
+	}
+	if *jsonOut {
+		return printJSON(struct {
+			Command string         `json:"command"`
+			State   string         `json:"state"`
+			Source  string         `json:"source"`
+			Report  string         `json:"report"`
+			Scan    npm.ScanReport `json:"scan"`
+		}{Command: "scan", State: *statePath, Source: *source, Report: *reportPath, Scan: report})
+	}
+	fmt.Printf("scan source=%s total=%d passed=%d failed=%d errors=%d elapsed=%s state=%s report=%s\n",
+		*source, report.Total, report.Passed, report.Failed, report.Errors, report.Elapsed, *statePath, *reportPath)
+	return err
 }
 
 func stateCmd(args []string) error {
@@ -1008,30 +1120,44 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 }
 
 type mirrorManyOptions struct {
-	Inputs             []string
-	ProjectConcurrency int
-	OutBase            string
-	StateBase          string
-	Registry           string
-	TargetRegistry     string
-	NPMRC              string
-	TargetNPMRC        string
-	MetadataCacheBase  string
-	MetadataCacheTTL   time.Duration
-	MetadataRetries    int
-	Offline            bool
-	FetchConcurrency   int
-	PushConcurrency    int
-	TargetConcurrency  int
-	MaxRetries         int
-	PublishRetries     int
-	Tag                string
-	Access             string
-	SyncTarget         bool
-	OutputNaming       string
-	ResolveOptions     npm.ResolveOptions
-	JSONOut            bool
-	Tracef             func(format string, args ...any)
+	Inputs                  []string
+	ProjectConcurrency      int
+	OutBase                 string
+	StateBase               string
+	Registry                string
+	TargetRegistry          string
+	NPMRC                   string
+	TargetNPMRC             string
+	MetadataCacheBase       string
+	MetadataCacheTTL        time.Duration
+	MetadataRetries         int
+	Offline                 bool
+	FetchConcurrency        int
+	PushConcurrency         int
+	TargetConcurrency       int
+	MaxRetries              int
+	PublishRetries          int
+	Tag                     string
+	Access                  string
+	SyncTarget              bool
+	OutputNaming            string
+	ResolveOptions          npm.ResolveOptions
+	JSONOut                 bool
+	Tracef                  func(format string, args ...any)
+	ScanAuto                bool
+	ScanEnforce             bool
+	ScanDenyPrefixes        []string
+	ScanDenyScripts         []string
+	ScanOSV                 bool
+	ScanOSVEndpoint         string
+	ScanOSVBatchSize        int
+	ScanMinSeverity         string
+	ScanUnknownSeverity     string
+	ScanExceptionsPath      string
+	ScanOSVConcurrency      int
+	ScanDenyPackages        []string
+	ScanDenyPackageVersions []string
+	ScanReportPath          string
 }
 
 func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
@@ -1085,17 +1211,42 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	if err != nil {
 		return err
 	}
+	if opts.ScanAuto {
+		scanReport, err := npm.ScanState(ctx, npm.ScanOptions{
+			StatePath:         opts.StateBase,
+			Concurrency:       opts.FetchConcurrency,
+			DenyPackages:      opts.ScanDenyPackages,
+			DenyPackageKeys:   opts.ScanDenyPackageVersions,
+			DenyPackagePrefix: opts.ScanDenyPrefixes,
+			DenyScriptKeys:    opts.ScanDenyScripts,
+			UseOSV:            opts.ScanOSV,
+			OSVEndpoint:       opts.ScanOSVEndpoint,
+			OSVBatchSize:      opts.ScanOSVBatchSize,
+			MinSeverity:       opts.ScanMinSeverity,
+			UnknownSeverity:   opts.ScanUnknownSeverity,
+			ExceptionsPath:    opts.ScanExceptionsPath,
+			OSVConcurrency:    opts.ScanOSVConcurrency,
+		})
+		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
+			err = writeErr
+		}
+		fmt.Printf("scan total=%d passed=%d failed=%d errors=%d report=%s\n", scanReport.Total, scanReport.Passed, scanReport.Failed, scanReport.Errors, opts.ScanReportPath)
+		if err != nil && opts.ScanEnforce {
+			return err
+		}
+	}
 	state, err := npm.LoadState(opts.StateBase)
 	if err != nil {
 		return err
 	}
 	pushReport, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
-		Concurrency: opts.PushConcurrency,
-		Source:      opts.TargetRegistry,
-		Tag:         opts.Tag,
-		Access:      opts.Access,
-		MaxRetries:  opts.PublishRetries,
-		Progress:    opts.Tracef,
+		Concurrency:     opts.PushConcurrency,
+		Source:          opts.TargetRegistry,
+		Tag:             opts.Tag,
+		Access:          opts.Access,
+		MaxRetries:      opts.PublishRetries,
+		Progress:        opts.Tracef,
+		RequireScanPass: opts.ScanEnforce,
 	})
 	if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -1181,6 +1332,7 @@ Commands:
   fetch     resolve and download every package tarball
   mirror    resolve, optionally sync target state, fetch tarballs, and push missing packages
   push      publish local tarballs missing from target registry
+  scan      evaluate local tarballs and persist scan status in state
   resolve   print the resolved package tarball set
   state     manage target registry inventory state; subcommands: inspect, sync-target, mark-target
   cache     manage metadata cache; subcommands: prune, clear
@@ -1275,6 +1427,21 @@ func envBool(key string) bool {
 	}
 }
 
+func csvList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func newTraceLogger(enabled bool) func(format string, args ...any) {
 	if !enabled {
 		return func(string, ...any) {}
@@ -1314,4 +1481,25 @@ func printJSON(value any) error {
 	}
 	fmt.Println(string(data))
 	return nil
+}
+
+func writeScanReport(path, statePath string, report npm.ScanReport) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload := struct {
+		State string         `json:"state"`
+		Scan  npm.ScanReport `json:"scan"`
+	}{
+		State: statePath,
+		Scan:  report,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }

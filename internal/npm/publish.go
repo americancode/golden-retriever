@@ -23,12 +23,13 @@ import (
 )
 
 type PublishOptions struct {
-	Concurrency int
-	Source      string
-	Tag         string
-	Access      string
-	MaxRetries  int
-	Progress    func(format string, args ...any)
+	Concurrency     int
+	Source          string
+	Tag             string
+	Access          string
+	MaxRetries      int
+	Progress        func(format string, args ...any)
+	RequireScanPass bool
 }
 
 type PublishReport struct {
@@ -166,6 +167,9 @@ const (
 func publishOne(ctx context.Context, target *Client, rec StateRecord, opts PublishOptions) (publishResult, Package, error) {
 	if rec.Path == "" {
 		return publishSkipped, Package{}, nil
+	}
+	if opts.RequireScanPass && rec.ScanStatus != "pass" {
+		return publishSkipped, Package{}, fmt.Errorf("%s@%s blocked by scan gate status=%q reason=%q", rec.Name, rec.Version, rec.ScanStatus, rec.ScanReason)
 	}
 	tarballData, err := os.ReadFile(rec.Path)
 	if err != nil {

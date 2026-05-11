@@ -66,6 +66,9 @@ type StateRecord struct {
 	DownloadedAt time.Time `json:"downloadedAt,omitempty"`
 	PresentAt    time.Time `json:"presentAt,omitempty"`
 	Source       string    `json:"source,omitempty"`
+	ScanStatus   string    `json:"scanStatus,omitempty"`
+	ScanReason   string    `json:"scanReason,omitempty"`
+	ScannedAt    time.Time `json:"scannedAt,omitempty"`
 }
 
 func FetchAll(ctx context.Context, client *Client, packages []Package, opts FetchOptions) (FetchReport, error) {
