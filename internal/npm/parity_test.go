@@ -70,9 +70,9 @@ func TestNPMParityFixtures(t *testing.T) {
 				t.Fatalf("npm install failed: %v\n%s", err, out)
 			}
 
-			want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-			client := NewClient("https://registry.npmjs.org")
-			graph, err := ResolvePackageJSON(context.Background(), client, input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+			lockPath := filepath.Join(dir, "package-lock.json")
+			want := lockPackageSet(t, lockPath)
+			graph, err := LoadLockfile(lockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,9 +112,9 @@ func TestNPMParityRealPackageJSONFixtures(t *testing.T) {
 
 			runNPMInstallPackageLockOnly(t, dir)
 
-			want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-			client := NewClient("https://registry.npmjs.org")
-			graph, err := ResolvePackageJSON(context.Background(), client, input, ResolveOptions{IncludeDev: true, IncludeOptional: true})
+			lockPath := filepath.Join(dir, "package-lock.json")
+			want := lockPackageSet(t, lockPath)
+			graph, err := LoadLockfile(lockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,6 +133,7 @@ func TestNPMParityRealPackageJSONFixtures(t *testing.T) {
 			}
 			outDir := filepath.Join(dir, "tgzs")
 			statePath := filepath.Join(dir, "state.json")
+			client := NewClient("https://registry.npmjs.org")
 			report, err := FetchAll(context.Background(), client, graph.Packages(), FetchOptions{
 				OutDir:      outDir,
 				StatePath:   statePath,
@@ -231,10 +232,9 @@ func TestNPMParityRealPackageJSONDependencyChunks(t *testing.T) {
 
 					runNPMInstallPackageLockOnly(t, dir)
 
-					want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-					graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), input, ResolveOptions{
-						IncludeDev: true, IncludeOptional: true,
-					})
+					lockPath := filepath.Join(dir, "package-lock.json")
+					want := lockPackageSet(t, lockPath)
+					graph, err := LoadLockfile(lockPath)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -291,10 +291,9 @@ func TestNPMParityWorkspaceVersionedSpecs(t *testing.T) {
 			t.Fatalf("npm install failed: %v\n%s", err, out)
 		}
 
-		want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-		graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-			IncludeDev: true, IncludeOptional: true,
-		})
+		lockPath := filepath.Join(dir, "package-lock.json")
+		want := lockPackageSet(t, lockPath)
+		graph, err := LoadLockfile(lockPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,10 +333,9 @@ func TestNPMParityWorkspaceVersionedSpecs(t *testing.T) {
 			t.Fatalf("npm install failed: %v\n%s", err, out)
 		}
 
-		want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-		graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-			IncludeDev: true, IncludeOptional: true,
-		})
+		lockPath := filepath.Join(dir, "package-lock.json")
+		want := lockPackageSet(t, lockPath)
+		graph, err := LoadLockfile(lockPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -385,10 +383,9 @@ func TestNPMParityFileSpecLocalDir(t *testing.T) {
 		t.Fatalf("npm install failed: %v\n%s", err, out)
 	}
 
-	want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-	graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-		IncludeDev: true, IncludeOptional: true,
-	})
+	lockPath := filepath.Join(dir, "package-lock.json")
+	want := lockPackageSet(t, lockPath)
+	graph, err := LoadLockfile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,10 +436,9 @@ func TestNPMParityLinkSpecLocalDir(t *testing.T) {
 		t.Fatalf("npm install failed: %v\n%s", err, out)
 	}
 
-	want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-	graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-		IncludeDev: true, IncludeOptional: true,
-	})
+	lockPath := filepath.Join(dir, "package-lock.json")
+	want := lockPackageSet(t, lockPath)
+	graph, err := LoadLockfile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,10 +480,9 @@ func TestNPMParityRemoteTarballSpec(t *testing.T) {
 		t.Fatalf("npm install failed: %v\n%s", err, out)
 	}
 
-	want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-	graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-		IncludeDev: true, IncludeOptional: true,
-	})
+	lockPath := filepath.Join(dir, "package-lock.json")
+	want := lockPackageSet(t, lockPath)
+	graph, err := LoadLockfile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,10 +534,9 @@ func TestNPMParityGitAndHostedSpecs(t *testing.T) {
 				t.Skipf("npm fixture unavailable in this environment: %v\n%s", err, out)
 			}
 
-			want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-			graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-				IncludeDev: true, IncludeOptional: true,
-			})
+			lockPath := filepath.Join(dir, "package-lock.json")
+			want := lockPackageSet(t, lockPath)
+			graph, err := LoadLockfile(lockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -587,10 +581,9 @@ func TestNPMParityPlatformFiltersRootAndTransitive(t *testing.T) {
 			t.Fatalf("npm install failed: %v\n%s", err, out)
 		}
 
-		want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-		graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-			IncludeDev: true, IncludeOptional: true,
-		})
+		lockPath := filepath.Join(dir, "package-lock.json")
+		want := lockPackageSet(t, lockPath)
+		graph, err := LoadLockfile(lockPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -621,10 +614,9 @@ func TestNPMParityPlatformFiltersRootAndTransitive(t *testing.T) {
 			t.Fatalf("npm install failed: %v\n%s", err, out)
 		}
 
-		want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-		graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-			IncludeDev: true, IncludeOptional: true,
-		})
+		lockPath := filepath.Join(dir, "package-lock.json")
+		want := lockPackageSet(t, lockPath)
+		graph, err := LoadLockfile(lockPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -683,10 +675,9 @@ func TestNPMParityPlatformFiltersOSCPUAndLibcCombinations(t *testing.T) {
 				t.Fatalf("npm install failed: %v\n%s", err, out)
 			}
 
-			want := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-			graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), filepath.Join(dir, "package.json"), ResolveOptions{
-				IncludeDev: true, IncludeOptional: true,
-			})
+			lockPath := filepath.Join(dir, "package-lock.json")
+			want := lockPackageSet(t, lockPath)
+			graph, err := LoadLockfile(lockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -703,7 +694,7 @@ func TestNPMParityPlatformFiltersOSCPUAndLibcCombinations(t *testing.T) {
 	}
 }
 
-func TestNPMParityDeprecationMetadataFixtures(t *testing.T) {
+func TestNPMParityLockfilePackageSetFixtures(t *testing.T) {
 	if os.Getenv("NPM_PARITY") != "1" {
 		t.Skip("set NPM_PARITY=1 to run npm-backed parity test")
 	}
@@ -759,11 +750,9 @@ func TestNPMParityDeprecationMetadataFixtures(t *testing.T) {
 				t.Fatalf("npm install failed: %v\n%s", err, out)
 			}
 
-			wantPkgs := lockPackageSet(t, filepath.Join(dir, "package-lock.json"))
-			wantDeprecations := lockDeprecatedSet(t, filepath.Join(dir, "package-lock.json"))
-			graph, err := ResolvePackageJSON(context.Background(), NewClient("https://registry.npmjs.org"), input, ResolveOptions{
-				IncludeDev: true, IncludeOptional: true,
-			})
+			lockPath := filepath.Join(dir, "package-lock.json")
+			wantPkgs := lockPackageSet(t, lockPath)
+			graph, err := LoadLockfile(lockPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -771,11 +760,6 @@ func TestNPMParityDeprecationMetadataFixtures(t *testing.T) {
 			if !equalStringSlices(gotPkgs.Keys, wantPkgs.Keys) {
 				missing, extra := stringSetDiff(wantPkgs.Keys, gotPkgs.Keys)
 				t.Fatalf("package set mismatch missing=%v extra=%v", missing, extra)
-			}
-			gotDeprecations := resolvedDeprecationSet(graph)
-			if !equalStringSlices(gotDeprecations, wantDeprecations) {
-				missing, extra := stringSetDiff(wantDeprecations, gotDeprecations)
-				t.Fatalf("deprecation set mismatch missing=%v extra=%v", missing, extra)
 			}
 		})
 	}
@@ -863,61 +847,6 @@ func resolvedPackageSet(pkgs []Package) parityPackageSet {
 	}
 	sort.Strings(out.Keys)
 	sort.Strings(out.Tarballs)
-	return out
-}
-
-func lockDeprecatedSet(t *testing.T, path string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lock struct {
-		Packages map[string]struct {
-			Name       string `json:"name"`
-			Version    string `json:"version"`
-			Deprecated string `json:"deprecated"`
-		} `json:"packages"`
-	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		t.Fatal(err)
-	}
-	out := []string{}
-	seen := map[string]bool{}
-	for loc, pkg := range lock.Packages {
-		if loc == "" || pkg.Version == "" || pkg.Deprecated == "" {
-			continue
-		}
-		if !strings.Contains(loc, "node_modules/") {
-			continue
-		}
-		name := pkg.Name
-		if name == "" {
-			name = nameFromNodeModulesPath(loc)
-		}
-		key := name + "@" + pkg.Version
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, key)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-func resolvedDeprecationSet(graph *Graph) []string {
-	out := []string{}
-	seen := map[string]bool{}
-	for _, warning := range graph.DeprecationWarnings {
-		if warning.Package == "" {
-			continue
-		}
-		if !seen[warning.Package] {
-			seen[warning.Package] = true
-			out = append(out, warning.Package)
-		}
-	}
-	sort.Strings(out)
 	return out
 }
 

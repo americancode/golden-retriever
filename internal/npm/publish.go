@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type PublishOptions struct {
 	Tag         string
 	Access      string
 	MaxRetries  int
+	Progress    func(format string, args ...any)
 }
 
 type PublishReport struct {
@@ -65,11 +67,21 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	}
 	normalizeState(state)
 	ValidateStateFiles(state)
+	total := 0
+	for key := range state.Local {
+		if _, ok := state.Target[key]; !ok {
+			total++
+		}
+	}
+	if opts.Progress != nil {
+		opts.Progress("publish:start total=%d concurrency=%d source=%s", total, opts.Concurrency, opts.Source)
+	}
 
 	jobs := make(chan StateRecord)
 	var stateMu sync.Mutex
 	var reportMu sync.Mutex
 	var report PublishReport
+	var processed int
 	var firstErr error
 	var wg sync.WaitGroup
 
@@ -80,10 +92,14 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 			for rec := range jobs {
 				result, pkg, err := publishOne(ctx, target, rec, opts)
 				reportMu.Lock()
+				processed++
 				if err != nil {
 					report.Failed++
 					if firstErr == nil {
 						firstErr = err
+					}
+					if opts.Progress != nil {
+						opts.Progress("publish:fail processed=%d/%d package=%s@%s error=%v", processed, total, rec.Name, rec.Version, err)
 					}
 					recordFailure(state, &stateMu, Package{
 						Name: rec.Name, Version: rec.Version, Tarball: rec.Tarball,
@@ -102,13 +118,20 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 				} else {
 					report.Skipped++
 				}
+				if opts.Progress != nil && processed%25 == 0 {
+					opts.Progress("publish:progress processed=%d/%d pushed=%d present=%d skipped=%d failed=%d",
+						processed, total, report.Pushed, report.Present, report.Skipped, report.Failed)
+				}
 				reportMu.Unlock()
 			}
 		}()
 	}
 
 	for key, rec := range state.Local {
-		if _, ok := state.Target[key]; ok {
+		stateMu.Lock()
+		_, alreadyPresent := state.Target[key]
+		stateMu.Unlock()
+		if alreadyPresent {
 			report.Skipped++
 			continue
 		}
@@ -125,6 +148,10 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	wg.Wait()
 	state.UpdatedAt = time.Now().UTC()
 	report.Elapsed = time.Since(start)
+	if opts.Progress != nil {
+		opts.Progress("publish:done total=%d pushed=%d present=%d skipped=%d failed=%d elapsed=%s",
+			total, report.Pushed, report.Present, report.Skipped, report.Failed, report.Elapsed)
+	}
 	return report, firstErr
 }
 
@@ -230,6 +257,9 @@ func manifestFromTarball(tarballData []byte) (publishManifest, error) {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	bestScore := -1
+	var best publishManifest
+	foundPackageJSON := false
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -238,16 +268,17 @@ func manifestFromTarball(tarballData []byte) (publishManifest, error) {
 		if err != nil {
 			return publishManifest{}, err
 		}
-		if path.Clean(header.Name) != "package/package.json" {
+		if filepath.Base(path.Clean(header.Name)) != "package.json" {
 			continue
 		}
+		foundPackageJSON = true
 		data, err := io.ReadAll(tr)
 		if err != nil {
 			return publishManifest{}, err
 		}
 		raw := map[string]any{}
 		if err := json.Unmarshal(data, &raw); err != nil {
-			return publishManifest{}, err
+			continue
 		}
 		manifest := publishManifest{Raw: raw}
 		if name, _ := raw["name"].(string); name != "" {
@@ -262,11 +293,41 @@ func manifestFromTarball(tarballData []byte) (publishManifest, error) {
 			manifest.Dist = dist
 		}
 		if manifest.Name == "" || manifest.Version == "" {
-			return publishManifest{}, fmt.Errorf("tarball package.json missing name or version")
+			continue
 		}
-		return manifest, nil
+
+		score := scorePackageJSONPath(path.Clean(header.Name))
+		if score > bestScore {
+			bestScore = score
+			best = manifest
+		}
 	}
-	return publishManifest{}, fmt.Errorf("tarball missing package/package.json")
+	if bestScore >= 0 {
+		return best, nil
+	}
+	if foundPackageJSON {
+		return publishManifest{}, fmt.Errorf("tarball package.json missing name or version")
+	}
+	return publishManifest{}, fmt.Errorf("tarball missing package.json")
+}
+
+func scorePackageJSONPath(entry string) int {
+	if entry == "package/package.json" {
+		return 1_000_000
+	}
+
+	parts := strings.Split(entry, "/")
+	if len(parts) == 0 || parts[len(parts)-1] != "package.json" {
+		return -1
+	}
+
+	// Prefer shallow manifests closer to the package root; penalize nested dirs.
+	depthPenalty := (len(parts) - 1) * 100
+	score := 10_000 - depthPenalty
+	if len(parts) >= 2 && parts[0] == "package" {
+		score += 5_000
+	}
+	return score
 }
 
 func buildPublishDocument(registry string, manifest publishManifest, tarballData []byte, opts PublishOptions) (map[string]any, Package, error) {

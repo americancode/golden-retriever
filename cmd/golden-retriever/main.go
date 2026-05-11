@@ -148,6 +148,7 @@ func mirror(args []string) error {
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	timeout := fs.Duration("timeout", 30*time.Minute, "workflow timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -166,11 +167,14 @@ func mirror(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	tracef := newTraceLogger(*trace)
+	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
 
 	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
 	if err != nil {
 		return err
 	}
+	tracef("mirror:resolve:start")
 	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
 		IncludeDev:         dependencySet.includeDev,
 		IncludeOptional:    dependencySet.includeOptional,
@@ -192,6 +196,7 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
+	tracef("mirror:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
 		printDeprecationWarnings(graph)
@@ -205,6 +210,7 @@ func mirror(args []string) error {
 
 	var syncReport npm.SyncTargetReport
 	if *syncTarget {
+		tracef("mirror:sync-target:start")
 		state, err := npm.LoadState(*statePath)
 		if err != nil {
 			return err
@@ -223,29 +229,35 @@ func mirror(args []string) error {
 			fmt.Printf("target_sync packages=%d present=%d missing=%d failed=%d state=%s target=%s\n",
 				len(graph.Packages()), syncReport.Present, syncReport.Missing, syncReport.Failed, *statePath, *targetRegistry)
 		}
+		tracef("mirror:sync-target:done present=%d missing=%d failed=%d", syncReport.Present, syncReport.Missing, syncReport.Failed)
 	}
 
+	tracef("mirror:fetch:start")
 	fetchReport, err := npm.FetchAll(ctx, sourceClient, graph.Packages(), npm.FetchOptions{
 		OutDir:             *out,
 		StatePath:          *statePath,
 		Concurrency:        *fetchConcurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
+		Progress:           tracef,
 	})
 	if err != nil {
 		return err
 	}
+	tracef("mirror:fetch:done downloaded=%d target_skipped=%d local_skipped=%d failed=%d", fetchReport.Downloaded, fetchReport.TargetSkipped, fetchReport.Skipped, fetchReport.Failed)
 
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
 		return err
 	}
+	tracef("mirror:publish:start")
 	pushReport, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
 		Concurrency: *pushConcurrency,
 		Source:      *targetRegistry,
 		Tag:         *tag,
 		Access:      *access,
 		MaxRetries:  *publishRetries,
+		Progress:    tracef,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -253,6 +265,7 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
+	tracef("mirror:publish:done pushed=%d present=%d skipped=%d failed=%d", pushReport.Pushed, pushReport.Present, pushReport.Skipped, pushReport.Failed)
 
 	if *jsonOut {
 		return printJSON(struct {
@@ -290,6 +303,7 @@ func push(args []string) error {
 	access := fs.String("access", "public", "npm package access value")
 	maxRetries := fs.Int("max-retries", 3, "target registry publish retry count for transient failures")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	timeout := fs.Duration("timeout", 10*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -300,6 +314,8 @@ func push(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	tracef := newTraceLogger(*trace)
+	tracef("push:start target=%s timeout=%s", *targetRegistry, *timeout)
 
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
@@ -316,6 +332,7 @@ func push(args []string) error {
 		Tag:         *tag,
 		Access:      *access,
 		MaxRetries:  *maxRetries,
+		Progress:    tracef,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -368,6 +385,7 @@ func fetch(args []string) error {
 	avoid := fs.String("avoid", "", "semver range of versions to avoid during manifest selection")
 	avoidStrict := fs.Bool("avoid-strict", false, "allow npm-pick-manifest style outside-range fallback when all matching versions are avoided")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	timeout := fs.Duration("timeout", 5*time.Minute, "network timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -383,11 +401,14 @@ func fetch(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	tracef := newTraceLogger(*trace)
+	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
 
 	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
 	if err != nil {
 		return err
 	}
+	tracef("fetch:resolve:start")
 	graph, err := npm.LoadInput(ctx, client, *input, npm.ResolveOptions{
 		IncludeDev:         dependencySet.includeDev,
 		IncludeOptional:    dependencySet.includeOptional,
@@ -409,6 +430,7 @@ func fetch(args []string) error {
 	if err != nil {
 		return err
 	}
+	tracef("fetch:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
 		printDeprecationWarnings(graph)
@@ -420,6 +442,7 @@ func fetch(args []string) error {
 		Concurrency:        *concurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
+		Progress:           tracef,
 	})
 	if err != nil {
 		return err
@@ -847,6 +870,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func envBool(key string) bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func newTraceLogger(enabled bool) func(format string, args ...any) {
+	if !enabled {
+		return func(string, ...any) {}
+	}
+	return func(format string, args ...any) {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		fmt.Fprintf(os.Stderr, "trace time=%s %s\n", ts, fmt.Sprintf(format, args...))
+	}
 }
 
 func printEngineWarnings(graph *npm.Graph) {

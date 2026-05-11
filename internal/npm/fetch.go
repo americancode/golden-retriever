@@ -25,6 +25,7 @@ type FetchOptions struct {
 	Concurrency        int
 	MaxRetries         int
 	OutputNameStrategy string
+	Progress           func(format string, args ...any)
 }
 
 type FetchReport struct {
@@ -83,11 +84,15 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 		return FetchReport{}, err
 	}
 	ValidateStateFiles(state)
+	if opts.Progress != nil {
+		opts.Progress("fetch:start total=%d concurrency=%d out=%s state=%s", len(packages), opts.Concurrency, opts.OutDir, opts.StatePath)
+	}
 
 	jobs := make(chan Package)
 	var mu sync.Mutex
 	var stateMu sync.Mutex
 	var report FetchReport
+	var processed int
 	var firstErr error
 	var wg sync.WaitGroup
 
@@ -98,10 +103,14 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 			for pkg := range jobs {
 				result, bytes, err := fetchOne(ctx, client, pkg, opts.OutDir, opts.OutputNameStrategy, state, &stateMu, opts.MaxRetries)
 				mu.Lock()
+				processed++
 				if err != nil {
 					report.Failed++
 					if firstErr == nil {
 						firstErr = err
+					}
+					if opts.Progress != nil {
+						opts.Progress("fetch:fail processed=%d/%d package=%s error=%v", processed, len(packages), pkg.Key(), err)
 					}
 				} else if result == fetchDownloaded {
 					report.Downloaded++
@@ -110,6 +119,10 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 					report.TargetSkipped++
 				} else if result == fetchLocalPresent {
 					report.Skipped++
+				}
+				if opts.Progress != nil && processed%25 == 0 {
+					opts.Progress("fetch:progress processed=%d/%d downloaded=%d local_skipped=%d target_skipped=%d failed=%d",
+						processed, len(packages), report.Downloaded, report.Skipped, report.TargetSkipped, report.Failed)
 				}
 				mu.Unlock()
 			}
@@ -132,6 +145,10 @@ func FetchAll(ctx context.Context, client *Client, packages []Package, opts Fetc
 	report.Elapsed = time.Since(start)
 	if err := saveState(opts.StatePath, state); err != nil {
 		return report, err
+	}
+	if opts.Progress != nil {
+		opts.Progress("fetch:done total=%d downloaded=%d local_skipped=%d target_skipped=%d failed=%d elapsed=%s",
+			len(packages), report.Downloaded, report.Skipped, report.TargetSkipped, report.Failed, report.Elapsed)
 	}
 	return report, firstErr
 }
