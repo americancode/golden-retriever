@@ -52,6 +52,7 @@ jobs:
         if: always() && hashFiles('trivy-fs.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
         with:
           sarif_file: trivy-fs.sarif
+          category: trivy-fs
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
@@ -112,6 +113,7 @@ jobs:
         if: always() && hashFiles('trivy-image.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
         with:
           sarif_file: trivy-image.sarif
+          category: trivy-image
 
       - name: Sign the published Docker image
         if: ${{ github.event_name != 'pull_request' }}
