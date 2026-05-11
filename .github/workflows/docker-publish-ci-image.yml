@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload Trivy fs SARIF
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
 
@@ -105,7 +105,7 @@ jobs:
 
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
 
