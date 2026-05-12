@@ -20,22 +20,23 @@ import (
 )
 
 type ScanOptions struct {
-	StatePath         string
-	Concurrency       int
-	Source            string
-	BlocklistPath     string
-	DenyPackagePrefix []string
-	UseOSV            bool
-	OSVProvider       string
-	OSVEndpoint       string
-	OSVOfflineDBDir   string
-	OSVBatchSize      int
-	OSVOfflineChunkSize int
-	MinSeverity       string
-	UnknownSeverity   string
-	ExceptionsPath    string
-	OSVConcurrency    int
-	Progress          func(format string, args ...any)
+	StatePath             string
+	Concurrency           int
+	Source                string
+	BlocklistPath         string
+	DenyPackagePrefix     []string
+	UseOSV                bool
+	OSVProvider           string
+	OSVEndpoint           string
+	OSVOfflineDBDir       string
+	OSVAPIBatchSize       int
+	OSVAPIConcurrency     int
+	OSVOfflineChunkSize   int
+	OSVOfflineConcurrency int
+	MinSeverity           string
+	UnknownSeverity       string
+	ExceptionsPath        string
+	Progress              func(format string, args ...any)
 }
 
 type ScanReport struct {
@@ -83,8 +84,8 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	if opts.OSVProvider == "" {
 		opts.OSVProvider = "osv-api"
 	}
-	if opts.OSVBatchSize <= 0 {
-		opts.OSVBatchSize = 200
+	if opts.OSVAPIBatchSize <= 0 {
+		opts.OSVAPIBatchSize = 200
 	}
 	if opts.OSVOfflineChunkSize <= 0 {
 		opts.OSVOfflineChunkSize = 100
@@ -92,8 +93,11 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	if opts.Source == "" {
 		opts.Source = "local"
 	}
-	if opts.OSVConcurrency <= 0 {
-		opts.OSVConcurrency = maxInt(4, opts.Concurrency/2)
+	if opts.OSVAPIConcurrency <= 0 {
+		opts.OSVAPIConcurrency = maxInt(4, opts.Concurrency/2)
+	}
+	if opts.OSVOfflineConcurrency <= 0 {
+		opts.OSVOfflineConcurrency = maxInt(4, opts.Concurrency/2)
 	}
 	if opts.MinSeverity == "" {
 		opts.MinSeverity = "high"
@@ -400,14 +404,14 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 		return err
 	}
 	vulnCache := map[string]severityLevel{}
-	for i := 0; i < len(records); i += opts.OSVBatchSize {
-		end := i + opts.OSVBatchSize
+	for i := 0; i < len(records); i += opts.OSVAPIBatchSize {
+		end := i + opts.OSVAPIBatchSize
 		if end > len(records) {
 			end = len(records)
 		}
 		chunk := records[i:end]
 		if opts.Progress != nil {
-			opts.Progress("osv:batch:start endpoint=%s batch=%d queries=%d", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, len(chunk))
+			opts.Progress("osv:batch:start endpoint=%s batch=%d queries=%d", opts.OSVEndpoint, (i/opts.OSVAPIBatchSize)+1, len(chunk))
 		}
 		reqBody := osvBatchRequest{Queries: make([]osvQuery, 0, len(chunk))}
 		for _, item := range chunk {
@@ -429,7 +433,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 		resp, err := client.Do(req)
 		if err != nil {
 			if opts.Progress != nil {
-				opts.Progress("osv:batch:error endpoint=%s batch=%d error=%v", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, err)
+				opts.Progress("osv:batch:error endpoint=%s batch=%d error=%v", opts.OSVEndpoint, (i/opts.OSVAPIBatchSize)+1, err)
 			}
 			return err
 		}
@@ -440,7 +444,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 		}
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			if opts.Progress != nil {
-				opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, resp.Status)
+				opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s", opts.OSVEndpoint, (i/opts.OSVAPIBatchSize)+1, resp.Status)
 			}
 			return fmt.Errorf("osv query failed: %s", resp.Status)
 		}
@@ -460,7 +464,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 			}
 		}
 		if opts.Progress != nil {
-			opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s vuln_ids=%d", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, resp.Status, len(idsToResolve))
+			opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s vuln_ids=%d", opts.OSVEndpoint, (i/opts.OSVAPIBatchSize)+1, resp.Status, len(idsToResolve))
 		}
 		levels, err := fetchOSVSeverityLevels(ctx, client, opts, idsToResolve, unknownLevel, vulnCache)
 		if err != nil {
@@ -572,7 +576,7 @@ func applyOSVScannerFindings(ctx context.Context, state *State, opts ScanOptions
 		}
 		return nil
 	}
-	if offline && opts.OSVConcurrency > 1 && opts.OSVOfflineChunkSize > 0 && len(records) > opts.OSVOfflineChunkSize {
+	if offline && opts.OSVOfflineConcurrency > 1 && opts.OSVOfflineChunkSize > 0 && len(records) > opts.OSVOfflineChunkSize {
 		return applyOSVScannerFindingsParallel(ctx, state, opts, records, minLevel, unknownLevel, exceptions)
 	}
 	lockfile, err := buildOSVScannerLockfileForRecords(records)
@@ -598,7 +602,7 @@ func applyOSVScannerFindings(ctx context.Context, state *State, opts ScanOptions
 func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts ScanOptions, records []osvScannerRecord, minLevel, unknownLevel severityLevel, exceptions []ScanException) error {
 	chunks := chunkOSVScannerRecords(records, opts.OSVOfflineChunkSize)
 	if opts.Progress != nil {
-		opts.Progress("osv:scanner:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.OSVOfflineChunkSize, opts.OSVConcurrency, len(records))
+		opts.Progress("osv:scanner:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.OSVOfflineChunkSize, opts.OSVOfflineConcurrency, len(records))
 	}
 	type chunkResult struct {
 		index  int
@@ -607,7 +611,7 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 	}
 	jobs := make(chan int)
 	results := make(chan chunkResult, len(chunks))
-	workerCount := opts.OSVConcurrency
+	workerCount := opts.OSVOfflineConcurrency
 	if workerCount > len(chunks) {
 		workerCount = len(chunks)
 	}
@@ -1054,12 +1058,12 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 	}
 	endpointBase := strings.TrimSuffix(opts.OSVEndpoint, "/querybatch")
 	if opts.Progress != nil {
-		opts.Progress("osv:detail:start endpoint=%s ids=%d concurrency=%d", endpointBase+"/vulns/{id}", len(ids), opts.OSVConcurrency)
+		opts.Progress("osv:detail:start endpoint=%s ids=%d concurrency=%d", endpointBase+"/vulns/{id}", len(ids), opts.OSVAPIConcurrency)
 	}
 	jobs := make(chan string)
 	results := make(chan out, len(ids))
 	var wg sync.WaitGroup
-	for i := 0; i < opts.OSVConcurrency; i++ {
+	for i := 0; i < opts.OSVAPIConcurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

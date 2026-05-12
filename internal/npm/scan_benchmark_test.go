@@ -37,14 +37,14 @@ func benchmarkScanStateOSVOffline(b *testing.B, batchSize, concurrency, packageC
 			b.Fatalf("saveState: %v", err)
 		}
 		report, err := ScanState(context.Background(), ScanOptions{
-			StatePath:       statePath,
-			Source:          "target",
-			UseOSV:          true,
-			OSVProvider:     "osv-offline",
-			OSVOfflineChunkSize: batchSize,
-			OSVConcurrency:  concurrency,
-			MinSeverity:     "high",
-			UnknownSeverity: "high",
+			StatePath:             statePath,
+			Source:                "target",
+			UseOSV:                true,
+			OSVProvider:           "osv-offline",
+			OSVOfflineChunkSize:   batchSize,
+			OSVOfflineConcurrency: concurrency,
+			MinSeverity:           "high",
+			UnknownSeverity:       "high",
 		})
 		if err != nil {
 			b.Fatalf("ScanState error: %v", err)

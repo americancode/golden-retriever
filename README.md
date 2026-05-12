@@ -84,9 +84,10 @@ Example blocklist file:
 
 - enable/disable OSV lookup: `--scan-osv=true|false`
 - provider selection: `--scan-provider osv-api|osv-offline`
-- OSV API batch size: `--scan-osv-batch-size 200`
+- OSV API batch size: `--scan-osv-api-batch-size 200`
+- OSV API detail concurrency: `--scan-osv-api-concurrency 8`
 - offline `osv-scanner` chunk size: `--scan-osv-offline-chunk-size 100`
-- parallel vulnerability detail lookups: `--scan-osv-concurrency 8`
+- offline `osv-scanner` worker concurrency: `--scan-osv-offline-concurrency 8`
 - fail threshold: `--scan-min-severity high`
 - fallback when severity missing: `--scan-unknown-severity high`
 - exceptions file: `--scan-exceptions .gr/scan-exceptions.json`
@@ -96,6 +97,8 @@ Provider behavior:
 
 - `osv-api` (default): use direct OSV API queries first; if that fails, automatically fall back to local `osv-scanner` offline vulnerability matching.
 - `osv-offline`: skip direct API calls and use local `osv-scanner` offline vulnerability matching only.
+
+For GitLab CI, the baseline `.gitlab-ci.yml` defaults to `osv-offline`.
 
 `osv-scanner` offline mode uses a local vulnerability database. `golden-retriever` passes `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` through to the tool when set.
 
@@ -145,8 +148,10 @@ go run ./cmd/golden-retriever scan \
   --state .gr/state.json \
   --source local \
   --osv=true \
-  --provider osv-api \
+  --provider osv-offline \
   --osv-offline-db /var/lib/osv-scanner/db \
+  --osv-offline-chunk-size 100 \
+  --osv-offline-concurrency 8 \
   --report .gr/scan-report.json
 ```
 
@@ -208,9 +213,10 @@ go run ./cmd/golden-retriever mirror \
 - `GOLDEN_RETRIEVER_SCAN_OSV`: `true|false`
 - `GOLDEN_RETRIEVER_SCAN_PROVIDER`: `osv-api|osv-offline`
 - `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`: local OSV scanner DB path
-- `GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE`: OSV API batch size
+- `GOLDEN_RETRIEVER_SCAN_OSV_API_BATCH_SIZE`: OSV API batch size
+- `GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY`: OSV API detail lookup concurrency
 - `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE`: offline `osv-scanner` chunk size
-- `GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY`: vulnerability scan parallelism
+- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY`: offline `osv-scanner` worker concurrency
 - `GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY`: `low|medium|high|critical`
 - `GOLDEN_RETRIEVER_SCAN_EXCEPTIONS`: exceptions file path
 - `GOLDEN_RETRIEVER_SCAN_BLOCKLIST`: blocklist file path

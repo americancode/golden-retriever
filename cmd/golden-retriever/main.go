@@ -161,12 +161,13 @@ func mirror(args []string) error {
 	scanProvider := fs.String("scan-provider", "osv-api", "scan provider: osv-api or osv-offline")
 	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
-	scanOSVBatchSize := fs.Int("scan-osv-batch-size", 200, "OSV query batch size")
+	scanOSVAPIBatchSize := fs.Int("scan-osv-api-batch-size", 200, "OSV API query batch size")
 	scanOSVOfflineChunkSize := fs.Int("scan-osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
-	scanOSVConcurrency := fs.Int("scan-osv-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV vulnerability detail lookup count")
+	scanOSVAPIConcurrency := fs.Int("scan-osv-api-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV API vulnerability detail lookup count")
+	scanOSVOfflineConcurrency := fs.Int("scan-osv-offline-concurrency", max(4, runtime.NumCPU()/2), "parallel offline osv-scanner worker count")
 	scanBlocklist := fs.String("scan-blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	scanReportPath := fs.String("scan-report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
@@ -238,24 +239,25 @@ func mirror(args []string) error {
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
 			},
-			JSONOut:                 *jsonOut,
-			Tracef:                  tracef,
-			Progressf:               progressf,
-			ScanAuto:                *scanAuto,
-			ScanEnforce:             *scanEnforce,
-			ScanDenyPrefixes:        csvList(*scanDenyPackagePrefixes),
-			ScanOSV:                 *scanOSV,
-			ScanProvider:            *scanProvider,
-			ScanOSVEndpoint:         *scanOSVEndpoint,
-			ScanOSVOfflineDBDir:     *scanOSVOfflineDBDir,
-			ScanOSVBatchSize:        *scanOSVBatchSize,
-			ScanOSVOfflineChunkSize: *scanOSVOfflineChunkSize,
-			ScanBlocklistPath:       *scanBlocklist,
-			ScanReportPath:          *scanReportPath,
-			ScanMinSeverity:         *scanMinSeverity,
-			ScanUnknownSeverity:     *scanUnknownSeverity,
-			ScanExceptionsPath:      *scanExceptions,
-			ScanOSVConcurrency:      *scanOSVConcurrency,
+			JSONOut:                   *jsonOut,
+			Tracef:                    tracef,
+			Progressf:                 progressf,
+			ScanAuto:                  *scanAuto,
+			ScanEnforce:               *scanEnforce,
+			ScanDenyPrefixes:          csvList(*scanDenyPackagePrefixes),
+			ScanOSV:                   *scanOSV,
+			ScanProvider:              *scanProvider,
+			ScanOSVEndpoint:           *scanOSVEndpoint,
+			ScanOSVOfflineDBDir:       *scanOSVOfflineDBDir,
+			ScanOSVAPIBatchSize:       *scanOSVAPIBatchSize,
+			ScanOSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
+			ScanBlocklistPath:         *scanBlocklist,
+			ScanReportPath:            *scanReportPath,
+			ScanMinSeverity:           *scanMinSeverity,
+			ScanUnknownSeverity:       *scanUnknownSeverity,
+			ScanExceptionsPath:        *scanExceptions,
+			ScanOSVAPIConcurrency:     *scanOSVAPIConcurrency,
+			ScanOSVOfflineConcurrency: *scanOSVOfflineConcurrency,
 		})
 	}
 	selectedInput := resolvedInputs[0]
@@ -346,21 +348,22 @@ func mirror(args []string) error {
 	tracef("mirror:fetch:done downloaded=%d target_skipped=%d local_skipped=%d failed=%d", fetchReport.Downloaded, fetchReport.TargetSkipped, fetchReport.Skipped, fetchReport.Failed)
 	if *scanAuto {
 		scanReport, scanErr := npm.ScanState(ctx, npm.ScanOptions{
-			StatePath:           *statePath,
-			Concurrency:         *fetchConcurrency,
-			BlocklistPath:       *scanBlocklist,
-			DenyPackagePrefix:   csvList(*scanDenyPackagePrefixes),
-			UseOSV:              *scanOSV,
-			OSVProvider:         *scanProvider,
-			OSVEndpoint:         *scanOSVEndpoint,
-			OSVOfflineDBDir:     *scanOSVOfflineDBDir,
-			OSVBatchSize:        *scanOSVBatchSize,
-			OSVOfflineChunkSize: *scanOSVOfflineChunkSize,
-			MinSeverity:         *scanMinSeverity,
-			UnknownSeverity:     *scanUnknownSeverity,
-			ExceptionsPath:      *scanExceptions,
-			OSVConcurrency:      *scanOSVConcurrency,
-			Progress:            pickProgressLogger(*trace, tracef, progressf),
+			StatePath:             *statePath,
+			Concurrency:           *fetchConcurrency,
+			BlocklistPath:         *scanBlocklist,
+			DenyPackagePrefix:     csvList(*scanDenyPackagePrefixes),
+			UseOSV:                *scanOSV,
+			OSVProvider:           *scanProvider,
+			OSVEndpoint:           *scanOSVEndpoint,
+			OSVOfflineDBDir:       *scanOSVOfflineDBDir,
+			OSVAPIBatchSize:       *scanOSVAPIBatchSize,
+			OSVAPIConcurrency:     *scanOSVAPIConcurrency,
+			OSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
+			MinSeverity:           *scanMinSeverity,
+			UnknownSeverity:       *scanUnknownSeverity,
+			ExceptionsPath:        *scanExceptions,
+			OSVOfflineConcurrency: *scanOSVOfflineConcurrency,
+			Progress:              pickProgressLogger(*trace, tracef, progressf),
 		})
 		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
 			scanErr = writeErr
@@ -728,33 +731,35 @@ func scan(args []string) error {
 	provider := fs.String("provider", "osv-api", "scan provider: osv-api or osv-offline")
 	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
-	osvBatchSize := fs.Int("osv-batch-size", 200, "OSV query batch size")
+	osvAPIBatchSize := fs.Int("osv-api-batch-size", 200, "OSV API query batch size")
 	osvOfflineChunkSize := fs.Int("osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	exceptions := fs.String("exceptions", "", "path to scan exceptions JSON file")
-	osvConcurrency := fs.Int("osv-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV vulnerability detail lookup count")
+	osvAPIConcurrency := fs.Int("osv-api-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV API vulnerability detail lookup count")
+	osvOfflineConcurrency := fs.Int("osv-offline-concurrency", max(4, runtime.NumCPU()/2), "parallel offline osv-scanner worker count")
 	reportPath := fs.String("report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	report, err := npm.ScanState(context.Background(), npm.ScanOptions{
-		StatePath:           *statePath,
-		Concurrency:         *concurrency,
-		Source:              *source,
-		BlocklistPath:       *blocklist,
-		DenyPackagePrefix:   csvList(*denyPrefixes),
-		UseOSV:              *useOSV,
-		OSVProvider:         *provider,
-		OSVEndpoint:         *osvEndpoint,
-		OSVOfflineDBDir:     *osvOfflineDBDir,
-		OSVBatchSize:        *osvBatchSize,
-		OSVOfflineChunkSize: *osvOfflineChunkSize,
-		MinSeverity:         *minSeverity,
-		UnknownSeverity:     *unknownSeverity,
-		ExceptionsPath:      *exceptions,
-		OSVConcurrency:      *osvConcurrency,
+		StatePath:             *statePath,
+		Concurrency:           *concurrency,
+		Source:                *source,
+		BlocklistPath:         *blocklist,
+		DenyPackagePrefix:     csvList(*denyPrefixes),
+		UseOSV:                *useOSV,
+		OSVProvider:           *provider,
+		OSVEndpoint:           *osvEndpoint,
+		OSVOfflineDBDir:       *osvOfflineDBDir,
+		OSVAPIBatchSize:       *osvAPIBatchSize,
+		OSVAPIConcurrency:     *osvAPIConcurrency,
+		OSVOfflineChunkSize:   *osvOfflineChunkSize,
+		MinSeverity:           *minSeverity,
+		UnknownSeverity:       *unknownSeverity,
+		ExceptionsPath:        *exceptions,
+		OSVOfflineConcurrency: *osvOfflineConcurrency,
 	})
 	if writeErr := writeScanReport(*reportPath, *statePath, report); writeErr != nil && err == nil {
 		err = writeErr
@@ -1225,46 +1230,47 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 }
 
 type mirrorManyOptions struct {
-	Inputs                   []string
-	ProjectConcurrency       int
-	OutBase                  string
-	StateBase                string
-	Registry                 string
-	TargetRegistry           string
-	TargetInsecureSkipVerify bool
-	NPMRC                    string
-	TargetNPMRC              string
-	MetadataCacheBase        string
-	MetadataCacheTTL         time.Duration
-	MetadataRetries          int
-	FetchConcurrency         int
-	PushConcurrency          int
-	TargetConcurrency        int
-	MaxRetries               int
-	PublishRetries           int
-	Tag                      string
-	Access                   string
-	SyncTarget               bool
-	OutputNaming             string
-	ResolveOptions           npm.ResolveOptions
-	JSONOut                  bool
-	Tracef                   func(format string, args ...any)
-	Progressf                func(format string, args ...any)
-	ScanAuto                 bool
-	ScanEnforce              bool
-	ScanDenyPrefixes         []string
-	ScanOSV                  bool
-	ScanProvider             string
-	ScanOSVEndpoint          string
-	ScanOSVOfflineDBDir      string
-	ScanOSVBatchSize         int
-	ScanOSVOfflineChunkSize  int
-	ScanMinSeverity          string
-	ScanUnknownSeverity      string
-	ScanExceptionsPath       string
-	ScanOSVConcurrency       int
-	ScanBlocklistPath        string
-	ScanReportPath           string
+	Inputs                    []string
+	ProjectConcurrency        int
+	OutBase                   string
+	StateBase                 string
+	Registry                  string
+	TargetRegistry            string
+	TargetInsecureSkipVerify  bool
+	NPMRC                     string
+	TargetNPMRC               string
+	MetadataCacheBase         string
+	MetadataCacheTTL          time.Duration
+	MetadataRetries           int
+	FetchConcurrency          int
+	PushConcurrency           int
+	TargetConcurrency         int
+	MaxRetries                int
+	PublishRetries            int
+	Tag                       string
+	Access                    string
+	SyncTarget                bool
+	OutputNaming              string
+	ResolveOptions            npm.ResolveOptions
+	JSONOut                   bool
+	Tracef                    func(format string, args ...any)
+	Progressf                 func(format string, args ...any)
+	ScanAuto                  bool
+	ScanEnforce               bool
+	ScanDenyPrefixes          []string
+	ScanOSV                   bool
+	ScanProvider              string
+	ScanOSVEndpoint           string
+	ScanOSVOfflineDBDir       string
+	ScanOSVAPIBatchSize       int
+	ScanOSVOfflineChunkSize   int
+	ScanMinSeverity           string
+	ScanUnknownSeverity       string
+	ScanExceptionsPath        string
+	ScanOSVAPIConcurrency     int
+	ScanOSVOfflineConcurrency int
+	ScanBlocklistPath         string
+	ScanReportPath            string
 }
 
 func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
@@ -1324,21 +1330,22 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	}
 	if opts.ScanAuto {
 		scanReport, err := npm.ScanState(ctx, npm.ScanOptions{
-			StatePath:           opts.StateBase,
-			Concurrency:         opts.FetchConcurrency,
-			BlocklistPath:       opts.ScanBlocklistPath,
-			DenyPackagePrefix:   opts.ScanDenyPrefixes,
-			UseOSV:              opts.ScanOSV,
-			OSVProvider:         opts.ScanProvider,
-			OSVEndpoint:         opts.ScanOSVEndpoint,
-			OSVOfflineDBDir:     opts.ScanOSVOfflineDBDir,
-			OSVBatchSize:        opts.ScanOSVBatchSize,
-			OSVOfflineChunkSize: opts.ScanOSVOfflineChunkSize,
-			MinSeverity:         opts.ScanMinSeverity,
-			UnknownSeverity:     opts.ScanUnknownSeverity,
-			ExceptionsPath:      opts.ScanExceptionsPath,
-			OSVConcurrency:      opts.ScanOSVConcurrency,
-			Progress:            pickProgressLogger(false, opts.Tracef, opts.Progressf),
+			StatePath:             opts.StateBase,
+			Concurrency:           opts.FetchConcurrency,
+			BlocklistPath:         opts.ScanBlocklistPath,
+			DenyPackagePrefix:     opts.ScanDenyPrefixes,
+			UseOSV:                opts.ScanOSV,
+			OSVProvider:           opts.ScanProvider,
+			OSVEndpoint:           opts.ScanOSVEndpoint,
+			OSVOfflineDBDir:       opts.ScanOSVOfflineDBDir,
+			OSVAPIBatchSize:       opts.ScanOSVAPIBatchSize,
+			OSVAPIConcurrency:     opts.ScanOSVAPIConcurrency,
+			OSVOfflineChunkSize:   opts.ScanOSVOfflineChunkSize,
+			MinSeverity:           opts.ScanMinSeverity,
+			UnknownSeverity:       opts.ScanUnknownSeverity,
+			ExceptionsPath:        opts.ScanExceptionsPath,
+			OSVOfflineConcurrency: opts.ScanOSVOfflineConcurrency,
+			Progress:              pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		})
 		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
 			err = writeErr

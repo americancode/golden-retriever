@@ -147,7 +147,7 @@ func TestScanStateOSVAPIFallsBackAfterSingleFailure(t *testing.T) {
 		UseOSV:          true,
 		OSVProvider:     "osv-api",
 		OSVEndpoint:     server.URL + "/querybatch",
-		OSVBatchSize:    1,
+		OSVAPIBatchSize: 1,
 		MinSeverity:     "high",
 		UnknownSeverity: "high",
 	})
@@ -248,14 +248,14 @@ func TestScanStateOSVOfflineProviderParallelChunks(t *testing.T) {
 	start := time.Now()
 
 	report, err := ScanState(context.Background(), ScanOptions{
-		StatePath:       statePath,
-		Source:          "target",
-		UseOSV:          true,
-		OSVProvider:     "osv-offline",
-		OSVOfflineChunkSize: 1,
-		OSVConcurrency:  2,
-		MinSeverity:     "high",
-		UnknownSeverity: "high",
+		StatePath:             statePath,
+		Source:                "target",
+		UseOSV:                true,
+		OSVProvider:           "osv-offline",
+		OSVOfflineChunkSize:   1,
+		OSVOfflineConcurrency: 2,
+		MinSeverity:           "high",
+		UnknownSeverity:       "high",
 		Progress: func(format string, args ...any) {
 			progress = append(progress, fmt.Sprintf(format, args...))
 		},
@@ -297,7 +297,7 @@ func writeScanTestStateWithPackages(t testing.TB, packages []StateRecord) string
 	state := &State{
 		SchemaVersion: 1,
 		Target:        target,
-		Local: map[string]StateRecord{},
+		Local:         map[string]StateRecord{},
 	}
 	if err := saveState(statePath, state); err != nil {
 		t.Fatal(err)
