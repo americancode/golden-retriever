@@ -226,18 +226,29 @@ func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint st
 }
 
 func publishDocument(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package) (publishResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return publishSkipped, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	target.applyAuth(req)
-	res, err := target.HTTPClient.Do(req)
+	res, err := doPublishRequest(ctx, target, endpoint, body, "", "")
 	if err != nil {
 		return publishSkipped, err
 	}
 	defer res.Body.Close()
+	if (res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusUnauthorized) && isGitLabRegistryURL(endpoint) {
+		if token := os.Getenv("CI_JOB_TOKEN"); token != "" {
+			_ = res.Body.Close()
+			res, err = doPublishRequest(ctx, target, endpoint, body, "Basic "+base64.StdEncoding.EncodeToString([]byte("gitlab-ci-token:"+token)), "")
+			if err != nil {
+				return publishSkipped, err
+			}
+			defer res.Body.Close()
+			if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusUnauthorized {
+				_ = res.Body.Close()
+				res, err = doPublishRequest(ctx, target, endpoint, body, "", token)
+				if err != nil {
+					return publishSkipped, err
+				}
+				defer res.Body.Close()
+			}
+		}
+	}
 	if res.StatusCode == http.StatusConflict {
 		return publishPresent, nil
 	}
@@ -249,6 +260,34 @@ func publishDocument(ctx context.Context, target *Client, endpoint string, body 
 		})
 	}
 	return publishPushed, nil
+}
+
+func doPublishRequest(ctx context.Context, target *Client, endpoint string, body []byte, authOverride, jobToken string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if authOverride != "" {
+		req.Header.Set("Authorization", authOverride)
+	} else {
+		target.applyAuth(req)
+	}
+	if jobToken != "" {
+		req.Header.Set("JOB-TOKEN", jobToken)
+	}
+	return target.HTTPClient.Do(req)
+}
+
+func isGitLabRegistryURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	path := strings.ToLower(u.Path)
+	return strings.Contains(host, "gitlab") || strings.Contains(path, "/api/v4/projects/") || strings.Contains(path, "/api/v4/groups/")
 }
 
 func manifestFromTarball(tarballData []byte) (publishManifest, error) {

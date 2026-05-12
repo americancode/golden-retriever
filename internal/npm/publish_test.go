@@ -211,6 +211,48 @@ func TestPublishAllSkipsTargetPresent(t *testing.T) {
 	}
 }
 
+func TestPublishAllGitLabCIJobTokenFallbackAuth(t *testing.T) {
+	t.Setenv("CI_JOB_TOKEN", "job-token-123")
+	tgz := testPackageTarball(t, `{"name":"demo","version":"1.0.0"}`)
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "demo-1.0.0.tgz")
+	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		got := r.Header.Get("Authorization")
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("gitlab-ci-token:job-token-123"))
+		if got != want {
+			t.Fatalf("authorization header = %q want %q", got, want)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Registry = srv.URL + "/api/v4/projects/1/packages/npm"
+	cfg.values[nerfDart(cfg.Registry+"/")+":_authToken"] = "stale-or-wrong"
+	state := NewState()
+	state.Local["demo@1.0.0"] = StateRecord{Name: "demo", Version: "1.0.0", Path: tgzPath}
+
+	report, err := PublishAll(context.Background(), NewClientWithConfig(cfg), state, PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Pushed != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if calls < 2 {
+		t.Fatalf("expected retry fallback call, got %d", calls)
+	}
+}
+
 func testPackageTarball(t testing.TB, packageJSON string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
