@@ -1360,8 +1360,16 @@ func resolveInputs(input, inputs string) ([]string, error) {
 		out = append(out, abs)
 		return nil
 	}
-	if err := add(input); err != nil {
-		return nil, err
+	hasInputsList := strings.TrimSpace(inputs) != ""
+	trimmedInput := strings.TrimSpace(input)
+	includePrimaryInput := true
+	if hasInputsList && (trimmedInput == "" || (trimmedInput == "package.json" && !fileExists(trimmedInput))) {
+		includePrimaryInput = false
+	}
+	if includePrimaryInput {
+		if err := add(input); err != nil {
+			return nil, err
+		}
 	}
 	for _, part := range strings.Split(inputs, ",") {
 		if err := add(part); err != nil {
@@ -1370,6 +1378,11 @@ func resolveInputs(input, inputs string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func projectSlug(input string) string {

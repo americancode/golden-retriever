@@ -906,3 +906,29 @@ func TestLoadLockfileFailsMalformedJSON(t *testing.T) {
 		t.Fatalf("got %v, want json.SyntaxError", err)
 	}
 }
+
+func TestLoadInputTreatsCustomNamedLockfileAsLockfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "myapp.lock-file.json")
+	if err := os.WriteFile(path, []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name":"root","version":"1.0.0"},
+    "node_modules/left-pad": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), path, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("LoadInput(custom lock filename): %v", err)
+	}
+	if !graph.Has("left-pad@1.3.0") {
+		t.Fatalf("expected lockfile package to load from custom filename: %#v", graph.Packages())
+	}
+}

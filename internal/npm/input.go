@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -122,34 +123,31 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph,
 	if _, err := exec.LookPath("npm"); err != nil {
 		return nil, fmt.Errorf("npm is required to resolve package.json via lockfile generation: %w", err)
 	}
-	tempDir, err := os.MkdirTemp("", "golden-retriever-npm-lock-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tempDir)
-
 	srcData, err := os.ReadFile(packageJSONPath)
 	if err != nil {
 		return nil, err
 	}
 	projectDir := filepath.Dir(packageJSONPath)
-	tempPackageJSON := filepath.Join(tempDir, "package.json")
-	if err := os.WriteFile(tempPackageJSON, srcData, 0o644); err != nil {
-		return nil, err
-	}
 	resolvedPackageJSON := packageJSONPath
+	lockPath := filepath.Join(projectDir, "package-lock.json")
 	if filepath.Base(packageJSONPath) != "package.json" {
-		// npm expects package.json in cwd; for custom input filenames, run in a
-		// temp dir while preserving project-relative local dependency paths.
-		rel, relErr := filepath.Rel(tempDir, projectDir)
-		if relErr != nil {
-			return nil, relErr
+		tempProjectDir, err := cloneProjectDirForResolution(projectDir)
+		if err != nil {
+			return nil, err
 		}
-		if err := os.WriteFile(filepath.Join(tempDir, ".npmrc"), []byte("workspaces=false\n"), 0o644); err != nil {
+		defer os.RemoveAll(tempProjectDir)
+		tempPackageJSON := filepath.Join(tempProjectDir, "package.json")
+		if err := os.WriteFile(tempPackageJSON, srcData, 0o644); err != nil {
 			return nil, err
 		}
 		resolvedPackageJSON = tempPackageJSON
-		_ = rel
+		lockPath = filepath.Join(tempProjectDir, "package-lock.json")
+	}
+
+	origLockData, lockReadErr := os.ReadFile(lockPath)
+	origLockExists := lockReadErr == nil
+	if lockReadErr != nil && !os.IsNotExist(lockReadErr) {
+		return nil, lockReadErr
 	}
 	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
 	cmd.Dir = filepath.Dir(resolvedPackageJSON)
@@ -157,7 +155,65 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph,
 	if err != nil {
 		return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return LoadLockfile(filepath.Join(cmd.Dir, "package-lock.json"))
+	g, loadErr := LoadLockfile(lockPath)
+	if filepath.Base(packageJSONPath) == "package.json" && origLockExists {
+		_ = os.WriteFile(lockPath, origLockData, 0o644)
+	} else if filepath.Base(packageJSONPath) == "package.json" {
+		_ = os.Remove(lockPath)
+	}
+	return g, loadErr
+}
+
+func cloneProjectDirForResolution(srcDir string) (string, error) {
+	dstDir, err := os.MkdirTemp("", "golden-retriever-project-*")
+	if err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(srcDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git") {
+			return filepath.SkipDir
+		}
+		dstPath := filepath.Join(dstDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dstPath, 0o755)
+		}
+		return copyFile(path, dstPath)
+	})
+	if err != nil {
+		_ = os.RemoveAll(dstDir)
+		return "", err
+	}
+	return dstDir, nil
+}
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func isLockfilePath(path string) bool {
