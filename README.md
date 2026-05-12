@@ -88,6 +88,7 @@ Example blocklist file:
 - OSV API detail concurrency: `--scan-osv-api-concurrency 8`
 - offline `osv-scanner` chunk size: `--scan-osv-offline-chunk-size 100`
 - offline `osv-scanner` worker concurrency: `--scan-osv-offline-concurrency 8`
+- offline failed-chunk recovery: `--scan-osv-offline-retry-failed-chunks=true`
 - fail threshold: `--scan-min-severity high`
 - fallback when severity missing: `--scan-unknown-severity high`
 - exceptions file: `--scan-exceptions .gr/scan-exceptions.json`
@@ -152,6 +153,7 @@ go run ./cmd/golden-retriever scan \
   --osv-offline-db /var/lib/osv-scanner/db \
   --osv-offline-chunk-size 100 \
   --osv-offline-concurrency 8 \
+  --osv-offline-retry-failed-chunks=true \
   --report .gr/scan-report.json
 ```
 
@@ -217,6 +219,7 @@ go run ./cmd/golden-retriever mirror \
 - `GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY`: OSV API detail lookup concurrency
 - `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE`: offline `osv-scanner` chunk size
 - `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY`: offline `osv-scanner` worker concurrency
+- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_RETRY_FAILED_CHUNKS`: split failed offline chunks and retry smaller batches (`true` by default)
 - `GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY`: `low|medium|high|critical`
 - `GOLDEN_RETRIEVER_SCAN_EXCEPTIONS`: exceptions file path
 - `GOLDEN_RETRIEVER_SCAN_BLOCKLIST`: blocklist file path
@@ -326,13 +329,3 @@ For npm `overrides`, this tool currently supports registry-like replacement spec
 - git/hosted git specs (`github:`, `git+ssh:`, `git@...`, etc.)
 
 This keeps override behavior deterministic for registry mirroring. Support for those override classes can be added later as an explicit compatibility expansion.
-
-
-
-
-
-progress osv:scanner:parallel-done chunks=53 completed=53
-progress osv:scanner:done mode=offline provider=osv-scanner
-error: osv-scanner failed: signal: killed: Scanned /tmp/golden-retriever-osv-3015023763/osv-scanner.json file as a osv-scanner and found 100 packages
-Loaded npm local db from /var/lib/osv-scanner/db/osv-scanner/npm/all.zip
-scan source=target total=5248 passed=5160 failed=88 errors=0 elapsed=21m37.358617374s state=.gr/state.json report=.gr/scan-report.json

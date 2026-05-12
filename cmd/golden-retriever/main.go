@@ -163,6 +163,7 @@ func mirror(args []string) error {
 	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	scanOSVAPIBatchSize := fs.Int("scan-osv-api-batch-size", 200, "OSV API query batch size")
 	scanOSVOfflineChunkSize := fs.Int("scan-osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
+	scanOSVOfflineRetryFailed := fs.Bool("scan-osv-offline-retry-failed-chunks", true, "split and retry failed offline osv-scanner chunks with smaller package batches")
 	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
@@ -251,6 +252,7 @@ func mirror(args []string) error {
 			ScanOSVOfflineDBDir:       *scanOSVOfflineDBDir,
 			ScanOSVAPIBatchSize:       *scanOSVAPIBatchSize,
 			ScanOSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
+			ScanOSVOfflineRetryFailed: *scanOSVOfflineRetryFailed,
 			ScanBlocklistPath:         *scanBlocklist,
 			ScanReportPath:            *scanReportPath,
 			ScanMinSeverity:           *scanMinSeverity,
@@ -359,6 +361,7 @@ func mirror(args []string) error {
 			OSVAPIBatchSize:       *scanOSVAPIBatchSize,
 			OSVAPIConcurrency:     *scanOSVAPIConcurrency,
 			OSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
+			OSVOfflineRetryFailed: *scanOSVOfflineRetryFailed,
 			MinSeverity:           *scanMinSeverity,
 			UnknownSeverity:       *scanUnknownSeverity,
 			ExceptionsPath:        *scanExceptions,
@@ -733,6 +736,7 @@ func scan(args []string) error {
 	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	osvAPIBatchSize := fs.Int("osv-api-batch-size", 200, "OSV API query batch size")
 	osvOfflineChunkSize := fs.Int("osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
+	osvOfflineRetryFailed := fs.Bool("osv-offline-retry-failed-chunks", true, "split and retry failed offline osv-scanner chunks with smaller package batches")
 	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	exceptions := fs.String("exceptions", "", "path to scan exceptions JSON file")
@@ -759,6 +763,7 @@ func scan(args []string) error {
 		OSVAPIBatchSize:       *osvAPIBatchSize,
 		OSVAPIConcurrency:     *osvAPIConcurrency,
 		OSVOfflineChunkSize:   *osvOfflineChunkSize,
+		OSVOfflineRetryFailed: *osvOfflineRetryFailed,
 		MinSeverity:           *minSeverity,
 		UnknownSeverity:       *unknownSeverity,
 		ExceptionsPath:        *exceptions,
@@ -1268,6 +1273,7 @@ type mirrorManyOptions struct {
 	ScanOSVOfflineDBDir       string
 	ScanOSVAPIBatchSize       int
 	ScanOSVOfflineChunkSize   int
+	ScanOSVOfflineRetryFailed bool
 	ScanMinSeverity           string
 	ScanUnknownSeverity       string
 	ScanExceptionsPath        string
@@ -1345,6 +1351,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			OSVAPIBatchSize:       opts.ScanOSVAPIBatchSize,
 			OSVAPIConcurrency:     opts.ScanOSVAPIConcurrency,
 			OSVOfflineChunkSize:   opts.ScanOSVOfflineChunkSize,
+			OSVOfflineRetryFailed: opts.ScanOSVOfflineRetryFailed,
 			MinSeverity:           opts.ScanMinSeverity,
 			UnknownSeverity:       opts.ScanUnknownSeverity,
 			ExceptionsPath:        opts.ScanExceptionsPath,

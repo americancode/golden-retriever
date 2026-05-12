@@ -33,6 +33,7 @@ type ScanOptions struct {
 	OSVAPIConcurrency     int
 	OSVOfflineChunkSize   int
 	OSVOfflineConcurrency int
+	OSVOfflineRetryFailed bool
 	MinSeverity           string
 	UnknownSeverity       string
 	ExceptionsPath        string
@@ -642,16 +643,7 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 				if opts.Progress != nil {
 					opts.Progress("osv:scanner:chunk:start chunk=%s packages=%d", chunkLabel, len(chunk))
 				}
-				lockfile, err := buildOSVScannerLockfileForRecords(chunk)
-				if err == nil {
-					var parsed osvScannerOutput
-					parsed, err = runOSVScanner(ctx, opts, lockfile, true, chunkLabel)
-					if err == nil {
-						outputs := []osvScannerOutput{parsed}
-						results <- chunkResult{index: idx, outputs: outputs}
-						continue
-					}
-				}
+				outputs, err := runOSVScannerChunk(ctx, opts, chunk, chunkLabel)
 				if err != nil {
 					err = osvScannerChunkError{
 						Label:    chunkLabel,
@@ -661,7 +653,7 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 						Err:      err,
 					}
 				}
-				results <- chunkResult{index: idx, err: err}
+				results <- chunkResult{index: idx, outputs: outputs, err: err}
 			}
 		}()
 	}
@@ -704,6 +696,44 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 		}
 	}
 	return firstErr
+}
+
+func runOSVScannerChunk(ctx context.Context, opts ScanOptions, chunk []osvScannerRecord, chunkLabel string) ([]osvScannerOutput, error) {
+	lockfile, err := buildOSVScannerLockfileForRecords(chunk)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := runOSVScanner(ctx, opts, lockfile, true, chunkLabel)
+	if err == nil {
+		return []osvScannerOutput{parsed}, nil
+	}
+	if !opts.OSVOfflineRetryFailed || len(chunk) <= 1 {
+		return nil, err
+	}
+	nextSize := len(chunk) / 2
+	if nextSize < 1 {
+		nextSize = 1
+	}
+	if opts.Progress != nil {
+		opts.Progress("osv:scanner:chunk:retry chunk=%s packages=%d next_chunk_size=%d error=%v", chunkLabel, len(chunk), nextSize, err)
+	}
+	subchunks := chunkOSVScannerRecords(chunk, nextSize)
+	outputs := make([]osvScannerOutput, 0, len(subchunks))
+	for i, subchunk := range subchunks {
+		subLabel := fmt.Sprintf("%s.%d/%d", chunkLabel, i+1, len(subchunks))
+		if opts.Progress != nil {
+			opts.Progress("osv:scanner:chunk:start chunk=%s packages=%d", subLabel, len(subchunk))
+		}
+		subOutputs, subErr := runOSVScannerChunk(ctx, opts, subchunk, subLabel)
+		if subErr != nil {
+			return nil, subErr
+		}
+		outputs = append(outputs, subOutputs...)
+		if opts.Progress != nil {
+			opts.Progress("osv:scanner:chunk:done chunk=%s completed=%d/%d", subLabel, i+1, len(subchunks))
+		}
+	}
+	return outputs, nil
 }
 
 func runOSVScanner(ctx context.Context, opts ScanOptions, lockfile osvScannerCustomLockfile, offline bool, chunkLabel string) (osvScannerOutput, error) {

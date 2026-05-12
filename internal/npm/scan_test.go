@@ -59,7 +59,7 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := ScanState(context.Background(), ScanOptions{
+	report, err := ScanState(context.Background(), ScanOptions{
 		StatePath:       statePath,
 		Source:          "target",
 		UseOSV:          true,
@@ -291,7 +291,7 @@ func TestScanStateOSVOfflineProviderParallelChunksFailureDiagnostics(t *testing.
 	installFakeOSVScannerFailAbovePackages(t, 1, `{"results":[]}`)
 	var progress []string
 
-	report, err := ScanState(context.Background(), ScanOptions{
+	_, err := ScanState(context.Background(), ScanOptions{
 		StatePath:             statePath,
 		Source:                "target",
 		UseOSV:                true,
@@ -318,6 +318,44 @@ func TestScanStateOSVOfflineProviderParallelChunksFailureDiagnostics(t *testing.
 	}
 	if containsPrefix(progress, "osv:scanner:done mode=offline provider=osv-scanner") {
 		t.Fatalf("progress logs = %v, did not want done log after chunk failure", progress)
+	}
+}
+
+func TestScanStateOSVOfflineProviderParallelChunksRetryFailed(t *testing.T) {
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "pkg-a", Version: "1.0.0"},
+		{Name: "pkg-b", Version: "1.0.0"},
+		{Name: "pkg-c", Version: "1.0.0"},
+		{Name: "pkg-d", Version: "1.0.0"},
+	})
+	installFakeOSVScannerFailAbovePackages(t, 1, `{"results":[]}`)
+	var progress []string
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:             statePath,
+		Source:                "target",
+		UseOSV:                true,
+		OSVProvider:           "osv-offline",
+		OSVOfflineChunkSize:   2,
+		OSVOfflineConcurrency: 2,
+		OSVOfflineRetryFailed: true,
+		MinSeverity:           "high",
+		UnknownSeverity:       "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Total != 4 || report.Passed != 4 || report.Failed != 0 || report.Errors != 0 {
+		t.Fatalf("report = %+v, want total=4 passed=4 failed=0 errors=0", report)
+	}
+	if !containsPrefix(progress, "osv:scanner:chunk:retry chunk=") {
+		t.Fatalf("progress logs = %v, want retry log", progress)
+	}
+	if !containsPrefix(progress, "osv:scanner:parallel-done ") {
+		t.Fatalf("progress logs = %v, want parallel done log", progress)
 	}
 }
 
