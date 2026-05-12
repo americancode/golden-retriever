@@ -1,11 +1,20 @@
-ARG GO_VERSION=1.24
+ARG GO_VERSION=1.25
+ARG NODE_VERSION=22
 ARG ALPINE_VERSION=3.22
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}
 
-RUN apk add --no-cache nodejs npm ca-certificates git \
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+WORKDIR /src
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/golden-retriever ./cmd/golden-retriever
+
+FROM alpine:${ALPINE_VERSION}
+RUN apk upgrade --no-cache \
+  && apk add --no-cache nodejs npm ca-certificates \
   && npm install -g npm@latest \
+  && npm cache clean --force \
   && npm --version \
-  && node --version \
-  && go version
-
+  && node --version
+COPY --from=builder /out/golden-retriever /usr/local/bin/golden-retriever
 WORKDIR /workspace

@@ -6,7 +6,7 @@ variables:
   GOLDEN_RETRIEVER_STATE: ".gr/state.json"
   GOLDEN_RETRIEVER_METADATA_CACHE: ".gr/metadata"
   GOLDEN_RETRIEVER_TARBALLS: ".gr/tgzs"
-  GOLDEN_RETRIEVER_CI_IMAGE: "$CI_REGISTRY_IMAGE/golden-retriever-ci:go1.24-alpine3.22-node"
+  GOLDEN_RETRIEVER_CI_IMAGE: "$CI_REGISTRY_IMAGE/golden-retriever-ci:go1.25-alpine3.22-node"
   GOLDEN_RETRIEVER_INPUT: "package.json"
   GOLDEN_RETRIEVER_INPUTS: ""
   GOLDEN_RETRIEVER_INPUT_DIRS: "package-jsons,package-locks"
@@ -42,7 +42,7 @@ mirror:npm:
   before_script:
     - node --version
     - npm --version
-    - go version
+    - golden-retriever --help >/dev/null
   script:
     - |
       export http_proxy="${HTTP_PROXY}"
@@ -69,7 +69,7 @@ mirror:npm:
         GOLDEN_RETRIEVER_INPUTS="$DISCOVERED_INPUTS"
       fi
       echo "golden-retriever inputs: ${GOLDEN_RETRIEVER_INPUTS:-$GOLDEN_RETRIEVER_INPUT}"
-      go run ./cmd/golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-osv="$GOLDEN_RETRIEVER_SCAN_OSV" --scan-osv-batch-size="$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --scan-osv-concurrency="$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --scan-min-severity="$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity="$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions="$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist="$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-deny-scripts="$GOLDEN_RETRIEVER_SCAN_DENY_SCRIPTS" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
+      golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-osv="$GOLDEN_RETRIEVER_SCAN_OSV" --scan-osv-batch-size="$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --scan-osv-concurrency="$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --scan-min-severity="$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity="$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions="$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist="$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-deny-scripts="$GOLDEN_RETRIEVER_SCAN_DENY_SCRIPTS" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
   artifacts:
     when: always
     paths:
@@ -86,9 +86,9 @@ state:rebuild:
   before_script:
     - node --version
     - npm --version
-    - go version
+    - golden-retriever --help >/dev/null
   script:
-    - go run ./cmd/golden-retriever state sync-target --input "$GOLDEN_RETRIEVER_INPUT" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --target-registry "$NPM_TARGET_REGISTRY"
+    - golden-retriever state sync-target --input "$GOLDEN_RETRIEVER_INPUT" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --target-registry "$NPM_TARGET_REGISTRY"
 
 rescan:target:
   stage: maintenance
@@ -101,10 +101,10 @@ rescan:target:
   before_script:
     - node --version
     - npm --version
-    - go version
+    - golden-retriever --help >/dev/null
   script:
-    - go run ./cmd/golden-retriever state sync-target --input "$GOLDEN_RETRIEVER_INPUT" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --target-registry "$NPM_TARGET_REGISTRY"
-    - go run ./cmd/golden-retriever scan --state "$GOLDEN_RETRIEVER_STATE" --source target --osv="$GOLDEN_RETRIEVER_SCAN_OSV" --osv-batch-size "$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --osv-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --report "$GOLDEN_RETRIEVER_SCAN_REPORT"
+    - golden-retriever state sync-target --input "$GOLDEN_RETRIEVER_INPUT" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --target-registry "$NPM_TARGET_REGISTRY"
+    - golden-retriever scan --state "$GOLDEN_RETRIEVER_STATE" --source target --osv="$GOLDEN_RETRIEVER_SCAN_OSV" --osv-batch-size "$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --osv-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --report "$GOLDEN_RETRIEVER_SCAN_REPORT"
   artifacts:
     when: always
     paths:
