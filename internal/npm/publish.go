@@ -60,9 +60,6 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	if opts.Tag == "" {
 		opts.Tag = "latest"
 	}
-	if opts.Access == "" {
-		opts.Access = "public"
-	}
 	if opts.MaxRetries < 0 {
 		opts.MaxRetries = 0
 	}
@@ -341,9 +338,6 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 	shasum := hex.EncodeToString(sha1Sum[:])
 	tarballName := manifest.Name + "-" + manifest.Version + ".tgz"
 	tarballURL := strings.TrimRight(registry, "/") + "/" + manifest.Name + "/-/" + tarballName
-	if strings.HasPrefix(tarballURL, "https://") {
-		tarballURL = "http://" + strings.TrimPrefix(tarballURL, "https://")
-	}
 
 	versionManifest := map[string]any{}
 	for key, value := range manifest.Raw {
@@ -371,7 +365,6 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 		"versions": map[string]any{
 			manifest.Version: versionManifest,
 		},
-		"access": opts.Access,
 		"_attachments": map[string]any{
 			tarballName: map[string]any{
 				"content_type": "application/octet-stream",
@@ -379,6 +372,9 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 				"length":       len(tarballData),
 			},
 		},
+	}
+	if opts.Access != "" {
+		doc["access"] = opts.Access
 	}
 	pkg := Package{
 		Name:      manifest.Name,

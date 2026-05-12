@@ -62,6 +62,9 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	if body["_id"] != "demo" {
 		t.Fatalf("body _id = %#v", body["_id"])
 	}
+	if _, ok := body["access"]; ok {
+		t.Fatalf("access should be omitted when unset: %#v", body["access"])
+	}
 	attachments := body["_attachments"].(map[string]any)
 	attachment := attachments["demo-1.0.0.tgz"].(map[string]any)
 	if attachment["data"] == "" {
@@ -72,6 +75,28 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	}
 	if state.Target["demo@1.0.0"].Source != "test-registry" {
 		t.Fatalf("target not marked: %#v", state.Target)
+	}
+}
+
+func TestBuildPublishDocumentKeepsHTTPSDistTarball(t *testing.T) {
+	manifest := publishManifest{
+		Name:    "demo",
+		Version: "1.0.0",
+		Raw: map[string]any{
+			"name":    "demo",
+			"version": "1.0.0",
+		},
+	}
+	doc, _, err := buildPublishDocument("https://registry.example.test", manifest, testPackageTarball(t, `{"name":"demo","version":"1.0.0"}`), PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := doc["versions"].(map[string]any)
+	v := versions["1.0.0"].(map[string]any)
+	dist := v["dist"].(map[string]any)
+	tarball := dist["tarball"].(string)
+	if tarball != "https://registry.example.test/demo/-/demo-1.0.0.tgz" {
+		t.Fatalf("unexpected tarball url: %s", tarball)
 	}
 }
 
