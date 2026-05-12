@@ -88,17 +88,16 @@ jobs:
             type=semver,pattern={{version}}
             type=sha
 
-      - name: Build and push Docker image
-        id: build-and-push
+      - name: Build Docker image (local for scan)
+        id: build-local
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.ci
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false
           load: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan
-            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -121,6 +120,19 @@ jobs:
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
+
+      - name: Build and push Docker image
+        id: build-and-push
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ci
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Sign the published Docker image
         if: ${{ github.event_name != 'pull_request' }}
