@@ -84,19 +84,20 @@ Example blocklist file:
 
 - enable/disable OSV lookup: `--scan-osv=true|false`
 - provider selection: `--scan-provider osv-api|osv-offline`
-- batch size: `--scan-osv-batch-size 200`
+- OSV API batch size: `--scan-osv-batch-size 200`
+- offline `osv-scanner` chunk size: `--scan-osv-offline-chunk-size 100`
 - parallel vulnerability detail lookups: `--scan-osv-concurrency 8`
 - fail threshold: `--scan-min-severity high`
 - fallback when severity missing: `--scan-unknown-severity high`
 - exceptions file: `--scan-exceptions .gr/scan-exceptions.json`
-- offline DB cache dir: `--scan-osv-offline-db .gr/osv-db`
+- offline DB path: `--scan-osv-offline-db /var/lib/osv-scanner/db`
 
 Provider behavior:
 
 - `osv-api` (default): use direct OSV API queries first; if that fails, automatically fall back to local `osv-scanner` offline vulnerability matching.
 - `osv-offline`: skip direct API calls and use local `osv-scanner` offline vulnerability matching only.
 
-`osv-scanner` offline mode uses a local database cache. `golden-retriever` passes `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` through to the tool when set. The CI example uses `.gr/osv-db` and caches it.
+`osv-scanner` offline mode uses a local vulnerability database. `golden-retriever` passes `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` through to the tool when set.
 
 The CI image also includes a prewarmed offline OSV database at `/var/lib/osv-scanner/db` and sets:
 
@@ -145,7 +146,7 @@ go run ./cmd/golden-retriever scan \
   --source local \
   --osv=true \
   --provider osv-api \
-  --osv-offline-db .gr/osv-db \
+  --osv-offline-db /var/lib/osv-scanner/db \
   --report .gr/scan-report.json
 ```
 
@@ -205,7 +206,10 @@ go run ./cmd/golden-retriever mirror \
 - `GOLDEN_RETRIEVER_SCAN_ENFORCE`: `false` (audit) or `true` (block)
 - `GOLDEN_RETRIEVER_SCAN_OSV`: `true|false`
 - `GOLDEN_RETRIEVER_SCAN_PROVIDER`: `osv-api|osv-offline`
-- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`: local OSV scanner DB cache path
+- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`: local OSV scanner DB path
+- `GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE`: OSV API batch size
+- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE`: offline `osv-scanner` chunk size
+- `GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY`: vulnerability scan parallelism
 - `GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY`: `low|medium|high|critical`
 - `GOLDEN_RETRIEVER_SCAN_EXCEPTIONS`: exceptions file path
 - `GOLDEN_RETRIEVER_SCAN_BLOCKLIST`: blocklist file path
@@ -244,14 +248,14 @@ Use `rescan:target` job (manual or scheduled) to catch newly disclosed CVEs in t
 2. `scan --source target` checks CVEs using OSV
 3. uploads `.gr/scan-report.json` and `.gr/state.json` artifacts
 
-If outbound OSV API access is blocked, keep `GOLDEN_RETRIEVER_SCAN_PROVIDER=osv-api` and populate the cached offline DB at `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`; scan will fall back automatically.
+If outbound OSV API access is blocked, keep `GOLDEN_RETRIEVER_SCAN_PROVIDER=osv-api` and ensure the offline DB at `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB` exists; scan will fall back automatically. If you explicitly set `osv-offline`, no OSV API calls are attempted.
 
 ## State and Cache Strategy
 
 - `state.target`: what target registry already has; drives fetch/push skipping
 - `state.local`: local tarball records and scan metadata
 - `.gr/metadata`: packument metadata cache for fast resolution
-- `.gr/osv-db`: cached `osv-scanner` offline vulnerability database
+- `/var/lib/osv-scanner/db`: baked-in `osv-scanner` offline vulnerability database in the CI image
 
 Recommended:
 
