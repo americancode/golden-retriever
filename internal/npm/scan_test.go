@@ -196,6 +196,46 @@ func TestScanStateOSVOfflineProviderHeartbeat(t *testing.T) {
 	}
 }
 
+func TestScanStateSkipsOSVWhenNoPackagesSelected(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	state := &State{
+		SchemaVersion: 1,
+		Target:        map[string]StateRecord{},
+		Local:         map[string]StateRecord{},
+	}
+	if err := saveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+
+	var progress []string
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:       statePath,
+		Source:          "target",
+		UseOSV:          true,
+		OSVProvider:     "osv-offline",
+		MinSeverity:     "high",
+		UnknownSeverity: "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Total != 0 || report.Passed != 0 || report.Failed != 0 || report.Errors != 0 {
+		t.Fatalf("report = %+v, want zero counts", report)
+	}
+	if !slices.Contains(progress, "scan:skip reason=no-packages source=target") {
+		t.Fatalf("progress logs = %v, want skip line", progress)
+	}
+	for _, line := range progress {
+		if strings.Contains(line, "osv:scanner:") || strings.Contains(line, "osv:batch:") {
+			t.Fatalf("progress logs = %v, did not expect OSV activity", progress)
+		}
+	}
+}
+
 func writeScanTestState(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
