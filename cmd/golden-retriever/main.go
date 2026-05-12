@@ -740,9 +740,12 @@ func scan(args []string) error {
 	osvOfflineConcurrency := fs.Int("osv-offline-concurrency", max(4, runtime.NumCPU()/2), "parallel offline osv-scanner worker count")
 	reportPath := fs.String("report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
+	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	tracef := newTraceLogger(*trace)
+	progressf := newProgressLogger(!*trace && !*jsonOut)
 	report, err := npm.ScanState(context.Background(), npm.ScanOptions{
 		StatePath:             *statePath,
 		Concurrency:           *concurrency,
@@ -760,6 +763,7 @@ func scan(args []string) error {
 		UnknownSeverity:       *unknownSeverity,
 		ExceptionsPath:        *exceptions,
 		OSVOfflineConcurrency: *osvOfflineConcurrency,
+		Progress:              pickProgressLogger(*trace, tracef, progressf),
 	})
 	if writeErr := writeScanReport(*reportPath, *statePath, report); writeErr != nil && err == nil {
 		err = writeErr

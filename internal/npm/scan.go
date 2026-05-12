@@ -696,10 +696,11 @@ func runOSVScanner(ctx context.Context, opts ScanOptions, lockfile osvScannerCus
 		if offline {
 			mode = "offline"
 		}
+		packageCount := countOSVScannerPackages(lockfile)
 		if chunkLabel == "" {
-			opts.Progress("osv:scanner:start mode=%s provider=osv-scanner packages=%d", mode, countOSVScannerPackages(lockfile))
+			opts.Progress("osv:scanner:start mode=%s provider=osv-scanner packages=%d", mode, packageCount)
 		} else {
-			opts.Progress("osv:scanner:start mode=%s provider=osv-scanner chunk=%s packages=%d", mode, chunkLabel, countOSVScannerPackages(lockfile))
+			opts.Progress("osv:scanner:start mode=%s provider=osv-scanner chunk=%s packages=%d", mode, chunkLabel, packageCount)
 		}
 	}
 	cmd := exec.CommandContext(ctx, "osv-scanner", args...)
@@ -712,7 +713,7 @@ func runOSVScanner(ctx context.Context, opts ScanOptions, lockfile osvScannerCus
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	runErr := runOSVScannerCommand(ctx, cmd, opts, offline)
+	runErr := runOSVScannerCommand(ctx, cmd, opts, offline, chunkLabel, countOSVScannerPackages(lockfile))
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) || (exitErr.ExitCode() != 1 && exitErr.ExitCode() != 0) {
@@ -774,7 +775,7 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 	}
 }
 
-func runOSVScannerCommand(ctx context.Context, cmd *exec.Cmd, opts ScanOptions, offline bool) error {
+func runOSVScannerCommand(ctx context.Context, cmd *exec.Cmd, opts ScanOptions, offline bool, chunkLabel string, packageCount int) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -797,7 +798,11 @@ func runOSVScannerCommand(ctx context.Context, cmd *exec.Cmd, opts ScanOptions, 
 		case err := <-done:
 			return err
 		case <-ticker.C:
-			opts.Progress("osv:scanner:running mode=%s elapsed=%s", mode, time.Since(start).Round(time.Second))
+			if chunkLabel == "" {
+				opts.Progress("osv:scanner:progress mode=%s elapsed=%s packages=%d", mode, time.Since(start).Round(time.Second), packageCount)
+			} else {
+				opts.Progress("osv:scanner:progress mode=%s chunk=%s elapsed=%s packages=%d", mode, chunkLabel, time.Since(start).Round(time.Second), packageCount)
+			}
 		case <-ctx.Done():
 			<-done
 			return ctx.Err()

@@ -186,7 +186,7 @@ func TestScanStateOSVOfflineProviderHeartbeat(t *testing.T) {
 	}
 	found := false
 	for _, line := range progress {
-		if strings.HasPrefix(line, "osv:scanner:running mode=offline elapsed=") {
+		if strings.HasPrefix(line, "osv:scanner:progress mode=offline elapsed=") && strings.Contains(line, "packages=1") {
 			found = true
 			break
 		}

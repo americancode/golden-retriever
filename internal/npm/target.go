@@ -121,7 +121,7 @@ func RebuildTargetFromRegistry(ctx context.Context, target *Client, state *State
 	}
 	normalizeState(state)
 	if opts.Progress != nil {
-		opts.Progress("target-sync:start total=unknown concurrency=1 source=%s", opts.Source)
+		opts.Progress("target-rebuild:start total=unknown source=%s", opts.Source)
 	}
 	packages, err := listRegistryPackages(ctx, target, opts)
 	if err != nil {
@@ -140,7 +140,7 @@ func RebuildTargetFromRegistry(ctx context.Context, target *Client, state *State
 			Source:    opts.Source,
 		}
 		if opts.Progress != nil && (i+1)%25 == 0 {
-			opts.Progress("target-sync:progress processed=%d/%d present=%d missing=0 failed=0", i+1, len(packages), len(rebuilt))
+			opts.Progress("target-rebuild:progress processed=%d/%d present=%d failed=0", i+1, len(packages), len(rebuilt))
 		}
 	}
 	state.Target = rebuilt
@@ -150,7 +150,7 @@ func RebuildTargetFromRegistry(ctx context.Context, target *Client, state *State
 		Elapsed: time.Since(start),
 	}
 	if opts.Progress != nil {
-		opts.Progress("target-sync:done total=%d present=%d missing=0 failed=0 elapsed=%s", report.Present, report.Present, report.Elapsed)
+		opts.Progress("target-rebuild:done total=%d present=%d failed=0 elapsed=%s", report.Present, report.Present, report.Elapsed)
 	}
 	return report, nil
 }
@@ -242,7 +242,7 @@ func listRegistryPackages(ctx context.Context, target *Client, opts SyncTargetOp
 			return nil, err
 		}
 		if opts.Progress != nil {
-			opts.Progress("target-sync:discover page=%d count=%d", page, len(pagePackages))
+			opts.Progress("target-rebuild:discover page=%d count=%d", page, len(pagePackages))
 		}
 		for _, pkg := range pagePackages {
 			if pkg.PackageType != "" && pkg.PackageType != "npm" {
