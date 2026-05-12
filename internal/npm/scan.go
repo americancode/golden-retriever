@@ -548,6 +548,22 @@ type osvScannerRecord struct {
 	Version string
 }
 
+type osvScannerChunkError struct {
+	Label    string
+	Packages int
+	First    string
+	Last     string
+	Err      error
+}
+
+func (e osvScannerChunkError) Error() string {
+	return fmt.Sprintf("chunk=%s packages=%d first=%s last=%s: %v", e.Label, e.Packages, e.First, e.Last, e.Err)
+}
+
+func (e osvScannerChunkError) Unwrap() error {
+	return e.Err
+}
+
 func applyOSVScannerFindings(ctx context.Context, state *State, opts ScanOptions, keys []string, offline bool) error {
 	if _, err := exec.LookPath("osv-scanner"); err != nil {
 		return fmt.Errorf("osv-scanner not available: %w", err)
@@ -605,9 +621,9 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 		opts.Progress("osv:scanner:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.OSVOfflineChunkSize, opts.OSVOfflineConcurrency, len(records))
 	}
 	type chunkResult struct {
-		index  int
-		parsed osvScannerOutput
-		err    error
+		index   int
+		outputs []osvScannerOutput
+		err     error
 	}
 	jobs := make(chan int)
 	results := make(chan chunkResult, len(chunks))
@@ -623,16 +639,29 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 			for idx := range jobs {
 				chunk := chunks[idx]
 				chunkLabel := fmt.Sprintf("%d/%d", idx+1, len(chunks))
-				lockfile, err := buildOSVScannerLockfileForRecords(chunk)
-				if err != nil {
-					results <- chunkResult{index: idx, err: err}
-					continue
-				}
 				if opts.Progress != nil {
 					opts.Progress("osv:scanner:chunk:start chunk=%s packages=%d", chunkLabel, len(chunk))
 				}
-				parsed, err := runOSVScanner(ctx, opts, lockfile, true, chunkLabel)
-				results <- chunkResult{index: idx, parsed: parsed, err: err}
+				lockfile, err := buildOSVScannerLockfileForRecords(chunk)
+				if err == nil {
+					var parsed osvScannerOutput
+					parsed, err = runOSVScanner(ctx, opts, lockfile, true, chunkLabel)
+					if err == nil {
+						outputs := []osvScannerOutput{parsed}
+						results <- chunkResult{index: idx, outputs: outputs}
+						continue
+					}
+				}
+				if err != nil {
+					err = osvScannerChunkError{
+						Label:    chunkLabel,
+						Packages: len(chunk),
+						First:    packageLabel(firstOSVScannerRecord(chunk)),
+						Last:     packageLabel(lastOSVScannerRecord(chunk)),
+						Err:      err,
+					}
+				}
+				results <- chunkResult{index: idx, err: err}
 			}
 		}()
 	}
@@ -658,15 +687,21 @@ func applyOSVScannerFindingsParallel(ctx context.Context, state *State, opts Sca
 			}
 			continue
 		}
-		applyOSVScannerOutput(state, opts, result.parsed, minLevel, unknownLevel, exceptions)
+		for _, output := range result.outputs {
+			applyOSVScannerOutput(state, opts, output, minLevel, unknownLevel, exceptions)
+		}
 		if opts.Progress != nil {
 			opts.Progress("osv:scanner:chunk:done chunk=%s completed=%d/%d", chunkLabel, completed, len(chunks))
 		}
 	}
 	state.UpdatedAt = time.Now().UTC()
 	if opts.Progress != nil {
-		opts.Progress("osv:scanner:parallel-done chunks=%d completed=%d", len(chunks), completed)
-		opts.Progress("osv:scanner:done mode=offline provider=osv-scanner")
+		if firstErr != nil {
+			opts.Progress("osv:scanner:parallel-fail chunks=%d completed=%d error=%v", len(chunks), completed, firstErr)
+		} else {
+			opts.Progress("osv:scanner:parallel-done chunks=%d completed=%d", len(chunks), completed)
+			opts.Progress("osv:scanner:done mode=offline provider=osv-scanner")
+		}
 	}
 	return firstErr
 }
@@ -879,6 +914,27 @@ func chunkOSVScannerRecords(records []osvScannerRecord, chunkSize int) [][]osvSc
 		chunks = append(chunks, records[i:end])
 	}
 	return chunks
+}
+
+func firstOSVScannerRecord(records []osvScannerRecord) osvScannerRecord {
+	if len(records) == 0 {
+		return osvScannerRecord{}
+	}
+	return records[0]
+}
+
+func lastOSVScannerRecord(records []osvScannerRecord) osvScannerRecord {
+	if len(records) == 0 {
+		return osvScannerRecord{}
+	}
+	return records[len(records)-1]
+}
+
+func packageLabel(rec osvScannerRecord) string {
+	if rec.Name == "" && rec.Version == "" {
+		return ""
+	}
+	return rec.Name + "@" + rec.Version
 }
 
 func countOSVScannerPackages(lockfile osvScannerCustomLockfile) int {

@@ -59,7 +59,7 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	report, err := ScanState(context.Background(), ScanOptions{
+	_, err := ScanState(context.Background(), ScanOptions{
 		StatePath:       statePath,
 		Source:          "target",
 		UseOSV:          true,
@@ -281,6 +281,46 @@ func TestScanStateOSVOfflineProviderParallelChunks(t *testing.T) {
 	}
 }
 
+func TestScanStateOSVOfflineProviderParallelChunksFailureDiagnostics(t *testing.T) {
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "pkg-a", Version: "1.0.0"},
+		{Name: "pkg-b", Version: "1.0.0"},
+		{Name: "pkg-c", Version: "1.0.0"},
+		{Name: "pkg-d", Version: "1.0.0"},
+	})
+	installFakeOSVScannerFailAbovePackages(t, 1, `{"results":[]}`)
+	var progress []string
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:             statePath,
+		Source:                "target",
+		UseOSV:                true,
+		OSVProvider:           "osv-offline",
+		OSVOfflineChunkSize:   2,
+		OSVOfflineConcurrency: 2,
+		MinSeverity:           "high",
+		UnknownSeverity:       "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err == nil {
+		t.Fatalf("ScanState error = nil, want chunk failure")
+	}
+	if !strings.Contains(err.Error(), "chunk=") || !strings.Contains(err.Error(), "first=") || !strings.Contains(err.Error(), "last=") {
+		t.Fatalf("ScanState error = %v, want chunk diagnostics", err)
+	}
+	if !containsPrefix(progress, "osv:scanner:chunk:fail chunk=") {
+		t.Fatalf("progress logs = %v, want chunk fail log", progress)
+	}
+	if !containsPrefix(progress, "osv:scanner:parallel-fail ") {
+		t.Fatalf("progress logs = %v, want parallel fail log", progress)
+	}
+	if containsPrefix(progress, "osv:scanner:done mode=offline provider=osv-scanner") {
+		t.Fatalf("progress logs = %v, did not want done log after chunk failure", progress)
+	}
+}
+
 func writeScanTestState(t testing.TB) string {
 	t.Helper()
 	return writeScanTestStateWithPackages(t, []StateRecord{{Name: "left-pad", Version: "1.3.0"}})
@@ -328,6 +368,42 @@ func installFakeSlowOSVScanner(t testing.TB, delay time.Duration, json string) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "osv-scanner")
 	script := fmt.Sprintf("#!/bin/sh\nsleep %d\ncat <<'EOF'\n%s\nEOF\nexit 1\n", int(delay/time.Second), json)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+}
+
+func installFakeOSVScannerFailAbovePackages(t testing.TB, maxPackages int, json string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script helper is unix-only")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "osv-scanner")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" != "scan" ]; then echo "expected scan command" >&2; exit 9; fi
+lockfile=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--lockfile" ]; then
+    lockfile="$arg"
+    break
+  fi
+  prev="$arg"
+done
+lockfile="${lockfile#osv-scanner:}"
+count=$(grep -o '"version"' "$lockfile" | wc -l | tr -d ' ')
+if [ "$count" -gt "%d" ]; then
+  echo "scanned $lockfile file as osv-scanner and found $count packages" >&2
+  kill -9 $$
+fi
+cat <<'EOF'
+%s
+EOF
+exit 1
+`, maxPackages, json)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
