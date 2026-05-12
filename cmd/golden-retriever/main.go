@@ -193,6 +193,7 @@ func mirror(args []string) error {
 	defer cancel()
 	tracef := newTraceLogger(*trace)
 	progressf := newProgressLogger(!*trace && !*jsonOut)
+	logf := pickProgressLogger(*trace, tracef, progressf)
 	if len(resolvedInputs) > 1 {
 		tracef("mirror:batch:start projects=%d target=%s timeout=%s", len(resolvedInputs), *targetRegistry, *timeout)
 		return mirrorMany(ctx, mirrorManyOptions{
@@ -254,7 +255,9 @@ func mirror(args []string) error {
 		})
 	}
 	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
-	progressf("resolve:start input=%s", *input)
+	if progressf != nil {
+		progressf("resolve:start input=%s", *input)
+	}
 
 	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
@@ -282,7 +285,9 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
-	progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+	if progressf != nil {
+		progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+	}
 	tracef("mirror:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
@@ -294,7 +299,7 @@ func mirror(args []string) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
-	progressf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
+	logf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 
 	var syncReport npm.SyncTargetReport
 	if *syncTarget {
@@ -327,7 +332,7 @@ func mirror(args []string) error {
 		Concurrency:        *fetchConcurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
-		Progress:           pickProgressLogger(tracef, progressf),
+		Progress:           pickProgressLogger(*trace, tracef, progressf),
 	})
 	if err != nil {
 		return err
@@ -347,7 +352,7 @@ func mirror(args []string) error {
 			UnknownSeverity:   *scanUnknownSeverity,
 			ExceptionsPath:    *scanExceptions,
 			OSVConcurrency:    *scanOSVConcurrency,
-			Progress:          pickProgressLogger(tracef, progressf),
+			Progress:          pickProgressLogger(*trace, tracef, progressf),
 		})
 		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
 			scanErr = writeErr
@@ -370,7 +375,7 @@ func mirror(args []string) error {
 		Tag:             *tag,
 		Access:          *access,
 		MaxRetries:      *publishRetries,
-		Progress:        pickProgressLogger(tracef, progressf),
+		Progress:        pickProgressLogger(*trace, tracef, progressf),
 		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
@@ -432,6 +437,7 @@ func push(args []string) error {
 	defer cancel()
 	tracef := newTraceLogger(*trace)
 	progressf := newProgressLogger(!*trace && !*jsonOut)
+	logf := pickProgressLogger(*trace, tracef, progressf)
 	tracef("push:start target=%s timeout=%s", *targetRegistry, *timeout)
 
 	state, err := npm.LoadState(*statePath)
@@ -443,14 +449,14 @@ func push(args []string) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
-	progressf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
+	logf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 	report, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
 		Concurrency:     *concurrency,
 		Source:          *targetRegistry,
 		Tag:             *tag,
 		Access:          *access,
 		MaxRetries:      *maxRetries,
-		Progress:        pickProgressLogger(tracef, progressf),
+		Progress:        pickProgressLogger(*trace, tracef, progressf),
 		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
@@ -566,7 +572,9 @@ func fetch(args []string) error {
 		})
 	}
 	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
-	progressf("resolve:start input=%s", *input)
+	if progressf != nil {
+		progressf("resolve:start input=%s", *input)
+	}
 
 	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
@@ -594,7 +602,9 @@ func fetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+	if progressf != nil {
+		progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+	}
 	tracef("fetch:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
@@ -607,7 +617,7 @@ func fetch(args []string) error {
 		Concurrency:        *concurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
-		Progress:           pickProgressLogger(tracef, progressf),
+		Progress:           pickProgressLogger(*trace, tracef, progressf),
 	})
 	if err != nil {
 		return err
@@ -1110,7 +1120,7 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 		Concurrency:        opts.FetchConcurrency,
 		MaxRetries:         opts.MaxRetries,
 		OutputNameStrategy: opts.OutputNaming,
-		Progress:           pickProgressLogger(opts.Tracef, opts.Progressf),
+		Progress:           pickProgressLogger(false, opts.Tracef, opts.Progressf),
 	})
 	if err != nil {
 		return err
@@ -1225,7 +1235,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		Concurrency:        opts.FetchConcurrency,
 		MaxRetries:         opts.MaxRetries,
 		OutputNameStrategy: opts.OutputNaming,
-		Progress:           pickProgressLogger(opts.Tracef, opts.Progressf),
+		Progress:           pickProgressLogger(false, opts.Tracef, opts.Progressf),
 	})
 	if err != nil {
 		return err
@@ -1244,7 +1254,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			UnknownSeverity:   opts.ScanUnknownSeverity,
 			ExceptionsPath:    opts.ScanExceptionsPath,
 			OSVConcurrency:    opts.ScanOSVConcurrency,
-			Progress:          pickProgressLogger(opts.Tracef, opts.Progressf),
+			Progress:          pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		})
 		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
 			err = writeErr
@@ -1264,7 +1274,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		Tag:             opts.Tag,
 		Access:          opts.Access,
 		MaxRetries:      opts.PublishRetries,
-		Progress:        pickProgressLogger(opts.Tracef, opts.Progressf),
+		Progress:        pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		RequireScanPass: opts.ScanEnforce,
 	})
 	if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
@@ -1311,11 +1321,15 @@ func resolveProjectsParallel(ctx context.Context, inputs []string, workers int, 
 			defer wg.Done()
 			for input := range jobs {
 				if progressf != nil {
-					progressf("resolve:start input=%s", input)
+					if progressf != nil {
+						progressf("resolve:start input=%s", input)
+					}
 				}
 				graph, err := resolveFn(input)
 				if err == nil && progressf != nil {
-					progressf("resolve:done input=%s packages=%d", input, len(graph.Packages()))
+					if progressf != nil {
+						progressf("resolve:done input=%s packages=%d", input, len(graph.Packages()))
+					}
 				}
 				results <- result{input: input, graph: graph, err: err}
 			}
@@ -1499,7 +1513,10 @@ func newProgressLogger(enabled bool) func(format string, args ...any) {
 	}
 }
 
-func pickProgressLogger(tracef, progressf func(format string, args ...any)) func(format string, args ...any) {
+func pickProgressLogger(traceEnabled bool, tracef, progressf func(format string, args ...any)) func(format string, args ...any) {
+	if traceEnabled {
+		return tracef
+	}
 	if progressf != nil {
 		return progressf
 	}
