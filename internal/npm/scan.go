@@ -21,8 +21,7 @@ type ScanOptions struct {
 	StatePath         string
 	Concurrency       int
 	Source            string
-	DenyPackages      []string
-	DenyPackageKeys   []string
+	BlocklistPath     string
 	DenyPackagePrefix []string
 	DenyScriptKeys    []string
 	UseOSV            bool
@@ -52,6 +51,13 @@ type ScanFinding struct {
 
 type ScanExceptionFile struct {
 	Exceptions []ScanException `json:"exceptions"`
+}
+
+type ScanBlocklistFile struct {
+	Packages        []string `json:"packages"`
+	PackageVersions []string `json:"packageVersions"`
+	PackagePrefixes []string `json:"packagePrefixes"`
+	ScriptKeys      []string `json:"scriptKeys"`
 }
 
 type ScanException struct {
@@ -92,6 +98,16 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 		return ScanReport{}, err
 	}
 	normalizeState(state)
+	blocklist, err := loadBlocklist(opts.BlocklistPath)
+	if err != nil {
+		return ScanReport{}, err
+	}
+	if len(blocklist.PackagePrefixes) > 0 {
+		opts.DenyPackagePrefix = append(opts.DenyPackagePrefix, blocklist.PackagePrefixes...)
+	}
+	if len(blocklist.ScriptKeys) > 0 {
+		opts.DenyScriptKeys = blocklist.ScriptKeys
+	}
 
 	jobs := make(chan string)
 	var mu sync.Mutex
@@ -111,7 +127,7 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 				default:
 				}
 				rec, bucket := getStateRecord(state, key, opts.Source)
-				status, reason, err := scanRecord(rec, opts, bucket == "local")
+				status, reason, err := scanRecord(rec, opts, blocklist, bucket == "local")
 				mu.Lock()
 				if err != nil {
 					report.Errors++
@@ -177,7 +193,7 @@ func recomputeScanReport(state *State, keys []string, source string) ScanReport 
 	return report
 }
 
-func scanRecord(rec StateRecord, opts ScanOptions, requireTarball bool) (string, string, error) {
+func scanRecord(rec StateRecord, opts ScanOptions, blocklist ScanBlocklistFile, requireTarball bool) (string, string, error) {
 	name := rec.Name
 	if requireTarball {
 		if rec.Path == "" {
@@ -203,12 +219,12 @@ func scanRecord(rec StateRecord, opts ScanOptions, requireTarball bool) (string,
 			}
 		}
 	}
-	for _, denied := range opts.DenyPackages {
+	for _, denied := range blocklist.Packages {
 		if denied != "" && name == denied {
 			return "fail", fmt.Sprintf("package blocked by deny list: %s", denied), nil
 		}
 	}
-	for _, denied := range opts.DenyPackageKeys {
+	for _, denied := range blocklist.PackageVersions {
 		if denied != "" && (name+"@"+rec.Version) == denied {
 			return "fail", fmt.Sprintf("package version blocked by deny list: %s", denied), nil
 		}
@@ -219,6 +235,24 @@ func scanRecord(rec StateRecord, opts ScanOptions, requireTarball bool) (string,
 		}
 	}
 	return "pass", "policy checks passed", nil
+}
+
+func loadBlocklist(path string) (ScanBlocklistFile, error) {
+	if strings.TrimSpace(path) == "" {
+		return ScanBlocklistFile{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ScanBlocklistFile{}, nil
+		}
+		return ScanBlocklistFile{}, err
+	}
+	var file ScanBlocklistFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return ScanBlocklistFile{}, err
+	}
+	return file, nil
 }
 
 func extractRootManifest(tarball []byte) (map[string]any, error) {

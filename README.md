@@ -38,7 +38,7 @@ The output directory receives tarballs named as `<escaped-name>-<version>.tgz`; 
 
 When `--inputs` is used, project resolution runs in parallel, then package sets are globally deduped before fetch/push so duplicate package versions are downloaded/published once per run.
 
-Registry metadata is cached on disk by default under `.gr/metadata`. Fresh entries are used directly; stale entries are revalidated with `ETag` / `Last-Modified` headers. Use `--offline` to resolve `package.json` inputs only from that cache. The CLI reads `~/.npmrc`, a project `.npmrc` next to the input file, and an optional extra file from `--npmrc`; it supports default registries, scoped registries, and common registry auth keys.
+Registry metadata is cached on disk by default under `.gr/metadata`. Fresh entries are used directly; stale entries are revalidated with `ETag` / `Last-Modified` headers. The CLI reads `~/.npmrc`, a project `.npmrc` next to the input file, and an optional extra file from `--npmrc`; it supports default registries, scoped registries, and common registry auth keys.
 
 The state file is target registry inventory first, local download cache second. It is intended to be maintained locally and reused from CI cache, for example GitLab cache. Packages marked as present in the target registry are skipped by `fetch` even if no local tarball exists. Querying the target registry should be optional and used to rebuild or verify state when needed:
 
@@ -65,10 +65,21 @@ Default mode is **audit**:
 
 ### Manual blocks
 
-- exact package names: `--scan-deny-packages "lodash,minimist"`
-- exact package versions: `--scan-deny-package-versions "lodash@4.17.20,minimist@0.0.8"`
-- package prefixes/scopes: `--scan-deny-package-prefixes "@blocked/"`
-- lifecycle scripts: `--scan-deny-scripts "preinstall,install,postinstall"`
+Use blocklist file:
+
+- mirror: `--scan-blocklist .gr/scan-blocklist.json`
+- scan: `--blocklist .gr/scan-blocklist.json`
+
+Example blocklist file:
+
+```json
+{
+  "packages": ["lodash", "@blocked/some-lib"],
+  "packageVersions": ["minimist@0.0.8", "lodash@4.17.20"],
+  "packagePrefixes": ["@blocked/"],
+  "scriptKeys": ["preinstall", "install", "postinstall"]
+}
+```
 
 ### OSV-based CVE checks
 
@@ -177,6 +188,7 @@ go run ./cmd/golden-retriever mirror \
 - `GOLDEN_RETRIEVER_SCAN_OSV`: `true|false`
 - `GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY`: `low|medium|high|critical`
 - `GOLDEN_RETRIEVER_SCAN_EXCEPTIONS`: exceptions file path
+- `GOLDEN_RETRIEVER_SCAN_BLOCKLIST`: blocklist file path
 - `GOLDEN_RETRIEVER_SCAN_REPORT`: report path for artifacts
 
 ### Proxy configuration (HTTP/HTTPS/NO_PROXY)

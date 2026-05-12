@@ -126,7 +126,6 @@ func mirror(args []string) error {
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "source packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "source packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "source packument metadata retry count for transient failures")
-	offline := fs.Bool("offline", false, "resolve using only cached source registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
 	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
@@ -164,8 +163,7 @@ func mirror(args []string) error {
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
 	scanOSVConcurrency := fs.Int("scan-osv-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV vulnerability detail lookup count")
-	scanDenyPackages := fs.String("scan-deny-packages", "", "comma-separated exact package names to block")
-	scanDenyPackageVersions := fs.String("scan-deny-package-versions", "", "comma-separated exact package@version entries to block")
+	scanBlocklist := fs.String("scan-blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	scanReportPath := fs.String("scan-report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
@@ -206,7 +204,6 @@ func mirror(args []string) error {
 			MetadataCacheBase:  *metadataCache,
 			MetadataCacheTTL:   *metadataCacheTTL,
 			MetadataRetries:    *metadataRetries,
-			Offline:            *offline,
 			FetchConcurrency:   *fetchConcurrency,
 			PushConcurrency:    *pushConcurrency,
 			TargetConcurrency:  *targetConcurrency,
@@ -234,27 +231,26 @@ func mirror(args []string) error {
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
 			},
-			JSONOut:                 *jsonOut,
-			Tracef:                  tracef,
-			ScanAuto:                *scanAuto,
-			ScanEnforce:             *scanEnforce,
-			ScanDenyPrefixes:        csvList(*scanDenyPackagePrefixes),
-			ScanDenyScripts:         csvList(*scanDenyScripts),
-			ScanOSV:                 *scanOSV,
-			ScanOSVEndpoint:         *scanOSVEndpoint,
-			ScanOSVBatchSize:        *scanOSVBatchSize,
-			ScanDenyPackages:        csvList(*scanDenyPackages),
-			ScanDenyPackageVersions: csvList(*scanDenyPackageVersions),
-			ScanReportPath:          *scanReportPath,
-			ScanMinSeverity:         *scanMinSeverity,
-			ScanUnknownSeverity:     *scanUnknownSeverity,
-			ScanExceptionsPath:      *scanExceptions,
-			ScanOSVConcurrency:      *scanOSVConcurrency,
+			JSONOut:             *jsonOut,
+			Tracef:              tracef,
+			ScanAuto:            *scanAuto,
+			ScanEnforce:         *scanEnforce,
+			ScanDenyPrefixes:    csvList(*scanDenyPackagePrefixes),
+			ScanDenyScripts:     csvList(*scanDenyScripts),
+			ScanOSV:             *scanOSV,
+			ScanOSVEndpoint:     *scanOSVEndpoint,
+			ScanOSVBatchSize:    *scanOSVBatchSize,
+			ScanBlocklistPath:   *scanBlocklist,
+			ScanReportPath:      *scanReportPath,
+			ScanMinSeverity:     *scanMinSeverity,
+			ScanUnknownSeverity: *scanUnknownSeverity,
+			ScanExceptionsPath:  *scanExceptions,
+			ScanOSVConcurrency:  *scanOSVConcurrency,
 		})
 	}
 	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
 
-	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -286,7 +282,7 @@ func mirror(args []string) error {
 		printDeprecationWarnings(graph)
 	}
 
-	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries, false)
+	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -333,8 +329,7 @@ func mirror(args []string) error {
 		scanReport, scanErr := npm.ScanState(ctx, npm.ScanOptions{
 			StatePath:         *statePath,
 			Concurrency:       *fetchConcurrency,
-			DenyPackages:      csvList(*scanDenyPackages),
-			DenyPackageKeys:   csvList(*scanDenyPackageVersions),
+			BlocklistPath:     *scanBlocklist,
 			DenyPackagePrefix: csvList(*scanDenyPackagePrefixes),
 			DenyScriptKeys:    csvList(*scanDenyScripts),
 			UseOSV:            *scanOSV,
@@ -432,7 +427,7 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(*input, *targetRegistry, *npmrc, "", 0, 3, false)
+	targetClient, err := newClient(*input, *targetRegistry, *npmrc, "", 0, 3)
 	if err != nil {
 		return err
 	}
@@ -477,7 +472,6 @@ func fetch(args []string) error {
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "packument metadata retry count for transient failures")
-	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	concurrency := fs.Int("concurrency", max(8, runtime.NumCPU()*4), "parallel download count")
 	resolveConcurrency := fs.Int("resolve-concurrency", max(8, runtime.NumCPU()*4), "parallel registry metadata fetch count")
 	outputNaming := fs.String("output-naming", "flat", "tarball output naming strategy: flat or registry")
@@ -532,7 +526,6 @@ func fetch(args []string) error {
 			MetadataCacheBase:  *metadataCache,
 			MetadataCacheTTL:   *metadataCacheTTL,
 			MetadataRetries:    *metadataRetries,
-			Offline:            *offline,
 			FetchConcurrency:   *concurrency,
 			MaxRetries:         *maxRetries,
 			OutputNaming:       *outputNaming,
@@ -560,7 +553,7 @@ func fetch(args []string) error {
 	}
 	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
 
-	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -627,7 +620,6 @@ func resolve(args []string) error {
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "packument metadata retry count for transient failures")
-	offline := fs.Bool("offline", false, "resolve using only cached registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
 	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
@@ -657,7 +649,7 @@ func resolve(args []string) error {
 		return err
 	}
 
-	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -695,8 +687,7 @@ func scan(args []string) error {
 	statePath := fs.String("state", ".gr/state.json", "state inventory file")
 	source := fs.String("source", "local", "scan source: local, target, or both")
 	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel scan worker count")
-	denyPackages := fs.String("deny-packages", "", "comma-separated exact package names to block")
-	denyPackageVersions := fs.String("deny-package-versions", "", "comma-separated exact package@version entries to block")
+	blocklist := fs.String("blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	denyPrefixes := fs.String("deny-package-prefixes", "", "comma-separated package name prefixes to block")
 	denyScripts := fs.String("deny-scripts", "preinstall,install,postinstall", "comma-separated lifecycle scripts to block")
 	useOSV := fs.Bool("osv", true, "query OSV for known vulnerable package versions")
@@ -715,8 +706,7 @@ func scan(args []string) error {
 		StatePath:         *statePath,
 		Concurrency:       *concurrency,
 		Source:            *source,
-		DenyPackages:      csvList(*denyPackages),
-		DenyPackageKeys:   csvList(*denyPackageVersions),
+		BlocklistPath:     *blocklist,
 		DenyPackagePrefix: csvList(*denyPrefixes),
 		DenyScriptKeys:    csvList(*denyScripts),
 		UseOSV:            *useOSV,
@@ -817,7 +807,6 @@ func stateSyncTarget(args []string) error {
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "source packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "source packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "source packument metadata retry count for transient failures")
-	offline := fs.Bool("offline", false, "resolve using only cached source registry metadata")
 	includeDev := fs.Bool("include-dev", true, "include devDependencies from package.json roots")
 	includeOptional := fs.Bool("include-optional", true, "include optionalDependencies")
 	omit := fs.String("omit", "", "comma-separated dependency types to omit: dev, optional, peer")
@@ -856,7 +845,7 @@ func stateSyncTarget(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries, *offline)
+	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -889,7 +878,7 @@ func stateSyncTarget(args []string) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries, false)
+	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries)
 	if err != nil {
 		return err
 	}
@@ -1035,7 +1024,7 @@ func parseBefore(value string) (time.Time, error) {
 	return before, nil
 }
 
-func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL time.Duration, metadataRetries int, offline bool) (*npm.Client, error) {
+func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL time.Duration, metadataRetries int) (*npm.Client, error) {
 	cfg, err := npm.DiscoverConfig(filepath.Dir(input), npmrc)
 	if err != nil {
 		return nil, err
@@ -1048,7 +1037,7 @@ func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL ti
 	client.CacheDir = metadataCache
 	client.CacheTTL = metadataCacheTTL
 	client.PackumentRetries = metadataRetries
-	client.Offline = offline
+	client.Offline = false
 	return client, nil
 }
 
@@ -1062,7 +1051,6 @@ type fetchManyOptions struct {
 	MetadataCacheBase  string
 	MetadataCacheTTL   time.Duration
 	MetadataRetries    int
-	Offline            bool
 	FetchConcurrency   int
 	MaxRetries         int
 	OutputNaming       string
@@ -1074,7 +1062,7 @@ type fetchManyOptions struct {
 func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
 		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
-		client, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+		client, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries)
 		if err != nil {
 			return nil, err
 		}
@@ -1084,7 +1072,7 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 		return err
 	}
 	primaryInput := opts.Inputs[0]
-	client, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+	client, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries)
 	if err != nil {
 		return err
 	}
@@ -1120,50 +1108,48 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 }
 
 type mirrorManyOptions struct {
-	Inputs                  []string
-	ProjectConcurrency      int
-	OutBase                 string
-	StateBase               string
-	Registry                string
-	TargetRegistry          string
-	NPMRC                   string
-	TargetNPMRC             string
-	MetadataCacheBase       string
-	MetadataCacheTTL        time.Duration
-	MetadataRetries         int
-	Offline                 bool
-	FetchConcurrency        int
-	PushConcurrency         int
-	TargetConcurrency       int
-	MaxRetries              int
-	PublishRetries          int
-	Tag                     string
-	Access                  string
-	SyncTarget              bool
-	OutputNaming            string
-	ResolveOptions          npm.ResolveOptions
-	JSONOut                 bool
-	Tracef                  func(format string, args ...any)
-	ScanAuto                bool
-	ScanEnforce             bool
-	ScanDenyPrefixes        []string
-	ScanDenyScripts         []string
-	ScanOSV                 bool
-	ScanOSVEndpoint         string
-	ScanOSVBatchSize        int
-	ScanMinSeverity         string
-	ScanUnknownSeverity     string
-	ScanExceptionsPath      string
-	ScanOSVConcurrency      int
-	ScanDenyPackages        []string
-	ScanDenyPackageVersions []string
-	ScanReportPath          string
+	Inputs              []string
+	ProjectConcurrency  int
+	OutBase             string
+	StateBase           string
+	Registry            string
+	TargetRegistry      string
+	NPMRC               string
+	TargetNPMRC         string
+	MetadataCacheBase   string
+	MetadataCacheTTL    time.Duration
+	MetadataRetries     int
+	FetchConcurrency    int
+	PushConcurrency     int
+	TargetConcurrency   int
+	MaxRetries          int
+	PublishRetries      int
+	Tag                 string
+	Access              string
+	SyncTarget          bool
+	OutputNaming        string
+	ResolveOptions      npm.ResolveOptions
+	JSONOut             bool
+	Tracef              func(format string, args ...any)
+	ScanAuto            bool
+	ScanEnforce         bool
+	ScanDenyPrefixes    []string
+	ScanDenyScripts     []string
+	ScanOSV             bool
+	ScanOSVEndpoint     string
+	ScanOSVBatchSize    int
+	ScanMinSeverity     string
+	ScanUnknownSeverity string
+	ScanExceptionsPath  string
+	ScanOSVConcurrency  int
+	ScanBlocklistPath   string
+	ScanReportPath      string
 }
 
 func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
 		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
-		sourceClient, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+		sourceClient, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries)
 		if err != nil {
 			return nil, err
 		}
@@ -1173,11 +1159,11 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		return err
 	}
 	primaryInput := opts.Inputs[0]
-	sourceClient, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries, opts.Offline)
+	sourceClient, err := newClient(primaryInput, opts.Registry, opts.NPMRC, opts.MetadataCacheBase, opts.MetadataCacheTTL, opts.MetadataRetries)
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(primaryInput, opts.TargetRegistry, firstNonEmpty(opts.TargetNPMRC, opts.NPMRC), "", 0, opts.MetadataRetries, false)
+	targetClient, err := newClient(primaryInput, opts.TargetRegistry, firstNonEmpty(opts.TargetNPMRC, opts.NPMRC), "", 0, opts.MetadataRetries)
 	if err != nil {
 		return err
 	}
@@ -1215,8 +1201,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		scanReport, err := npm.ScanState(ctx, npm.ScanOptions{
 			StatePath:         opts.StateBase,
 			Concurrency:       opts.FetchConcurrency,
-			DenyPackages:      opts.ScanDenyPackages,
-			DenyPackageKeys:   opts.ScanDenyPackageVersions,
+			BlocklistPath:     opts.ScanBlocklistPath,
 			DenyPackagePrefix: opts.ScanDenyPrefixes,
 			DenyScriptKeys:    opts.ScanDenyScripts,
 			UseOSV:            opts.ScanOSV,
