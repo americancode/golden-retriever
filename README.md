@@ -326,3 +326,13 @@ For npm `overrides`, this tool currently supports registry-like replacement spec
 - git/hosted git specs (`github:`, `git+ssh:`, `git@...`, etc.)
 
 This keeps override behavior deterministic for registry mirroring. Support for those override classes can be added later as an explicit compatibility expansion.
+
+
+
+
+
+progress osv:scanner:parallel-done chunks=53 completed=53
+progress osv:scanner:done mode=offline provider=osv-scanner
+error: osv-scanner failed: signal: killed: Scanned /tmp/golden-retriever-osv-3015023763/osv-scanner.json file as a osv-scanner and found 100 packages
+Loaded npm local db from /var/lib/osv-scanner/db/osv-scanner/npm/all.zip
+scan source=target total=5248 passed=5160 failed=88 errors=0 elapsed=21m37.358617374s state=.gr/state.json report=.gr/scan-report.json
