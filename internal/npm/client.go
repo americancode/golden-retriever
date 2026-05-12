@@ -3,6 +3,7 @@ package npm
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -63,6 +64,25 @@ func NewClientWithConfig(cfg *Config) *Client {
 	client.Config = cfg
 	client.Registry = cfg.Registry
 	return client
+}
+
+func (c *Client) SetInsecureSkipVerify(insecure bool) {
+	if c == nil || c.HTTPClient == nil {
+		return
+	}
+	var base *http.Transport
+	if t, ok := c.HTTPClient.Transport.(*http.Transport); ok && t != nil {
+		base = t.Clone()
+	} else if t, ok := http.DefaultTransport.(*http.Transport); ok && t != nil {
+		base = t.Clone()
+	} else {
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	if base.TLSClientConfig == nil {
+		base.TLSClientConfig = &tls.Config{}
+	}
+	base.TLSClientConfig.InsecureSkipVerify = insecure
+	c.HTTPClient.Transport = base
 }
 
 type Packument struct {

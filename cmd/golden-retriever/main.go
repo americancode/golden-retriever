@@ -123,6 +123,7 @@ func mirror(args []string) error {
 	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
 	npmrc := fs.String("npmrc", "", "additional npmrc file to load")
 	targetNPMRC := fs.String("target-npmrc", "", "additional npmrc file for target registry auth")
+	targetInsecureSkipVerify := fs.Bool("target-insecure-skip-verify", false, "skip TLS certificate verification for target registry HTTPS connections")
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "source packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "source packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "source packument metadata retry count for transient failures")
@@ -194,26 +195,27 @@ func mirror(args []string) error {
 	if len(resolvedInputs) > 1 {
 		tracef("mirror:batch:start projects=%d target=%s timeout=%s", len(resolvedInputs), *targetRegistry, *timeout)
 		return mirrorMany(ctx, mirrorManyOptions{
-			Inputs:             resolvedInputs,
-			ProjectConcurrency: *projectConcurrency,
-			OutBase:            *out,
-			StateBase:          *statePath,
-			Registry:           *registry,
-			TargetRegistry:     *targetRegistry,
-			NPMRC:              *npmrc,
-			TargetNPMRC:        *targetNPMRC,
-			MetadataCacheBase:  *metadataCache,
-			MetadataCacheTTL:   *metadataCacheTTL,
-			MetadataRetries:    *metadataRetries,
-			FetchConcurrency:   *fetchConcurrency,
-			PushConcurrency:    *pushConcurrency,
-			TargetConcurrency:  *targetConcurrency,
-			MaxRetries:         *maxRetries,
-			PublishRetries:     *publishRetries,
-			Tag:                *tag,
-			Access:             *access,
-			SyncTarget:         *syncTarget,
-			OutputNaming:       *outputNaming,
+			Inputs:                   resolvedInputs,
+			ProjectConcurrency:       *projectConcurrency,
+			OutBase:                  *out,
+			StateBase:                *statePath,
+			Registry:                 *registry,
+			TargetRegistry:           *targetRegistry,
+			NPMRC:                    *npmrc,
+			TargetNPMRC:              *targetNPMRC,
+			TargetInsecureSkipVerify: *targetInsecureSkipVerify,
+			MetadataCacheBase:        *metadataCache,
+			MetadataCacheTTL:         *metadataCacheTTL,
+			MetadataRetries:          *metadataRetries,
+			FetchConcurrency:         *fetchConcurrency,
+			PushConcurrency:          *pushConcurrency,
+			TargetConcurrency:        *targetConcurrency,
+			MaxRetries:               *maxRetries,
+			PublishRetries:           *publishRetries,
+			Tag:                      *tag,
+			Access:                   *access,
+			SyncTarget:               *syncTarget,
+			OutputNaming:             *outputNaming,
 			ResolveOptions: npm.ResolveOptions{
 				IncludeDev:         dependencySet.includeDev,
 				IncludeOptional:    dependencySet.includeOptional,
@@ -286,7 +288,7 @@ func mirror(args []string) error {
 		printDeprecationWarnings(graph)
 	}
 
-	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries)
+	targetClient, err := newTargetClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
@@ -408,6 +410,7 @@ func push(args []string) error {
 	statePath := fs.String("state", ".gr/state.json", "state inventory file")
 	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
 	npmrc := fs.String("npmrc", "", "additional npmrc file for target registry auth")
+	targetInsecureSkipVerify := fs.Bool("target-insecure-skip-verify", false, "skip TLS certificate verification for target registry HTTPS connections")
 	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel target registry publish count")
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
@@ -433,7 +436,7 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(*input, *targetRegistry, *npmrc, "", 0, 3)
+	targetClient, err := newTargetClient(*input, *targetRegistry, *npmrc, 3, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
@@ -814,6 +817,7 @@ func stateSyncTarget(args []string) error {
 	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
 	npmrc := fs.String("npmrc", "", "additional npmrc file to load")
 	targetNPMRC := fs.String("target-npmrc", "", "additional npmrc file for target registry auth")
+	targetInsecureSkipVerify := fs.Bool("target-insecure-skip-verify", false, "skip TLS certificate verification for target registry HTTPS connections")
 	metadataCache := fs.String("metadata-cache", ".gr/metadata", "source packument metadata cache directory")
 	metadataCacheTTL := fs.Duration("metadata-cache-ttl", 24*time.Hour, "source packument metadata cache freshness duration; 0 always revalidates")
 	metadataRetries := fs.Int("metadata-retries", 3, "source packument metadata retry count for transient failures")
@@ -888,7 +892,7 @@ func stateSyncTarget(args []string) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), "", 0, *metadataRetries)
+	targetClient, err := newTargetClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
@@ -1051,6 +1055,15 @@ func newClient(input, registry, npmrc, metadataCache string, metadataCacheTTL ti
 	return client, nil
 }
 
+func newTargetClient(input, registry, npmrc string, metadataRetries int, insecureSkipVerify bool) (*npm.Client, error) {
+	client, err := newClient(input, registry, npmrc, "", 0, metadataRetries)
+	if err != nil {
+		return nil, err
+	}
+	client.SetInsecureSkipVerify(insecureSkipVerify)
+	return client, nil
+}
+
 type fetchManyOptions struct {
 	Inputs             []string
 	ProjectConcurrency int
@@ -1119,43 +1132,44 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 }
 
 type mirrorManyOptions struct {
-	Inputs              []string
-	ProjectConcurrency  int
-	OutBase             string
-	StateBase           string
-	Registry            string
-	TargetRegistry      string
-	NPMRC               string
-	TargetNPMRC         string
-	MetadataCacheBase   string
-	MetadataCacheTTL    time.Duration
-	MetadataRetries     int
-	FetchConcurrency    int
-	PushConcurrency     int
-	TargetConcurrency   int
-	MaxRetries          int
-	PublishRetries      int
-	Tag                 string
-	Access              string
-	SyncTarget          bool
-	OutputNaming        string
-	ResolveOptions      npm.ResolveOptions
-	JSONOut             bool
-	Tracef              func(format string, args ...any)
-	Progressf           func(format string, args ...any)
-	ScanAuto            bool
-	ScanEnforce         bool
-	ScanDenyPrefixes    []string
-	ScanDenyScripts     []string
-	ScanOSV             bool
-	ScanOSVEndpoint     string
-	ScanOSVBatchSize    int
-	ScanMinSeverity     string
-	ScanUnknownSeverity string
-	ScanExceptionsPath  string
-	ScanOSVConcurrency  int
-	ScanBlocklistPath   string
-	ScanReportPath      string
+	Inputs                   []string
+	ProjectConcurrency       int
+	OutBase                  string
+	StateBase                string
+	Registry                 string
+	TargetRegistry           string
+	TargetInsecureSkipVerify bool
+	NPMRC                    string
+	TargetNPMRC              string
+	MetadataCacheBase        string
+	MetadataCacheTTL         time.Duration
+	MetadataRetries          int
+	FetchConcurrency         int
+	PushConcurrency          int
+	TargetConcurrency        int
+	MaxRetries               int
+	PublishRetries           int
+	Tag                      string
+	Access                   string
+	SyncTarget               bool
+	OutputNaming             string
+	ResolveOptions           npm.ResolveOptions
+	JSONOut                  bool
+	Tracef                   func(format string, args ...any)
+	Progressf                func(format string, args ...any)
+	ScanAuto                 bool
+	ScanEnforce              bool
+	ScanDenyPrefixes         []string
+	ScanDenyScripts          []string
+	ScanOSV                  bool
+	ScanOSVEndpoint          string
+	ScanOSVBatchSize         int
+	ScanMinSeverity          string
+	ScanUnknownSeverity      string
+	ScanExceptionsPath       string
+	ScanOSVConcurrency       int
+	ScanBlocklistPath        string
+	ScanReportPath           string
 }
 
 func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
@@ -1175,7 +1189,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newClient(primaryInput, opts.TargetRegistry, firstNonEmpty(opts.TargetNPMRC, opts.NPMRC), "", 0, opts.MetadataRetries)
+	targetClient, err := newTargetClient(primaryInput, opts.TargetRegistry, firstNonEmpty(opts.TargetNPMRC, opts.NPMRC), opts.MetadataRetries, opts.TargetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
