@@ -81,7 +81,7 @@ mirror:npm:
     expire_in: 7 days
 
 state:rebuild:
-  stage: maintenance
+  stage: mirror
   image: "$GOLDEN_RETRIEVER_CI_IMAGE"
   resource_group: "golden-retriever-state-${CI_PROJECT_ID}-${CI_COMMIT_REF_SLUG}"
   rules:

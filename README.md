@@ -252,9 +252,11 @@ Use the jobs in this order:
 
 2. `state:rebuild`
    - manual maintenance job
+   - available as soon as the pipeline starts
    - rebuilds `state.target` from everything the target registry currently contains
    - use this when cache is stale, lost, or you want target inventory to become canonical again
    - this job is allowed to refresh the shared cache
+   - can be run before `mirror:npm` or after it in the same pipeline
 
 3. `rescan:target`
    - manual or scheduled maintenance job
@@ -268,6 +270,8 @@ The important distinction is:
 - `rescan:target` is read-only from the cache perspective
 
 That prevents scan jobs from overwriting the branch cache with analysis-only state.
+
+`mirror:npm` and `state:rebuild` share the same `resource_group`, so they do not mutate branch state concurrently. If you trigger `state:rebuild` while `mirror:npm` is already running, it waits. If you trigger it first, `mirror:npm` waits.
 
 ### Periodic target re-scan (new CVEs after publish)
 
