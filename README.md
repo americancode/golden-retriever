@@ -98,6 +98,14 @@ Provider behavior:
 
 `osv-scanner` offline mode uses a local database cache. `golden-retriever` passes `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` through to the tool when set. The CI example uses `.gr/osv-db` and caches it.
 
+The CI image also includes a prewarmed offline OSV database at `/var/lib/osv-scanner/db` and sets:
+
+```sh
+OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/var/lib/osv-scanner/db
+```
+
+So `osv-offline` works immediately even before CI cache is populated. If GitLab CI sets `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`, that runtime path overrides the image default.
+
 Enforcement behavior:
 
 - With `--scan-enforce=true`, packages with OSV findings at or above `--scan-min-severity` are blocked from publish.

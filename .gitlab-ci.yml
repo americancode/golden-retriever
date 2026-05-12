@@ -14,7 +14,7 @@ variables:
   GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
   GOLDEN_RETRIEVER_SCAN_OSV: "true"
   GOLDEN_RETRIEVER_SCAN_PROVIDER: "osv-offline"
-  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB: ".gr/osv-db"
+  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB: "/var/lib/osv-scanner/db"
   GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE: "200"
   GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY: "8"
   GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY: "high"
@@ -33,7 +33,6 @@ cache:
   paths:
     - .gr/state.json
     - .gr/metadata/
-    - .gr/osv-db/
   policy: pull-push
 
 mirror:npm:

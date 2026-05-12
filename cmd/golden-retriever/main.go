@@ -256,17 +256,18 @@ func mirror(args []string) error {
 			ScanOSVConcurrency:  *scanOSVConcurrency,
 		})
 	}
-	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
+	selectedInput := resolvedInputs[0]
+	tracef("mirror:start input=%s target=%s timeout=%s", selectedInput, *targetRegistry, *timeout)
 	if progressf != nil {
-		progressf("resolve:start input=%s", *input)
+		progressf("resolve:start input=%s", selectedInput)
 	}
 
-	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
+	sourceClient, err := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
 	tracef("mirror:resolve:start")
-	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
+	graph, err := npm.LoadInput(ctx, sourceClient, selectedInput, npm.ResolveOptions{
 		IncludeDev:         dependencySet.includeDev,
 		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
@@ -288,7 +289,7 @@ func mirror(args []string) error {
 		return err
 	}
 	if progressf != nil {
-		progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+		progressf("resolve:done input=%s packages=%d", selectedInput, len(graph.Packages()))
 	}
 	tracef("mirror:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
@@ -296,7 +297,7 @@ func mirror(args []string) error {
 		printDeprecationWarnings(graph)
 	}
 
-	targetClient, err := newTargetClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
+	targetClient, err := newTargetClient(selectedInput, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
@@ -574,17 +575,18 @@ func fetch(args []string) error {
 			Progressf: progressf,
 		})
 	}
-	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
+	selectedInput := resolvedInputs[0]
+	tracef("fetch:start input=%s timeout=%s", selectedInput, *timeout)
 	if progressf != nil {
-		progressf("resolve:start input=%s", *input)
+		progressf("resolve:start input=%s", selectedInput)
 	}
 
-	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
+	client, err := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
 		return err
 	}
 	tracef("fetch:resolve:start")
-	graph, err := npm.LoadInput(ctx, client, *input, npm.ResolveOptions{
+	graph, err := npm.LoadInput(ctx, client, selectedInput, npm.ResolveOptions{
 		IncludeDev:         dependencySet.includeDev,
 		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
@@ -606,7 +608,7 @@ func fetch(args []string) error {
 		return err
 	}
 	if progressf != nil {
-		progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
+		progressf("resolve:done input=%s packages=%d", selectedInput, len(graph.Packages()))
 	}
 	tracef("fetch:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
@@ -906,6 +908,7 @@ func stateSyncTarget(args []string) error {
 		engineWarnings      []*npm.PackageEngineError
 		deprecationWarnings []npm.PackageDeprecationWarning
 	)
+	selectedInput := resolvedInputs[0]
 	if len(resolvedInputs) > 1 {
 		var warningsMu sync.Mutex
 		perProjectWarnings := map[string]*npm.Graph{}
@@ -935,11 +938,11 @@ func stateSyncTarget(args []string) error {
 			deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
 		}
 	} else {
-		sourceClient, clientErr := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
+		sourceClient, clientErr := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 		if clientErr != nil {
 			return clientErr
 		}
-		graph, loadErr := npm.LoadInput(ctx, sourceClient, *input, resolveOpts)
+		graph, loadErr := npm.LoadInput(ctx, sourceClient, selectedInput, resolveOpts)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -955,7 +958,7 @@ func stateSyncTarget(args []string) error {
 	if err != nil {
 		return err
 	}
-	targetClient, err := newTargetClient(resolvedInputs[0], *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
+	targetClient, err := newTargetClient(selectedInput, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}

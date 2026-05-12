@@ -14,9 +14,17 @@ RUN apk upgrade --no-cache \
   && apk add --no-cache nodejs npm ca-certificates osv-scanner \
   && npm install -g npm@latest \
   && npm cache clean --force \
+  && mkdir -p /var/lib/osv-scanner/seed /var/lib/osv-scanner/db \
+  && printf '{\n  "name": "osv-seed",\n  "version": "1.0.0",\n  "private": true,\n  "dependencies": {\n    "left-pad": "1.3.0"\n  }\n}\n' > /var/lib/osv-scanner/seed/package.json \
+  && cd /var/lib/osv-scanner/seed \
+  && npm install --package-lock-only --ignore-scripts --no-audit --no-fund --progress=false \
+  && OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/var/lib/osv-scanner/db osv-scanner scan --experimental-offline-vulnerabilities --experimental-download-offline-databases --format json --lockfile /var/lib/osv-scanner/seed/package-lock.json >/dev/null \
+  && cd / \
+  && rm -rf /var/lib/osv-scanner/seed \
   && osv-scanner --version \
   && npm --version \
   && node --version \
   && mkdir -p /workspace
 COPY --from=builder /out/golden-retriever /usr/local/bin/golden-retriever
+ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/var/lib/osv-scanner/db
 WORKDIR /workspace

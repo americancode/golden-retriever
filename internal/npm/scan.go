@@ -553,9 +553,9 @@ func applyOSVScannerFindings(ctx context.Context, state *State, opts ScanOptions
 		return err
 	}
 
-	args := []string{"scan", "source", "--format", "json", "--lockfile", "osv-scanner:" + lockfilePath}
+	args := []string{"scan", "--format", "json", "--lockfile", "osv-scanner:" + lockfilePath}
 	if offline {
-		args = append(args, "--offline-vulnerabilities")
+		args = append(args, "--experimental-offline-vulnerabilities")
 	}
 	if opts.Progress != nil {
 		mode := "online"

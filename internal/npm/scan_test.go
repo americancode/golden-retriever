@@ -134,7 +134,7 @@ func installFakeOSVScanner(t *testing.T, json string) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "osv-scanner")
-	script := "#!/bin/sh\ncat <<'EOF'\n" + json + "\nEOF\nexit 1\n"
+	script := "#!/bin/sh\nif [ \"$1\" != \"scan\" ]; then echo \"expected scan command\" >&2; exit 9; fi\nif [ \"$2\" = \"source\" ]; then echo \"unexpected source positional\" >&2; exit 10; fi\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--offline-vulnerabilities\" ]; then echo \"unexpected legacy offline flag\" >&2; exit 11; fi\ndone\ncat <<'EOF'\n" + json + "\nEOF\nexit 1\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
