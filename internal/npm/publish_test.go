@@ -24,10 +24,16 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	}
 
 	var authHeader string
+	var userAgent string
+	var npmCommand string
+	var npmAuthType string
 	var publishPath string
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
+		userAgent = r.Header.Get("User-Agent")
+		npmCommand = r.Header.Get("npm-command")
+		npmAuthType = r.Header.Get("npm-auth-type")
 		publishPath = r.URL.EscapedPath()
 		if r.Method != http.MethodPut {
 			t.Fatalf("method = %s", r.Method)
@@ -56,14 +62,23 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	if authHeader != "Bearer secret" {
 		t.Fatalf("auth header = %s", authHeader)
 	}
+	if userAgent == "" {
+		t.Fatalf("user-agent missing")
+	}
+	if npmCommand != "publish" {
+		t.Fatalf("npm-command = %q", npmCommand)
+	}
+	if npmAuthType != "legacy" {
+		t.Fatalf("npm-auth-type = %q", npmAuthType)
+	}
 	if publishPath != "/demo" {
 		t.Fatalf("publish path = %s", publishPath)
 	}
 	if body["_id"] != "demo" {
 		t.Fatalf("body _id = %#v", body["_id"])
 	}
-	if _, ok := body["access"]; ok {
-		t.Fatalf("access should be omitted when unset: %#v", body["access"])
+	if got := body["access"]; got != "public" {
+		t.Fatalf("access = %#v, want public", got)
 	}
 	attachments := body["_attachments"].(map[string]any)
 	attachment := attachments["demo-1.0.0.tgz"].(map[string]any)
@@ -78,7 +93,7 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	}
 }
 
-func TestBuildPublishDocumentKeepsHTTPSDistTarball(t *testing.T) {
+func TestBuildPublishDocumentRewritesHTTPDistTarball(t *testing.T) {
 	manifest := publishManifest{
 		Name:    "demo",
 		Version: "1.0.0",
@@ -95,7 +110,7 @@ func TestBuildPublishDocumentKeepsHTTPSDistTarball(t *testing.T) {
 	v := versions["1.0.0"].(map[string]any)
 	dist := v["dist"].(map[string]any)
 	tarball := dist["tarball"].(string)
-	if tarball != "https://registry.example.test/demo/-/demo-1.0.0.tgz" {
+	if tarball != "http://registry.example.test/demo/-/demo-1.0.0.tgz" {
 		t.Fatalf("unexpected tarball url: %s", tarball)
 	}
 }
@@ -123,6 +138,37 @@ func TestPublishAllTreatsConflictAsPresent(t *testing.T) {
 	}
 	if state.Target["demo@1.0.0"].Name != "demo" {
 		t.Fatalf("target not marked on conflict: %#v", state.Target)
+	}
+}
+
+func TestPublishAllTreatsGitLabAlreadyExistsAsPresent(t *testing.T) {
+	tgz := testPackageTarball(t, `{"name":"demo","version":"1.0.0"}`)
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "demo-1.0.0.tgz")
+	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Package already exists.","error":"Package already exists."}`))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Registry = srv.URL + "/api/v4/projects/1/packages/npm"
+	cfg.values[nerfDart(cfg.Registry+"/")+":_authToken"] = "secret"
+	state := NewState()
+	state.Local["demo@1.0.0"] = StateRecord{Name: "demo", Version: "1.0.0", Path: tgzPath}
+
+	report, err := PublishAll(context.Background(), NewClientWithConfig(cfg), state, PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Present != 1 || report.Failed != 0 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if state.Target["demo@1.0.0"].Name != "demo" {
+		t.Fatalf("target not marked on gitlab already-exists: %#v", state.Target)
 	}
 }
 

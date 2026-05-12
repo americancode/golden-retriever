@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,9 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	}
 	if opts.Tag == "" {
 		opts.Tag = "latest"
+	}
+	if opts.Access == "" {
+		opts.Access = "public"
 	}
 	if opts.MaxRetries < 0 {
 		opts.MaxRetries = 0
@@ -195,7 +199,7 @@ func publishOne(ctx context.Context, target *Client, rec StateRecord, opts Publi
 	if err != nil {
 		return publishSkipped, Package{}, err
 	}
-	result, err := publishDocumentWithRetries(ctx, target, endpoint, body, pkg, opts.MaxRetries)
+	result, err := publishDocumentWithRetries(ctx, target, endpoint, body, pkg, opts.MaxRetries, opts)
 	if err != nil {
 		return publishSkipped, Package{}, err
 	}
@@ -205,10 +209,10 @@ func publishOne(ctx context.Context, target *Client, rec StateRecord, opts Publi
 	return publishPushed, pkg, nil
 }
 
-func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package, maxRetries int) (publishResult, error) {
+func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package, maxRetries int, opts PublishOptions) (publishResult, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		result, err := publishDocument(ctx, target, endpoint, body, pkg)
+		result, err := publishDocument(ctx, target, endpoint, body, pkg, opts)
 		if err == nil {
 			return result, nil
 		}
@@ -225,12 +229,13 @@ func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint st
 	return publishSkipped, lastErr
 }
 
-func publishDocument(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package) (publishResult, error) {
+func publishDocument(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package, opts PublishOptions) (publishResult, error) {
+	attempts := []string{}
 	res, err := doPublishRequest(ctx, target, endpoint, body, "", "")
 	if err != nil {
 		return publishSkipped, err
 	}
-	defer res.Body.Close()
+	attempts = append(attempts, "bearer="+res.Status)
 	if (res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusUnauthorized) && isGitLabRegistryURL(endpoint) {
 		if token := os.Getenv("CI_JOB_TOKEN"); token != "" {
 			_ = res.Body.Close()
@@ -238,24 +243,39 @@ func publishDocument(ctx context.Context, target *Client, endpoint string, body 
 			if err != nil {
 				return publishSkipped, err
 			}
-			defer res.Body.Close()
+			attempts = append(attempts, "basic-ci="+res.Status)
 			if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusUnauthorized {
 				_ = res.Body.Close()
 				res, err = doPublishRequest(ctx, target, endpoint, body, "", token)
 				if err != nil {
 					return publishSkipped, err
 				}
-				defer res.Body.Close()
+				attempts = append(attempts, "job-token="+res.Status)
 			}
 		}
 	}
+	defer res.Body.Close()
 	if res.StatusCode == http.StatusConflict {
 		return publishPresent, nil
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
+		bodyText, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		msg := strings.TrimSpace(string(bodyText))
+		if isGitLabAlreadyExistsResponse(res.StatusCode, msg) {
+			return publishPresent, nil
+		}
+		if msg != "" {
+			msg = ": " + msg
+		}
+		if len(attempts) > 0 {
+			msg += " [auth-attempts " + strings.Join(attempts, ", ") + "]"
+		}
+		if opts.Progress != nil && len(attempts) > 0 {
+			opts.Progress("publish:auth-attempts package=%s attempts=%s", pkg.Key(), strings.Join(attempts, ", "))
+		}
 		return publishSkipped, fmt.Errorf("%s: publish returned %w", pkg.Key(), httpStatusError{
 			StatusCode: res.StatusCode,
-			Status:     res.Status,
+			Status:     res.Status + msg,
 			RetryAfter: retryAfterDelay(res.Header.Get("Retry-After")),
 		})
 	}
@@ -269,6 +289,9 @@ func doPublishRequest(ctx context.Context, target *Client, endpoint string, body
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", npmPublishUserAgent())
+	req.Header.Set("npm-command", "publish")
+	req.Header.Set("npm-auth-type", "legacy")
 	if authOverride != "" {
 		req.Header.Set("Authorization", authOverride)
 	} else {
@@ -288,6 +311,26 @@ func isGitLabRegistryURL(raw string) bool {
 	host := strings.ToLower(u.Host)
 	path := strings.ToLower(u.Path)
 	return strings.Contains(host, "gitlab") || strings.Contains(path, "/api/v4/projects/") || strings.Contains(path, "/api/v4/groups/")
+}
+
+func npmPublishUserAgent() string {
+	return "npm-registry-fetch@18.0.2/node@" + runtime.Version() + "+" + runtime.GOARCH + " (" + runtime.GOOS + ")"
+}
+
+func isGitLabAlreadyExistsResponse(statusCode int, body string) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	body = strings.TrimSpace(body)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err == nil {
+		for _, key := range []string{"message", "error"} {
+			if s, ok := payload[key].(string); ok && strings.Contains(strings.ToLower(s), "package already exists") {
+				return true
+			}
+		}
+	}
+	return strings.Contains(strings.ToLower(body), "package already exists")
 }
 
 func manifestFromTarball(tarballData []byte) (publishManifest, error) {
@@ -377,6 +420,9 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 	shasum := hex.EncodeToString(sha1Sum[:])
 	tarballName := manifest.Name + "-" + manifest.Version + ".tgz"
 	tarballURL := strings.TrimRight(registry, "/") + "/" + manifest.Name + "/-/" + tarballName
+	if strings.HasPrefix(tarballURL, "https://") {
+		tarballURL = "http://" + strings.TrimPrefix(tarballURL, "https://")
+	}
 
 	versionManifest := map[string]any{}
 	for key, value := range manifest.Raw {
@@ -404,6 +450,7 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 		"versions": map[string]any{
 			manifest.Version: versionManifest,
 		},
+		"access": opts.Access,
 		"_attachments": map[string]any{
 			tarballName: map[string]any{
 				"content_type": "application/octet-stream",
@@ -411,9 +458,6 @@ func buildPublishDocument(registry string, manifest publishManifest, tarballData
 				"length":       len(tarballData),
 			},
 		},
-	}
-	if opts.Access != "" {
-		doc["access"] = opts.Access
 	}
 	pkg := Package{
 		Name:      manifest.Name,
