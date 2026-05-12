@@ -6,7 +6,7 @@ variables:
   GOLDEN_RETRIEVER_STATE: ".gr/state.json"
   GOLDEN_RETRIEVER_METADATA_CACHE: ".gr/metadata"
   GOLDEN_RETRIEVER_TARBALLS: ".gr/tgzs"
-  GOLDEN_RETRIEVER_CI_IMAGE: "$CI_REGISTRY_IMAGE/golden-retriever-ci:go1.25-alpine3.22-node"
+  GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever-ci:0.0.7"
   GOLDEN_RETRIEVER_INPUT: "package.json"
   GOLDEN_RETRIEVER_INPUTS: ""
   GOLDEN_RETRIEVER_INPUT_DIRS: "package-jsons,package-locks"
