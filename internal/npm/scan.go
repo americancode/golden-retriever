@@ -125,6 +125,13 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	var wg sync.WaitGroup
 	keys := selectedScanKeys(state, opts.Source)
 	report := ScanReport{Total: len(keys)}
+	if len(keys) == 0 {
+		if opts.Progress != nil {
+			opts.Progress("scan:skip reason=no-packages source=%s", opts.Source)
+		}
+		report.Elapsed = time.Since(start)
+		return report, saveState(opts.StatePath, state)
+	}
 	var firstErr error
 	processed := 0
 
