@@ -19,7 +19,6 @@ variables:
   GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY: "high"
   GOLDEN_RETRIEVER_SCAN_EXCEPTIONS: ".gr/scan-exceptions.json"
   GOLDEN_RETRIEVER_SCAN_BLOCKLIST: ".gr/scan-blocklist.json"
-  GOLDEN_RETRIEVER_SCAN_DENY_SCRIPTS: "preinstall,install,postinstall"
   GOLDEN_RETRIEVER_SCAN_REPORT: ".gr/scan-report.json"
   # Optional proxy settings for Go HTTP client and npm subprocess.
   # Set these in GitLab CI/CD variables as needed.
@@ -69,7 +68,7 @@ mirror:npm:
         GOLDEN_RETRIEVER_INPUTS="$DISCOVERED_INPUTS"
       fi
       echo "golden-retriever inputs: ${GOLDEN_RETRIEVER_INPUTS:-$GOLDEN_RETRIEVER_INPUT}"
-      golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-osv="$GOLDEN_RETRIEVER_SCAN_OSV" --scan-osv-batch-size="$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --scan-osv-concurrency="$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --scan-min-severity="$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity="$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions="$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist="$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-deny-scripts="$GOLDEN_RETRIEVER_SCAN_DENY_SCRIPTS" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
+      golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-osv="$GOLDEN_RETRIEVER_SCAN_OSV" --scan-osv-batch-size="$GOLDEN_RETRIEVER_SCAN_OSV_BATCH_SIZE" --scan-osv-concurrency="$GOLDEN_RETRIEVER_SCAN_OSV_CONCURRENCY" --scan-min-severity="$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity="$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions="$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist="$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
   artifacts:
     when: always
     paths:

@@ -77,7 +77,6 @@ Example blocklist file:
   "packages": ["lodash", "@blocked/some-lib"],
   "packageVersions": ["minimist@0.0.8", "lodash@4.17.20"],
   "packagePrefixes": ["@blocked/"],
-  "scriptKeys": ["preinstall", "install", "postinstall"]
 }
 ```
 

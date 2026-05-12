@@ -23,7 +23,6 @@ type ScanOptions struct {
 	Source            string
 	BlocklistPath     string
 	DenyPackagePrefix []string
-	DenyScriptKeys    []string
 	UseOSV            bool
 	OSVEndpoint       string
 	OSVBatchSize      int
@@ -58,7 +57,6 @@ type ScanBlocklistFile struct {
 	Packages        []string `json:"packages"`
 	PackageVersions []string `json:"packageVersions"`
 	PackagePrefixes []string `json:"packagePrefixes"`
-	ScriptKeys      []string `json:"scriptKeys"`
 }
 
 type ScanException struct {
@@ -72,9 +70,6 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	start := time.Now()
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 8
-	}
-	if len(opts.DenyScriptKeys) == 0 {
-		opts.DenyScriptKeys = []string{"preinstall", "install", "postinstall"}
 	}
 	if opts.OSVEndpoint == "" {
 		opts.OSVEndpoint = "https://api.osv.dev/v1/querybatch"
@@ -105,9 +100,6 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	}
 	if len(blocklist.PackagePrefixes) > 0 {
 		opts.DenyPackagePrefix = append(opts.DenyPackagePrefix, blocklist.PackagePrefixes...)
-	}
-	if len(blocklist.ScriptKeys) > 0 {
-		opts.DenyScriptKeys = blocklist.ScriptKeys
 	}
 
 	jobs := make(chan string)
@@ -221,13 +213,6 @@ func scanRecord(rec StateRecord, opts ScanOptions, blocklist ScanBlocklistFile, 
 		manifestName, _ := manifest["name"].(string)
 		if manifestName != "" {
 			name = manifestName
-		}
-		if scripts, ok := manifest["scripts"].(map[string]any); ok {
-			for _, key := range opts.DenyScriptKeys {
-				if _, exists := scripts[key]; exists {
-					return "fail", fmt.Sprintf("denied lifecycle script: %s", key), nil
-				}
-			}
 		}
 	}
 	for _, denied := range blocklist.Packages {

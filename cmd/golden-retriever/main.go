@@ -157,7 +157,6 @@ func mirror(args []string) error {
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
 	scanDenyPackagePrefixes := fs.String("scan-deny-package-prefixes", "", "comma-separated package name prefixes to block")
-	scanDenyScripts := fs.String("scan-deny-scripts", "preinstall,install,postinstall", "comma-separated lifecycle scripts to block")
 	scanOSV := fs.Bool("scan-osv", true, "query OSV for known vulnerable package versions")
 	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	scanOSVBatchSize := fs.Int("scan-osv-batch-size", 200, "OSV query batch size")
@@ -242,7 +241,6 @@ func mirror(args []string) error {
 			ScanAuto:            *scanAuto,
 			ScanEnforce:         *scanEnforce,
 			ScanDenyPrefixes:    csvList(*scanDenyPackagePrefixes),
-			ScanDenyScripts:     csvList(*scanDenyScripts),
 			ScanOSV:             *scanOSV,
 			ScanOSVEndpoint:     *scanOSVEndpoint,
 			ScanOSVBatchSize:    *scanOSVBatchSize,
@@ -344,7 +342,6 @@ func mirror(args []string) error {
 			Concurrency:       *fetchConcurrency,
 			BlocklistPath:     *scanBlocklist,
 			DenyPackagePrefix: csvList(*scanDenyPackagePrefixes),
-			DenyScriptKeys:    csvList(*scanDenyScripts),
 			UseOSV:            *scanOSV,
 			OSVEndpoint:       *scanOSVEndpoint,
 			OSVBatchSize:      *scanOSVBatchSize,
@@ -715,7 +712,6 @@ func scan(args []string) error {
 	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel scan worker count")
 	blocklist := fs.String("blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	denyPrefixes := fs.String("deny-package-prefixes", "", "comma-separated package name prefixes to block")
-	denyScripts := fs.String("deny-scripts", "preinstall,install,postinstall", "comma-separated lifecycle scripts to block")
 	useOSV := fs.Bool("osv", true, "query OSV for known vulnerable package versions")
 	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	osvBatchSize := fs.Int("osv-batch-size", 200, "OSV query batch size")
@@ -734,7 +730,6 @@ func scan(args []string) error {
 		Source:            *source,
 		BlocklistPath:     *blocklist,
 		DenyPackagePrefix: csvList(*denyPrefixes),
-		DenyScriptKeys:    csvList(*denyScripts),
 		UseOSV:            *useOSV,
 		OSVEndpoint:       *osvEndpoint,
 		OSVBatchSize:      *osvBatchSize,
@@ -1174,7 +1169,6 @@ type mirrorManyOptions struct {
 	ScanAuto                 bool
 	ScanEnforce              bool
 	ScanDenyPrefixes         []string
-	ScanDenyScripts          []string
 	ScanOSV                  bool
 	ScanOSVEndpoint          string
 	ScanOSVBatchSize         int
@@ -1246,7 +1240,6 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			Concurrency:       opts.FetchConcurrency,
 			BlocklistPath:     opts.ScanBlocklistPath,
 			DenyPackagePrefix: opts.ScanDenyPrefixes,
-			DenyScriptKeys:    opts.ScanDenyScripts,
 			UseOSV:            opts.ScanOSV,
 			OSVEndpoint:       opts.ScanOSVEndpoint,
 			OSVBatchSize:      opts.ScanOSVBatchSize,
