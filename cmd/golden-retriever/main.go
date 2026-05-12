@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -293,6 +294,7 @@ func mirror(args []string) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
+	progressf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 
 	var syncReport npm.SyncTargetReport
 	if *syncTarget {
@@ -441,6 +443,7 @@ func push(args []string) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
+	progressf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 	report, err := npm.PublishAll(ctx, targetClient, state, npm.PublishOptions{
 		Concurrency:     *concurrency,
 		Source:          *targetRegistry,
@@ -897,6 +900,7 @@ func stateSyncTarget(args []string) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
+	fmt.Fprintf(os.Stderr, "progress target-auth source=%s header=%s registry=%s\n", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 
 	report, err := npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
 		Concurrency: *concurrency,
@@ -1194,6 +1198,9 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
+	if opts.Progressf != nil {
+		opts.Progressf("target-auth source=%s header=%s registry=%s", detectTargetAuthSource(opts.TargetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, opts.TargetRegistry), opts.TargetRegistry)
+	}
 
 	if opts.SyncTarget {
 		state, err := npm.LoadState(opts.StateBase)
@@ -1497,6 +1504,55 @@ func pickProgressLogger(tracef, progressf func(format string, args ...any)) func
 		return progressf
 	}
 	return tracef
+}
+
+func detectTargetAuthSource(registry string, cfg *npm.Config) string {
+	if cfg == nil {
+		return "none"
+	}
+	header := cfg.AuthFor(strings.TrimRight(registry, "/") + "/-/whoami").Header
+	if header == "" {
+		return "none"
+	}
+	checkBearer := []string{"NPM_TARGET_TOKEN", "NPM_AUTH_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN", "CI_JOB_TOKEN"}
+	for _, key := range checkBearer {
+		if v := os.Getenv(key); v != "" && header == "Bearer "+v {
+			return key
+		}
+	}
+	checkUserPass := [][2]string{
+		{"NPM_TARGET_USERNAME", "NPM_TARGET_PASSWORD"},
+		{"CI_DEPLOY_USER", "CI_DEPLOY_PASSWORD"},
+		{"NPM_USERNAME", "NPM_PASSWORD"},
+	}
+	for _, pair := range checkUserPass {
+		u := os.Getenv(pair[0])
+		p := os.Getenv(pair[1])
+		if u == "" || p == "" {
+			continue
+		}
+		if header == "Basic "+base64.StdEncoding.EncodeToString([]byte(u+":"+p)) {
+			return pair[0] + "/" + pair[1]
+		}
+	}
+	return "npmrc"
+}
+
+func authHeaderKind(cfg *npm.Config, registry string) string {
+	if cfg == nil {
+		return "none"
+	}
+	header := cfg.AuthFor(strings.TrimRight(registry, "/") + "/-/whoami").Header
+	switch {
+	case strings.HasPrefix(header, "Bearer "):
+		return "bearer"
+	case strings.HasPrefix(header, "Basic "):
+		return "basic"
+	case header == "":
+		return "none"
+	default:
+		return "other"
+	}
 }
 
 func printEngineWarnings(graph *npm.Graph) {

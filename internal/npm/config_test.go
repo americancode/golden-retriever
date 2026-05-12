@@ -62,13 +62,13 @@ func TestApplyEnvAuthForRegistryUserPassword(t *testing.T) {
 	}
 }
 
-func TestApplyEnvAuthForRegistryDoesNotOverrideNPMRC(t *testing.T) {
+func TestApplyEnvAuthForRegistryEnvOverridesNPMRC(t *testing.T) {
 	t.Setenv("NPM_TARGET_TOKEN", "env-secret")
 	cfg := DefaultConfig()
 	cfg.values["//gitlab.example/api/v4/projects/123/packages/npm/:_authToken"] = "npmrc-secret"
 	cfg.ApplyEnvAuthForRegistry("https://gitlab.example/api/v4/projects/123/packages/npm")
 
-	if got := cfg.AuthFor("https://gitlab.example/api/v4/projects/123/packages/npm/demo").Header; got != "Bearer npmrc-secret" {
+	if got := cfg.AuthFor("https://gitlab.example/api/v4/projects/123/packages/npm/demo").Header; got != "Bearer env-secret" {
 		t.Fatalf("auth = %s", got)
 	}
 }

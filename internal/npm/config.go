@@ -60,12 +60,19 @@ func (c *Config) ApplyEnvAuthForRegistry(registry string) {
 	if c == nil || registry == "" {
 		return
 	}
-	key := nerfDart(strings.TrimRight(registry, "/") + "/")
-	if key == "" || c.longestAuthKey(strings.TrimRight(registry, "/")+"/") != "" {
+	targetURL := strings.TrimRight(registry, "/") + "/"
+	key := c.longestAuthKey(targetURL)
+	if key == "" {
+		key = nerfDart(targetURL)
+	}
+	if key == "" {
 		return
 	}
 	if token := firstEnv("NPM_TARGET_TOKEN", "NPM_AUTH_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN", "CI_JOB_TOKEN"); token != "" {
 		c.values[key+":_authToken"] = token
+		delete(c.values, key+":_auth")
+		delete(c.values, key+":username")
+		delete(c.values, key+":_password")
 		return
 	}
 	username, password := firstUserPassEnv(
@@ -74,6 +81,8 @@ func (c *Config) ApplyEnvAuthForRegistry(registry string) {
 		"NPM_USERNAME", "NPM_PASSWORD",
 	)
 	if username != "" && password != "" {
+		delete(c.values, key+":_authToken")
+		delete(c.values, key+":_auth")
 		c.values[key+":username"] = username
 		c.values[key+":_password"] = password
 	}
