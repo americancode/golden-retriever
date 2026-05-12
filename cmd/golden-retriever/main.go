@@ -162,6 +162,7 @@ func mirror(args []string) error {
 	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	scanOSVBatchSize := fs.Int("scan-osv-batch-size", 200, "OSV query batch size")
+	scanOSVOfflineChunkSize := fs.Int("scan-osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
@@ -248,6 +249,7 @@ func mirror(args []string) error {
 			ScanOSVEndpoint:     *scanOSVEndpoint,
 			ScanOSVOfflineDBDir: *scanOSVOfflineDBDir,
 			ScanOSVBatchSize:    *scanOSVBatchSize,
+			ScanOSVOfflineChunkSize: *scanOSVOfflineChunkSize,
 			ScanBlocklistPath:   *scanBlocklist,
 			ScanReportPath:      *scanReportPath,
 			ScanMinSeverity:     *scanMinSeverity,
@@ -314,6 +316,7 @@ func mirror(args []string) error {
 		syncReport, err = npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
 			Concurrency: *targetConcurrency,
 			Source:      *targetRegistry,
+			Progress:    pickProgressLogger(*trace, tracef, progressf),
 		})
 		if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 			err = saveErr
@@ -352,6 +355,7 @@ func mirror(args []string) error {
 			OSVEndpoint:       *scanOSVEndpoint,
 			OSVOfflineDBDir:   *scanOSVOfflineDBDir,
 			OSVBatchSize:      *scanOSVBatchSize,
+			OSVOfflineChunkSize: *scanOSVOfflineChunkSize,
 			MinSeverity:       *scanMinSeverity,
 			UnknownSeverity:   *scanUnknownSeverity,
 			ExceptionsPath:    *scanExceptions,
@@ -725,6 +729,7 @@ func scan(args []string) error {
 	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
 	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	osvBatchSize := fs.Int("osv-batch-size", 200, "OSV query batch size")
+	osvOfflineChunkSize := fs.Int("osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	exceptions := fs.String("exceptions", "", "path to scan exceptions JSON file")
@@ -745,6 +750,7 @@ func scan(args []string) error {
 		OSVEndpoint:       *osvEndpoint,
 		OSVOfflineDBDir:   *osvOfflineDBDir,
 		OSVBatchSize:      *osvBatchSize,
+		OSVOfflineChunkSize: *osvOfflineChunkSize,
 		MinSeverity:       *minSeverity,
 		UnknownSeverity:   *unknownSeverity,
 		ExceptionsPath:    *exceptions,
@@ -968,6 +974,7 @@ func stateSyncTarget(args []string) error {
 	report, err := npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
 		Concurrency: *concurrency,
 		Source:      *targetRegistry,
+		Progress:    newProgressLogger(!*jsonOut),
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
@@ -1234,6 +1241,7 @@ type mirrorManyOptions struct {
 	ScanOSVEndpoint          string
 	ScanOSVOfflineDBDir      string
 	ScanOSVBatchSize         int
+	ScanOSVOfflineChunkSize  int
 	ScanMinSeverity          string
 	ScanUnknownSeverity      string
 	ScanExceptionsPath       string
@@ -1276,6 +1284,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		_, err = npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
 			Concurrency: opts.TargetConcurrency,
 			Source:      opts.TargetRegistry,
+			Progress:    pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		})
 		if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
 			err = saveErr
@@ -1307,6 +1316,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			OSVEndpoint:       opts.ScanOSVEndpoint,
 			OSVOfflineDBDir:   opts.ScanOSVOfflineDBDir,
 			OSVBatchSize:      opts.ScanOSVBatchSize,
+			OSVOfflineChunkSize: opts.ScanOSVOfflineChunkSize,
 			MinSeverity:       opts.ScanMinSeverity,
 			UnknownSeverity:   opts.ScanUnknownSeverity,
 			ExceptionsPath:    opts.ScanExceptionsPath,

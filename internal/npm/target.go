@@ -10,6 +10,7 @@ import (
 type SyncTargetOptions struct {
 	Concurrency int
 	Source      string
+	Progress    func(format string, args ...any)
 }
 
 type SyncTargetReport struct {
@@ -28,12 +29,26 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 		opts.Source = "target-registry"
 	}
 	normalizeState(state)
+	total := len(packages)
+	if opts.Progress != nil {
+		opts.Progress("target-sync:start total=%d concurrency=%d source=%s", total, opts.Concurrency, opts.Source)
+	}
+	if total == 0 {
+		report := SyncTargetReport{Elapsed: time.Since(start)}
+		if opts.Progress != nil {
+			opts.Progress("target-sync:skip reason=no-packages source=%s", opts.Source)
+			opts.Progress("target-sync:done total=0 present=0 missing=0 failed=0 elapsed=%s", report.Elapsed)
+		}
+		state.UpdatedAt = time.Now().UTC()
+		return report, nil
+	}
 
 	jobs := make(chan Package)
 	var stateMu sync.Mutex
 	var reportMu sync.Mutex
 	var report SyncTargetReport
 	var firstErr error
+	var processed int
 	var wg sync.WaitGroup
 
 	for i := 0; i < opts.Concurrency; i++ {
@@ -43,10 +58,14 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 			for pkg := range jobs {
 				presentPkg, present, err := targetPackageVersion(ctx, target, pkg)
 				reportMu.Lock()
+				processed++
 				if err != nil {
 					report.Failed++
 					if firstErr == nil {
 						firstErr = err
+					}
+					if opts.Progress != nil {
+						opts.Progress("target-sync:fail processed=%d/%d package=%s error=%v", processed, total, pkg.Key(), err)
 					}
 					reportMu.Unlock()
 					continue
@@ -58,6 +77,9 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 					stateMu.Unlock()
 				} else {
 					report.Missing++
+				}
+				if opts.Progress != nil && processed%25 == 0 {
+					opts.Progress("target-sync:progress processed=%d/%d present=%d missing=%d failed=%d", processed, total, report.Present, report.Missing, report.Failed)
 				}
 				reportMu.Unlock()
 			}
@@ -78,6 +100,9 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 	wg.Wait()
 	state.UpdatedAt = time.Now().UTC()
 	report.Elapsed = time.Since(start)
+	if opts.Progress != nil {
+		opts.Progress("target-sync:done total=%d present=%d missing=%d failed=%d elapsed=%s", total, report.Present, report.Missing, report.Failed, report.Elapsed)
+	}
 	return report, firstErr
 }
 

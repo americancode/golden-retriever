@@ -236,18 +236,67 @@ func TestScanStateSkipsOSVWhenNoPackagesSelected(t *testing.T) {
 	}
 }
 
-func writeScanTestState(t *testing.T) string {
+func TestScanStateOSVOfflineProviderParallelChunks(t *testing.T) {
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "pkg-a", Version: "1.0.0"},
+		{Name: "pkg-b", Version: "1.0.0"},
+		{Name: "pkg-c", Version: "1.0.0"},
+		{Name: "pkg-d", Version: "1.0.0"},
+	})
+	installFakeSlowOSVScanner(t, 2*time.Second, `{"results":[]}`)
+	var progress []string
+	start := time.Now()
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:       statePath,
+		Source:          "target",
+		UseOSV:          true,
+		OSVProvider:     "osv-offline",
+		OSVOfflineChunkSize: 1,
+		OSVConcurrency:  2,
+		MinSeverity:     "high",
+		UnknownSeverity: "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Total != 4 || report.Passed != 4 || report.Failed != 0 || report.Errors != 0 {
+		t.Fatalf("report = %+v, want total=4 passed=4 failed=0 errors=0", report)
+	}
+	if elapsed >= 7*time.Second {
+		t.Fatalf("elapsed = %s, want parallel chunks substantially under serial 8s", elapsed)
+	}
+	if !containsPrefix(progress, "osv:scanner:parallel-start ") {
+		t.Fatalf("progress logs = %v, want parallel start", progress)
+	}
+	if !containsPrefix(progress, "osv:scanner:chunk:start chunk=1/4 ") {
+		t.Fatalf("progress logs = %v, want chunk start", progress)
+	}
+	if !containsPrefix(progress, "osv:scanner:chunk:done chunk=") {
+		t.Fatalf("progress logs = %v, want chunk done", progress)
+	}
+}
+
+func writeScanTestState(t testing.TB) string {
+	t.Helper()
+	return writeScanTestStateWithPackages(t, []StateRecord{{Name: "left-pad", Version: "1.3.0"}})
+}
+
+func writeScanTestStateWithPackages(t testing.TB, packages []StateRecord) string {
 	t.Helper()
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
+	target := make(map[string]StateRecord, len(packages))
+	for _, rec := range packages {
+		target[rec.Name+"@"+rec.Version] = rec
+	}
 	state := &State{
 		SchemaVersion: 1,
-		Target: map[string]StateRecord{
-			"left-pad@1.3.0": {
-				Name:    "left-pad",
-				Version: "1.3.0",
-			},
-		},
+		Target:        target,
 		Local: map[string]StateRecord{},
 	}
 	if err := saveState(statePath, state); err != nil {
@@ -256,7 +305,7 @@ func writeScanTestState(t *testing.T) string {
 	return statePath
 }
 
-func installFakeOSVScanner(t *testing.T, json string) {
+func installFakeOSVScanner(t testing.TB, json string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script helper is unix-only")
@@ -271,7 +320,7 @@ func installFakeOSVScanner(t *testing.T, json string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
 }
 
-func installFakeSlowOSVScanner(t *testing.T, delay time.Duration, json string) {
+func installFakeSlowOSVScanner(t testing.TB, delay time.Duration, json string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script helper is unix-only")
@@ -284,4 +333,13 @@ func installFakeSlowOSVScanner(t *testing.T, delay time.Duration, json string) {
 	}
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+}
+
+func containsPrefix(lines []string, prefix string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
