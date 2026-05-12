@@ -238,24 +238,24 @@ func mirror(args []string) error {
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
 			},
-			JSONOut:             *jsonOut,
-			Tracef:              tracef,
-			Progressf:           progressf,
-			ScanAuto:            *scanAuto,
-			ScanEnforce:         *scanEnforce,
-			ScanDenyPrefixes:    csvList(*scanDenyPackagePrefixes),
-			ScanOSV:             *scanOSV,
-			ScanProvider:        *scanProvider,
-			ScanOSVEndpoint:     *scanOSVEndpoint,
-			ScanOSVOfflineDBDir: *scanOSVOfflineDBDir,
-			ScanOSVBatchSize:    *scanOSVBatchSize,
+			JSONOut:                 *jsonOut,
+			Tracef:                  tracef,
+			Progressf:               progressf,
+			ScanAuto:                *scanAuto,
+			ScanEnforce:             *scanEnforce,
+			ScanDenyPrefixes:        csvList(*scanDenyPackagePrefixes),
+			ScanOSV:                 *scanOSV,
+			ScanProvider:            *scanProvider,
+			ScanOSVEndpoint:         *scanOSVEndpoint,
+			ScanOSVOfflineDBDir:     *scanOSVOfflineDBDir,
+			ScanOSVBatchSize:        *scanOSVBatchSize,
 			ScanOSVOfflineChunkSize: *scanOSVOfflineChunkSize,
-			ScanBlocklistPath:   *scanBlocklist,
-			ScanReportPath:      *scanReportPath,
-			ScanMinSeverity:     *scanMinSeverity,
-			ScanUnknownSeverity: *scanUnknownSeverity,
-			ScanExceptionsPath:  *scanExceptions,
-			ScanOSVConcurrency:  *scanOSVConcurrency,
+			ScanBlocklistPath:       *scanBlocklist,
+			ScanReportPath:          *scanReportPath,
+			ScanMinSeverity:         *scanMinSeverity,
+			ScanUnknownSeverity:     *scanUnknownSeverity,
+			ScanExceptionsPath:      *scanExceptions,
+			ScanOSVConcurrency:      *scanOSVConcurrency,
 		})
 	}
 	selectedInput := resolvedInputs[0]
@@ -346,21 +346,21 @@ func mirror(args []string) error {
 	tracef("mirror:fetch:done downloaded=%d target_skipped=%d local_skipped=%d failed=%d", fetchReport.Downloaded, fetchReport.TargetSkipped, fetchReport.Skipped, fetchReport.Failed)
 	if *scanAuto {
 		scanReport, scanErr := npm.ScanState(ctx, npm.ScanOptions{
-			StatePath:         *statePath,
-			Concurrency:       *fetchConcurrency,
-			BlocklistPath:     *scanBlocklist,
-			DenyPackagePrefix: csvList(*scanDenyPackagePrefixes),
-			UseOSV:            *scanOSV,
-			OSVProvider:       *scanProvider,
-			OSVEndpoint:       *scanOSVEndpoint,
-			OSVOfflineDBDir:   *scanOSVOfflineDBDir,
-			OSVBatchSize:      *scanOSVBatchSize,
+			StatePath:           *statePath,
+			Concurrency:         *fetchConcurrency,
+			BlocklistPath:       *scanBlocklist,
+			DenyPackagePrefix:   csvList(*scanDenyPackagePrefixes),
+			UseOSV:              *scanOSV,
+			OSVProvider:         *scanProvider,
+			OSVEndpoint:         *scanOSVEndpoint,
+			OSVOfflineDBDir:     *scanOSVOfflineDBDir,
+			OSVBatchSize:        *scanOSVBatchSize,
 			OSVOfflineChunkSize: *scanOSVOfflineChunkSize,
-			MinSeverity:       *scanMinSeverity,
-			UnknownSeverity:   *scanUnknownSeverity,
-			ExceptionsPath:    *scanExceptions,
-			OSVConcurrency:    *scanOSVConcurrency,
-			Progress:          pickProgressLogger(*trace, tracef, progressf),
+			MinSeverity:         *scanMinSeverity,
+			UnknownSeverity:     *scanUnknownSeverity,
+			ExceptionsPath:      *scanExceptions,
+			OSVConcurrency:      *scanOSVConcurrency,
+			Progress:            pickProgressLogger(*trace, tracef, progressf),
 		})
 		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
 			scanErr = writeErr
@@ -740,21 +740,21 @@ func scan(args []string) error {
 		return err
 	}
 	report, err := npm.ScanState(context.Background(), npm.ScanOptions{
-		StatePath:         *statePath,
-		Concurrency:       *concurrency,
-		Source:            *source,
-		BlocklistPath:     *blocklist,
-		DenyPackagePrefix: csvList(*denyPrefixes),
-		UseOSV:            *useOSV,
-		OSVProvider:       *provider,
-		OSVEndpoint:       *osvEndpoint,
-		OSVOfflineDBDir:   *osvOfflineDBDir,
-		OSVBatchSize:      *osvBatchSize,
+		StatePath:           *statePath,
+		Concurrency:         *concurrency,
+		Source:              *source,
+		BlocklistPath:       *blocklist,
+		DenyPackagePrefix:   csvList(*denyPrefixes),
+		UseOSV:              *useOSV,
+		OSVProvider:         *provider,
+		OSVEndpoint:         *osvEndpoint,
+		OSVOfflineDBDir:     *osvOfflineDBDir,
+		OSVBatchSize:        *osvBatchSize,
 		OSVOfflineChunkSize: *osvOfflineChunkSize,
-		MinSeverity:       *minSeverity,
-		UnknownSeverity:   *unknownSeverity,
-		ExceptionsPath:    *exceptions,
-		OSVConcurrency:    *osvConcurrency,
+		MinSeverity:         *minSeverity,
+		UnknownSeverity:     *unknownSeverity,
+		ExceptionsPath:      *exceptions,
+		OSVConcurrency:      *osvConcurrency,
 	})
 	if writeErr := writeScanReport(*reportPath, *statePath, report); writeErr != nil && err == nil {
 		err = writeErr
@@ -875,94 +875,103 @@ func stateSyncTarget(args []string) error {
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
-	resolvedInputs, err := resolveInputs(*input, *inputs)
-	if err != nil {
-		return err
-	}
-	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
-	if err != nil {
-		return err
-	}
-	before, err := parseBefore(*beforeRaw)
-	if err != nil {
-		return err
-	}
+	explicitInputs := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "input" || f.Name == "inputs" {
+			explicitInputs = true
+		}
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-
-	resolveOpts := npm.ResolveOptions{
-		IncludeDev:         dependencySet.includeDev,
-		IncludeOptional:    dependencySet.includeOptional,
-		LegacyPeerDeps:     *legacyPeerDeps,
-		StrictPeerDeps:     *strictPeerDeps,
-		OmitPeer:           dependencySet.omitPeer,
-		PreferDedupe:       *preferDedupe,
-		InstallStrategy:    *installStrategy,
-		EngineStrict:       *engineStrict,
-		NodeVersion:        *nodeVersion,
-		Libc:               *libc,
-		Before:             before,
-		DefaultTag:         *defaultTag,
-		IncludeStaged:      *includeStaged,
-		Avoid:              *avoid,
-		AvoidStrict:        *avoidStrict,
-		ResolveConcurrency: *resolveConcurrency,
+	state, err := npm.LoadState(*statePath)
+	if err != nil {
+		return err
 	}
+	selectedInput := "."
 	var (
 		packages            []npm.Package
 		engineWarnings      []*npm.PackageEngineError
 		deprecationWarnings []npm.PackageDeprecationWarning
+		resolvedInputs      []string
 	)
-	selectedInput := resolvedInputs[0]
-	if len(resolvedInputs) > 1 {
-		var warningsMu sync.Mutex
-		perProjectWarnings := map[string]*npm.Graph{}
-		packages, _, err = resolveProjectsParallel(ctx, resolvedInputs, *projectConcurrency, nil, func(currentInput string) (*npm.Graph, error) {
-			_, _, metadata := multiProjectPaths(currentInput, "", *statePath, *metadataCache)
-			sourceClient, clientErr := newClient(currentInput, *registry, *npmrc, metadata, *metadataCacheTTL, *metadataRetries)
-			if clientErr != nil {
-				return nil, clientErr
-			}
-			graph, loadErr := npm.LoadInput(ctx, sourceClient, currentInput, resolveOpts)
-			if loadErr == nil {
-				warningsMu.Lock()
-				perProjectWarnings[currentInput] = graph
-				warningsMu.Unlock()
-			}
-			return graph, loadErr
-		})
+	if explicitInputs {
+		resolvedInputs, err = resolveInputs(*input, *inputs)
 		if err != nil {
 			return err
 		}
-		for _, currentInput := range resolvedInputs {
-			graph := perProjectWarnings[currentInput]
-			if graph == nil {
-				continue
+		dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
+		if err != nil {
+			return err
+		}
+		before, err := parseBefore(*beforeRaw)
+		if err != nil {
+			return err
+		}
+		resolveOpts := npm.ResolveOptions{
+			IncludeDev:         dependencySet.includeDev,
+			IncludeOptional:    dependencySet.includeOptional,
+			LegacyPeerDeps:     *legacyPeerDeps,
+			StrictPeerDeps:     *strictPeerDeps,
+			OmitPeer:           dependencySet.omitPeer,
+			PreferDedupe:       *preferDedupe,
+			InstallStrategy:    *installStrategy,
+			EngineStrict:       *engineStrict,
+			NodeVersion:        *nodeVersion,
+			Libc:               *libc,
+			Before:             before,
+			DefaultTag:         *defaultTag,
+			IncludeStaged:      *includeStaged,
+			Avoid:              *avoid,
+			AvoidStrict:        *avoidStrict,
+			ResolveConcurrency: *resolveConcurrency,
+		}
+		selectedInput = resolvedInputs[0]
+		if len(resolvedInputs) > 1 {
+			var warningsMu sync.Mutex
+			perProjectWarnings := map[string]*npm.Graph{}
+			packages, _, err = resolveProjectsParallel(ctx, resolvedInputs, *projectConcurrency, nil, func(currentInput string) (*npm.Graph, error) {
+				_, _, metadata := multiProjectPaths(currentInput, "", *statePath, *metadataCache)
+				sourceClient, clientErr := newClient(currentInput, *registry, *npmrc, metadata, *metadataCacheTTL, *metadataRetries)
+				if clientErr != nil {
+					return nil, clientErr
+				}
+				graph, loadErr := npm.LoadInput(ctx, sourceClient, currentInput, resolveOpts)
+				if loadErr == nil {
+					warningsMu.Lock()
+					perProjectWarnings[currentInput] = graph
+					warningsMu.Unlock()
+				}
+				return graph, loadErr
+			})
+			if err != nil {
+				return err
 			}
-			engineWarnings = append(engineWarnings, graph.EngineWarnings...)
-			deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
+			for _, currentInput := range resolvedInputs {
+				graph := perProjectWarnings[currentInput]
+				if graph == nil {
+					continue
+				}
+				engineWarnings = append(engineWarnings, graph.EngineWarnings...)
+				deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
+			}
+		} else {
+			sourceClient, clientErr := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
+			if clientErr != nil {
+				return clientErr
+			}
+			graph, loadErr := npm.LoadInput(ctx, sourceClient, selectedInput, resolveOpts)
+			if loadErr != nil {
+				return loadErr
+			}
+			packages = graph.Packages()
+			engineWarnings = graph.EngineWarnings
+			deprecationWarnings = graph.DeprecationWarnings
 		}
-	} else {
-		sourceClient, clientErr := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
-		if clientErr != nil {
-			return clientErr
+		if !*jsonOut {
+			printEngineWarnings(&npm.Graph{EngineWarnings: engineWarnings})
+			printDeprecationWarnings(&npm.Graph{DeprecationWarnings: deprecationWarnings})
 		}
-		graph, loadErr := npm.LoadInput(ctx, sourceClient, selectedInput, resolveOpts)
-		if loadErr != nil {
-			return loadErr
-		}
-		packages = graph.Packages()
-		engineWarnings = graph.EngineWarnings
-		deprecationWarnings = graph.DeprecationWarnings
-	}
-	if !*jsonOut {
-		printEngineWarnings(&npm.Graph{EngineWarnings: engineWarnings})
-		printDeprecationWarnings(&npm.Graph{DeprecationWarnings: deprecationWarnings})
-	}
-	state, err := npm.LoadState(*statePath)
-	if err != nil {
-		return err
 	}
 	targetClient, err := newTargetClient(selectedInput, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
@@ -971,11 +980,19 @@ func stateSyncTarget(args []string) error {
 	targetClient.UseStaleOnFailure = false
 	fmt.Fprintf(os.Stderr, "progress target-auth source=%s header=%s registry=%s\n", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 
-	report, err := npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
-		Concurrency: *concurrency,
-		Source:      *targetRegistry,
-		Progress:    newProgressLogger(!*jsonOut),
-	})
+	var report npm.SyncTargetReport
+	if explicitInputs {
+		report, err = npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
+			Concurrency: *concurrency,
+			Source:      *targetRegistry,
+			Progress:    newProgressLogger(!*jsonOut),
+		})
+	} else {
+		report, err = npm.RebuildTargetFromRegistry(ctx, targetClient, state, npm.SyncTargetOptions{
+			Source:   *targetRegistry,
+			Progress: newProgressLogger(!*jsonOut),
+		})
+	}
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
 		err = saveErr
 	}
@@ -1307,21 +1324,21 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	}
 	if opts.ScanAuto {
 		scanReport, err := npm.ScanState(ctx, npm.ScanOptions{
-			StatePath:         opts.StateBase,
-			Concurrency:       opts.FetchConcurrency,
-			BlocklistPath:     opts.ScanBlocklistPath,
-			DenyPackagePrefix: opts.ScanDenyPrefixes,
-			UseOSV:            opts.ScanOSV,
-			OSVProvider:       opts.ScanProvider,
-			OSVEndpoint:       opts.ScanOSVEndpoint,
-			OSVOfflineDBDir:   opts.ScanOSVOfflineDBDir,
-			OSVBatchSize:      opts.ScanOSVBatchSize,
+			StatePath:           opts.StateBase,
+			Concurrency:         opts.FetchConcurrency,
+			BlocklistPath:       opts.ScanBlocklistPath,
+			DenyPackagePrefix:   opts.ScanDenyPrefixes,
+			UseOSV:              opts.ScanOSV,
+			OSVProvider:         opts.ScanProvider,
+			OSVEndpoint:         opts.ScanOSVEndpoint,
+			OSVOfflineDBDir:     opts.ScanOSVOfflineDBDir,
+			OSVBatchSize:        opts.ScanOSVBatchSize,
 			OSVOfflineChunkSize: opts.ScanOSVOfflineChunkSize,
-			MinSeverity:       opts.ScanMinSeverity,
-			UnknownSeverity:   opts.ScanUnknownSeverity,
-			ExceptionsPath:    opts.ScanExceptionsPath,
-			OSVConcurrency:    opts.ScanOSVConcurrency,
-			Progress:          pickProgressLogger(false, opts.Tracef, opts.Progressf),
+			MinSeverity:         opts.ScanMinSeverity,
+			UnknownSeverity:     opts.ScanUnknownSeverity,
+			ExceptionsPath:      opts.ScanExceptionsPath,
+			OSVConcurrency:      opts.ScanOSVConcurrency,
+			Progress:            pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		})
 		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
 			err = writeErr

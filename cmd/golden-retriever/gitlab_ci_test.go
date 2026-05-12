@@ -15,8 +15,10 @@ func TestGitLabCIExampleCachesGoldenRetrieverPaths(t *testing.T) {
 	for _, want := range []string{
 		".gr/state.json",
 		".gr/metadata/",
+		"resource_group: \"golden-retriever-state-${CI_PROJECT_ID}-${CI_COMMIT_REF_SLUG}\"",
+		"policy: pull",
 		"golden-retriever mirror",
-		"golden-retriever state sync-target --input \"$GOLDEN_RETRIEVER_INPUT\" --inputs \"$GOLDEN_RETRIEVER_INPUTS\"",
+		"golden-retriever state sync-target --state \"$GOLDEN_RETRIEVER_STATE\" --target-registry \"$NPM_TARGET_REGISTRY\"",
 		"$NPM_TARGET_REGISTRY",
 	} {
 		if !strings.Contains(text, want) {

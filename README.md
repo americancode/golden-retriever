@@ -180,6 +180,7 @@ This repository includes a baseline `.gitlab-ci.yml` that:
 - uses your custom CI image (`$GOLDEN_RETRIEVER_CI_IMAGE`)
 - discovers inputs from `package-jsons/` and `package-locks/`
 - runs one program-centric pipeline (`mirror`) with internal parallelism
+- serializes `mirror`, `state:rebuild`, and `rescan:target` with a shared `resource_group` so branch state is not mutated concurrently
 - caches:
   - `.gr/state.json`
   - `.gr/metadata/`
@@ -240,6 +241,34 @@ Authentication should come from CI variables. The CLI supports npmrc auth with e
 
 `mirror` is the CI-oriented command: it resolves the input once, optionally refreshes target-present state with `--sync-target`, fetches only tarballs still needed locally, publishes missing package versions to the target registry in parallel, and updates `state.target` after successful publishes. For fully cached normal runs, omit `--sync-target` and rely on the cached `.gr/state.json`.
 
+### Typical CI job flow
+
+Use the jobs in this order:
+
+1. `mirror:npm`
+   - normal branch pipeline job
+   - resolves project inputs, fetches tarballs, optionally scans, publishes missing packages
+   - writes the canonical cached `.gr/state.json`
+
+2. `state:rebuild`
+   - manual maintenance job
+   - rebuilds `state.target` from everything the target registry currently contains
+   - use this when cache is stale, lost, or you want target inventory to become canonical again
+   - this job is allowed to refresh the shared cache
+
+3. `rescan:target`
+   - manual or scheduled maintenance job
+   - rebuilds an in-job copy of `state.target` from the target registry, then scans `--source target`
+   - uploads `.gr/state.json` and `.gr/scan-report.json` as artifacts
+   - does **not** push state back into the shared cache
+
+The important distinction is:
+
+- `state:rebuild` is the canonical cache writer for maintenance
+- `rescan:target` is read-only from the cache perspective
+
+That prevents scan jobs from overwriting the branch cache with analysis-only state.
+
 ### Periodic target re-scan (new CVEs after publish)
 
 Use `rescan:target` job (manual or scheduled) to catch newly disclosed CVEs in target registry packages even after local cache loss:
@@ -247,6 +276,8 @@ Use `rescan:target` job (manual or scheduled) to catch newly disclosed CVEs in t
 1. `state sync-target` rebuilds inventory from target registry
 2. `scan --source target` checks CVEs using OSV
 3. uploads `.gr/scan-report.json` and `.gr/state.json` artifacts
+
+`rescan:target` intentionally rebuilds target inventory again inside the job so it can run independently of `state:rebuild`, but the CI example keeps it from corrupting cached state by using cache `policy: pull` only.
 
 If outbound OSV API access is blocked, keep `GOLDEN_RETRIEVER_SCAN_PROVIDER=osv-api` and ensure the offline DB at `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB` exists; scan will fall back automatically. If you explicitly set `osv-offline`, no OSV API calls are attempted.
 
@@ -260,6 +291,8 @@ If outbound OSV API access is blocked, keep `GOLDEN_RETRIEVER_SCAN_PROVIDER=osv-
 Recommended:
 
 - keep `.gr/state.json` + `.gr/metadata` in GitLab cache
+- let `mirror:npm` and `state:rebuild` be the only jobs that refresh shared state cache
+- keep `rescan:target` read-only against cache and use its artifacts for review
 - do not cache `.gr/tgzs` unless you specifically need retry support on failed pushes
 - use branch-scoped cache keys for stable incremental performance
 

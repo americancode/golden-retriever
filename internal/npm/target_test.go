@@ -175,3 +175,65 @@ func TestSyncTargetRetriesTransientPackumentFailure(t *testing.T) {
 		t.Fatalf("report=%#v hits=%d", report, hits)
 	}
 }
+
+func TestRebuildTargetFromGitLabRegistry(t *testing.T) {
+	const token = "target-secret"
+	var sawAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+token {
+			sawAuth = true
+		}
+		switch r.URL.Path {
+		case "/api/v4/projects/1/packages":
+			switch r.URL.Query().Get("page") {
+			case "1":
+				w.Header().Set("X-Next-Page", "2")
+				fmt.Fprint(w, `[
+{"name":"left-pad","version":"1.3.0","package_type":"npm"},
+{"name":"@types/node","version":"24.10.1","package_type":"npm"}
+]`)
+			case "2":
+				fmt.Fprint(w, `[
+{"name":"left-pad","version":"1.3.0","package_type":"npm"},
+{"name":"undici-types","version":"7.16.0","package_type":"npm"}
+]`)
+			default:
+				t.Fatalf("unexpected page: %s", r.URL.RawQuery)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Registry = srv.URL + "/api/v4/projects/1/packages/npm"
+	cfg.values[nerfDart(cfg.Registry+"/")+":_authToken"] = token
+	client := NewClientWithConfig(cfg)
+	client.Registry = cfg.Registry
+	state := NewState()
+	state.Target["stale@0.0.1"] = StateRecord{Name: "stale", Version: "0.0.1"}
+
+	report, err := RebuildTargetFromRegistry(context.Background(), client, state, SyncTargetOptions{Source: "gitlab-rebuild"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAuth {
+		t.Fatalf("expected auth header on GitLab listing request")
+	}
+	if report.Present != 3 || report.Missing != 0 || report.Failed != 0 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	if _, ok := state.Target["stale@0.0.1"]; ok {
+		t.Fatalf("stale target entry should have been replaced during rebuild")
+	}
+	for _, key := range []string{"left-pad@1.3.0", "@types/node@24.10.1", "undici-types@7.16.0"} {
+		rec, ok := state.Target[key]
+		if !ok {
+			t.Fatalf("missing rebuilt target record for %s", key)
+		}
+		if rec.Source != "gitlab-rebuild" {
+			t.Fatalf("unexpected source for %s: %#v", key, rec)
+		}
+	}
+}

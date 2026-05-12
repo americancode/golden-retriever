@@ -2,7 +2,15 @@ package npm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -106,6 +114,47 @@ func SyncTarget(ctx context.Context, target *Client, state *State, packages []Pa
 	return report, firstErr
 }
 
+func RebuildTargetFromRegistry(ctx context.Context, target *Client, state *State, opts SyncTargetOptions) (SyncTargetReport, error) {
+	start := time.Now()
+	if opts.Source == "" {
+		opts.Source = "target-registry"
+	}
+	normalizeState(state)
+	if opts.Progress != nil {
+		opts.Progress("target-sync:start total=unknown concurrency=1 source=%s", opts.Source)
+	}
+	packages, err := listRegistryPackages(ctx, target, opts)
+	if err != nil {
+		return SyncTargetReport{}, err
+	}
+	rebuilt := make(map[string]StateRecord, len(packages))
+	now := time.Now().UTC()
+	for i, pkg := range packages {
+		rebuilt[pkg.Key()] = StateRecord{
+			Name:      pkg.Name,
+			Version:   pkg.Version,
+			Tarball:   pkg.Tarball,
+			Integrity: pkg.Integrity,
+			Shasum:    pkg.Shasum,
+			PresentAt: now,
+			Source:    opts.Source,
+		}
+		if opts.Progress != nil && (i+1)%25 == 0 {
+			opts.Progress("target-sync:progress processed=%d/%d present=%d missing=0 failed=0", i+1, len(packages), len(rebuilt))
+		}
+	}
+	state.Target = rebuilt
+	state.UpdatedAt = now
+	report := SyncTargetReport{
+		Present: len(rebuilt),
+		Elapsed: time.Since(start),
+	}
+	if opts.Progress != nil {
+		opts.Progress("target-sync:done total=%d present=%d missing=0 failed=0 elapsed=%s", report.Present, report.Present, report.Elapsed)
+	}
+	return report, nil
+}
+
 func targetPackageVersion(ctx context.Context, target *Client, pkg Package) (Package, bool, error) {
 	pack, err := target.Packument(ctx, pkg.Name)
 	if err != nil {
@@ -135,6 +184,117 @@ func targetPackageVersion(ctx context.Context, target *Client, pkg Package) (Pac
 		present.Shasum = manifest.Dist.Shasum
 	}
 	return present, true, nil
+}
+
+type gitLabRegistryPackage struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	PackageType string `json:"package_type"`
+}
+
+func listRegistryPackages(ctx context.Context, target *Client, opts SyncTargetOptions) ([]Package, error) {
+	endpoint, err := gitLabPackagesAPIEndpoint(target.Registry)
+	if err != nil {
+		return nil, err
+	}
+	const perPage = 100
+	page := 1
+	seen := make(map[string]Package)
+	for {
+		reqURL, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		q := reqURL.Query()
+		q.Set("package_type", "npm")
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+		reqURL.RawQuery = q.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		target.applyAuth(req)
+		if req.Header.Get("Authorization") == "" && target.Config != nil {
+			if auth := target.Config.AuthFor(strings.TrimRight(target.Registry, "/") + "/"); auth.Header != "" {
+				req.Header.Set("Authorization", auth.Header)
+			}
+		}
+		res, err := target.HTTPClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+		_ = res.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if res.StatusCode < 200 || res.StatusCode > 299 {
+			return nil, fmt.Errorf("target package listing returned %w", httpStatusError{
+				StatusCode: res.StatusCode,
+				Status:     res.Status + ": " + strings.TrimSpace(string(body)),
+				RetryAfter: retryAfterDelay(res.Header.Get("Retry-After")),
+			})
+		}
+		var pagePackages []gitLabRegistryPackage
+		if err := json.Unmarshal(body, &pagePackages); err != nil {
+			return nil, err
+		}
+		if opts.Progress != nil {
+			opts.Progress("target-sync:discover page=%d count=%d", page, len(pagePackages))
+		}
+		for _, pkg := range pagePackages {
+			if pkg.PackageType != "" && pkg.PackageType != "npm" {
+				continue
+			}
+			if strings.TrimSpace(pkg.Name) == "" || strings.TrimSpace(pkg.Version) == "" {
+				continue
+			}
+			p := Package{Name: pkg.Name, Version: pkg.Version}
+			seen[p.Key()] = p
+		}
+		nextPage := strings.TrimSpace(res.Header.Get("X-Next-Page"))
+		if nextPage == "" {
+			if len(pagePackages) < perPage {
+				break
+			}
+			page++
+			continue
+		}
+		page, err = strconv.Atoi(nextPage)
+		if err != nil || page <= 0 {
+			break
+		}
+	}
+	packages := make([]Package, 0, len(seen))
+	for _, pkg := range seen {
+		packages = append(packages, pkg)
+	}
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].Key() < packages[j].Key()
+	})
+	return packages, nil
+}
+
+func gitLabPackagesAPIEndpoint(registry string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(registry))
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimRight(u.Path, "/")
+	switch {
+	case strings.Contains(path, "/api/v4/projects/") && strings.HasSuffix(path, "/packages/npm"):
+		u.Path = strings.TrimSuffix(path, "/packages/npm") + "/packages"
+		u.RawQuery = ""
+		return u.String(), nil
+	case strings.Contains(path, "/api/v4/groups/") && strings.HasSuffix(path, "/-/packages/npm"):
+		u.Path = strings.TrimSuffix(path, "/-/packages/npm") + "/packages"
+		u.RawQuery = ""
+		return u.String(), nil
+	default:
+		return "", fmt.Errorf("registry-wide target inventory rebuild is only supported for GitLab npm registry endpoints; got %s", registry)
+	}
 }
 
 func isHTTPStatus(err error, code int) bool {
