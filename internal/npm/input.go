@@ -92,6 +92,9 @@ func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOp
 	if base == "package-lock.json" || base == "npm-shrinkwrap.json" {
 		return loadLockfile(input, filepath.Join(filepath.Dir(input), "yarn.lock"))
 	}
+	if isLockfilePath(input) {
+		return loadLockfile(input, filepath.Join(filepath.Dir(input), "yarn.lock"))
+	}
 	return ResolvePackageJSON(ctx, client, input, opts)
 }
 
@@ -129,16 +132,46 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph,
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), srcData, 0o644); err != nil {
+	projectDir := filepath.Dir(packageJSONPath)
+	tempPackageJSON := filepath.Join(tempDir, "package.json")
+	if err := os.WriteFile(tempPackageJSON, srcData, 0o644); err != nil {
 		return nil, err
 	}
+	resolvedPackageJSON := packageJSONPath
+	if filepath.Base(packageJSONPath) != "package.json" {
+		// npm expects package.json in cwd; for custom input filenames, run in a
+		// temp dir while preserving project-relative local dependency paths.
+		rel, relErr := filepath.Rel(tempDir, projectDir)
+		if relErr != nil {
+			return nil, relErr
+		}
+		if err := os.WriteFile(filepath.Join(tempDir, ".npmrc"), []byte("workspaces=false\n"), 0o644); err != nil {
+			return nil, err
+		}
+		resolvedPackageJSON = tempPackageJSON
+		_ = rel
+	}
 	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
-	cmd.Dir = tempDir
+	cmd.Dir = filepath.Dir(resolvedPackageJSON)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return LoadLockfile(filepath.Join(tempDir, "package-lock.json"))
+	return LoadLockfile(filepath.Join(cmd.Dir, "package-lock.json"))
+}
+
+func isLockfilePath(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		LockfileVersion *int `json:"lockfileVersion"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.LockfileVersion != nil
 }
 
 var gitSSHSpecRe = regexp.MustCompile(`^[^@]+@[^:.]+\.[^:]+:.+$`)
