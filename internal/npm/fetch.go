@@ -68,6 +68,7 @@ type StateRecord struct {
 	Source       string    `json:"source,omitempty"`
 	ScanStatus   string    `json:"scanStatus,omitempty"`
 	ScanReason   string    `json:"scanReason,omitempty"`
+	ScanVulnURLs []string  `json:"scanVulnUrls,omitempty"`
 	ScannedAt    time.Time `json:"scannedAt,omitempty"`
 }
 
