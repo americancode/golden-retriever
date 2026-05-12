@@ -16,6 +16,7 @@ func TestGitLabCIExampleCachesGoldenRetrieverPaths(t *testing.T) {
 		".gr/state.json",
 		".gr/metadata/",
 		"golden-retriever mirror",
+		"golden-retriever state sync-target --input \"$GOLDEN_RETRIEVER_INPUT\" --inputs \"$GOLDEN_RETRIEVER_INPUTS\"",
 		"$NPM_TARGET_REGISTRY",
 	} {
 		if !strings.Contains(text, want) {

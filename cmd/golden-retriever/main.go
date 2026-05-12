@@ -158,7 +158,9 @@ func mirror(args []string) error {
 	access := fs.String("access", "public", "npm package access value")
 	scanDenyPackagePrefixes := fs.String("scan-deny-package-prefixes", "", "comma-separated package name prefixes to block")
 	scanOSV := fs.Bool("scan-osv", true, "query OSV for known vulnerable package versions")
+	scanProvider := fs.String("scan-provider", "osv-api", "scan provider: osv-api or osv-offline")
 	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
+	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	scanOSVBatchSize := fs.Int("scan-osv-batch-size", 200, "OSV query batch size")
 	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
@@ -242,7 +244,9 @@ func mirror(args []string) error {
 			ScanEnforce:         *scanEnforce,
 			ScanDenyPrefixes:    csvList(*scanDenyPackagePrefixes),
 			ScanOSV:             *scanOSV,
+			ScanProvider:        *scanProvider,
 			ScanOSVEndpoint:     *scanOSVEndpoint,
+			ScanOSVOfflineDBDir: *scanOSVOfflineDBDir,
 			ScanOSVBatchSize:    *scanOSVBatchSize,
 			ScanBlocklistPath:   *scanBlocklist,
 			ScanReportPath:      *scanReportPath,
@@ -343,7 +347,9 @@ func mirror(args []string) error {
 			BlocklistPath:     *scanBlocklist,
 			DenyPackagePrefix: csvList(*scanDenyPackagePrefixes),
 			UseOSV:            *scanOSV,
+			OSVProvider:       *scanProvider,
 			OSVEndpoint:       *scanOSVEndpoint,
+			OSVOfflineDBDir:   *scanOSVOfflineDBDir,
 			OSVBatchSize:      *scanOSVBatchSize,
 			MinSeverity:       *scanMinSeverity,
 			UnknownSeverity:   *scanUnknownSeverity,
@@ -713,7 +719,9 @@ func scan(args []string) error {
 	blocklist := fs.String("blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	denyPrefixes := fs.String("deny-package-prefixes", "", "comma-separated package name prefixes to block")
 	useOSV := fs.Bool("osv", true, "query OSV for known vulnerable package versions")
+	provider := fs.String("provider", "osv-api", "scan provider: osv-api or osv-offline")
 	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
+	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
 	osvBatchSize := fs.Int("osv-batch-size", 200, "OSV query batch size")
 	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
@@ -731,7 +739,9 @@ func scan(args []string) error {
 		BlocklistPath:     *blocklist,
 		DenyPackagePrefix: csvList(*denyPrefixes),
 		UseOSV:            *useOSV,
+		OSVProvider:       *provider,
 		OSVEndpoint:       *osvEndpoint,
+		OSVOfflineDBDir:   *osvOfflineDBDir,
 		OSVBatchSize:      *osvBatchSize,
 		MinSeverity:       *minSeverity,
 		UnknownSeverity:   *unknownSeverity,
@@ -820,6 +830,8 @@ func stateInspect(args []string) error {
 func stateSyncTarget(args []string) error {
 	fs := flag.NewFlagSet("state sync-target", flag.ExitOnError)
 	input := fs.String("input", "package.json", "package.json, package-lock.json, or npm-shrinkwrap.json")
+	inputs := fs.String("inputs", "", "comma-separated package.json/package-lock.json/npm-shrinkwrap.json paths")
+	projectConcurrency := fs.Int("project-concurrency", max(1, runtime.NumCPU()/2), "parallel project resolution count when using --inputs")
 	statePath := fs.String("state", ".gr/state.json", "state inventory file")
 	registry := fs.String("registry", "", "source npm registry base URL override")
 	targetRegistry := fs.String("target-registry", "", "target npm registry base URL")
@@ -855,6 +867,10 @@ func stateSyncTarget(args []string) error {
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
+	resolvedInputs, err := resolveInputs(*input, *inputs)
+	if err != nil {
+		return err
+	}
 	dependencySet, err := dependencySelection(*includeDev, *includeOptional, *omit, *include)
 	if err != nil {
 		return err
@@ -867,11 +883,7 @@ func stateSyncTarget(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
-	if err != nil {
-		return err
-	}
-	graph, err := npm.LoadInput(ctx, sourceClient, *input, npm.ResolveOptions{
+	resolveOpts := npm.ResolveOptions{
 		IncludeDev:         dependencySet.includeDev,
 		IncludeOptional:    dependencySet.includeOptional,
 		LegacyPeerDeps:     *legacyPeerDeps,
@@ -888,26 +900,69 @@ func stateSyncTarget(args []string) error {
 		Avoid:              *avoid,
 		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
-	})
-	if err != nil {
-		return err
+	}
+	var (
+		packages            []npm.Package
+		engineWarnings      []*npm.PackageEngineError
+		deprecationWarnings []npm.PackageDeprecationWarning
+	)
+	if len(resolvedInputs) > 1 {
+		var warningsMu sync.Mutex
+		perProjectWarnings := map[string]*npm.Graph{}
+		packages, _, err = resolveProjectsParallel(ctx, resolvedInputs, *projectConcurrency, nil, func(currentInput string) (*npm.Graph, error) {
+			_, _, metadata := multiProjectPaths(currentInput, "", *statePath, *metadataCache)
+			sourceClient, clientErr := newClient(currentInput, *registry, *npmrc, metadata, *metadataCacheTTL, *metadataRetries)
+			if clientErr != nil {
+				return nil, clientErr
+			}
+			graph, loadErr := npm.LoadInput(ctx, sourceClient, currentInput, resolveOpts)
+			if loadErr == nil {
+				warningsMu.Lock()
+				perProjectWarnings[currentInput] = graph
+				warningsMu.Unlock()
+			}
+			return graph, loadErr
+		})
+		if err != nil {
+			return err
+		}
+		for _, currentInput := range resolvedInputs {
+			graph := perProjectWarnings[currentInput]
+			if graph == nil {
+				continue
+			}
+			engineWarnings = append(engineWarnings, graph.EngineWarnings...)
+			deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
+		}
+	} else {
+		sourceClient, clientErr := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
+		if clientErr != nil {
+			return clientErr
+		}
+		graph, loadErr := npm.LoadInput(ctx, sourceClient, *input, resolveOpts)
+		if loadErr != nil {
+			return loadErr
+		}
+		packages = graph.Packages()
+		engineWarnings = graph.EngineWarnings
+		deprecationWarnings = graph.DeprecationWarnings
 	}
 	if !*jsonOut {
-		printEngineWarnings(graph)
-		printDeprecationWarnings(graph)
+		printEngineWarnings(&npm.Graph{EngineWarnings: engineWarnings})
+		printDeprecationWarnings(&npm.Graph{DeprecationWarnings: deprecationWarnings})
 	}
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
 		return err
 	}
-	targetClient, err := newTargetClient(*input, *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
+	targetClient, err := newTargetClient(resolvedInputs[0], *targetRegistry, firstNonEmpty(*targetNPMRC, *npmrc), *metadataRetries, *targetInsecureSkipVerify)
 	if err != nil {
 		return err
 	}
 	targetClient.UseStaleOnFailure = false
 	fmt.Fprintf(os.Stderr, "progress target-auth source=%s header=%s registry=%s\n", detectTargetAuthSource(*targetRegistry, targetClient.Config), authHeaderKind(targetClient.Config, *targetRegistry), *targetRegistry)
 
-	report, err := npm.SyncTarget(ctx, targetClient, state, graph.Packages(), npm.SyncTargetOptions{
+	report, err := npm.SyncTarget(ctx, targetClient, state, packages, npm.SyncTargetOptions{
 		Concurrency: *concurrency,
 		Source:      *targetRegistry,
 	})
@@ -921,15 +976,17 @@ func stateSyncTarget(args []string) error {
 		return printJSON(struct {
 			Command             string                          `json:"command"`
 			Packages            int                             `json:"packages"`
+			Inputs              []string                        `json:"inputs,omitempty"`
+			ProjectConcurrency  int                             `json:"projectConcurrency,omitempty"`
 			TargetSync          npm.SyncTargetReport            `json:"targetSync"`
 			State               string                          `json:"state"`
 			TargetRegistry      string                          `json:"targetRegistry"`
 			EngineWarnings      []*npm.PackageEngineError       `json:"engineWarnings,omitempty"`
 			DeprecationWarnings []npm.PackageDeprecationWarning `json:"deprecationWarnings,omitempty"`
-		}{Command: "state sync-target", Packages: len(graph.Packages()), TargetSync: report, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: graph.EngineWarnings, DeprecationWarnings: graph.DeprecationWarnings})
+		}{Command: "state sync-target", Packages: len(packages), Inputs: resolvedInputs, ProjectConcurrency: *projectConcurrency, TargetSync: report, State: *statePath, TargetRegistry: *targetRegistry, EngineWarnings: engineWarnings, DeprecationWarnings: deprecationWarnings})
 	}
 	fmt.Printf("packages=%d target_present=%d target_missing=%d failed=%d elapsed=%s state=%s target=%s\n",
-		len(graph.Packages()), report.Present, report.Missing, report.Failed, report.Elapsed, *statePath, *targetRegistry)
+		len(packages), report.Present, report.Missing, report.Failed, report.Elapsed, *statePath, *targetRegistry)
 	return nil
 }
 
@@ -1170,7 +1227,9 @@ type mirrorManyOptions struct {
 	ScanEnforce              bool
 	ScanDenyPrefixes         []string
 	ScanOSV                  bool
+	ScanProvider             string
 	ScanOSVEndpoint          string
+	ScanOSVOfflineDBDir      string
 	ScanOSVBatchSize         int
 	ScanMinSeverity          string
 	ScanUnknownSeverity      string
@@ -1241,7 +1300,9 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			BlocklistPath:     opts.ScanBlocklistPath,
 			DenyPackagePrefix: opts.ScanDenyPrefixes,
 			UseOSV:            opts.ScanOSV,
+			OSVProvider:       opts.ScanProvider,
 			OSVEndpoint:       opts.ScanOSVEndpoint,
+			OSVOfflineDBDir:   opts.ScanOSVOfflineDBDir,
 			OSVBatchSize:      opts.ScanOSVBatchSize,
 			MinSeverity:       opts.ScanMinSeverity,
 			UnknownSeverity:   opts.ScanUnknownSeverity,

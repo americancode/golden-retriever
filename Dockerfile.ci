@@ -11,9 +11,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 
 FROM alpine:${ALPINE_VERSION}
 RUN apk upgrade --no-cache \
-  && apk add --no-cache nodejs npm ca-certificates \
+  && apk add --no-cache nodejs npm ca-certificates osv-scanner \
   && npm install -g npm@latest \
   && npm cache clean --force \
+  && osv-scanner --version \
   && npm --version \
   && node --version \
   && mkdir -p /workspace

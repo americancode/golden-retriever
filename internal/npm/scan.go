@@ -6,10 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -24,7 +26,9 @@ type ScanOptions struct {
 	BlocklistPath     string
 	DenyPackagePrefix []string
 	UseOSV            bool
+	OSVProvider       string
 	OSVEndpoint       string
+	OSVOfflineDBDir   string
 	OSVBatchSize      int
 	MinSeverity       string
 	UnknownSeverity   string
@@ -73,6 +77,9 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	}
 	if opts.OSVEndpoint == "" {
 		opts.OSVEndpoint = "https://api.osv.dev/v1/querybatch"
+	}
+	if opts.OSVProvider == "" {
+		opts.OSVProvider = "osv-api"
 	}
 	if opts.OSVBatchSize <= 0 {
 		opts.OSVBatchSize = 200
@@ -160,10 +167,9 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	wg.Wait()
 	state.UpdatedAt = time.Now().UTC()
 	if opts.UseOSV {
-		if err := applyOSVFindings(ctx, state, opts, keys); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+		err := applyOSVProviderFindings(ctx, state, opts, keys)
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 		report = recomputeScanReport(state, keys, opts.Source)
 	}
@@ -325,6 +331,28 @@ type osvBatchResponse struct {
 	} `json:"results"`
 }
 
+func applyOSVProviderFindings(ctx context.Context, state *State, opts ScanOptions, keys []string) error {
+	switch strings.ToLower(strings.TrimSpace(opts.OSVProvider)) {
+	case "", "osv-api":
+		err := applyOSVFindings(ctx, state, opts, keys)
+		if err == nil {
+			return nil
+		}
+		if opts.Progress != nil {
+			opts.Progress("osv:provider:fallback from=osv-api to=osv-offline error=%v", err)
+		}
+		offlineErr := applyOSVScannerFindings(ctx, state, opts, keys, true)
+		if offlineErr == nil {
+			return nil
+		}
+		return fmt.Errorf("osv api failed: %v; offline fallback failed: %w", err, offlineErr)
+	case "osv-offline":
+		return applyOSVScannerFindings(ctx, state, opts, keys, true)
+	default:
+		return fmt.Errorf("unsupported scan provider %q", opts.OSVProvider)
+	}
+}
+
 func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys []string) error {
 	type indexedRec struct {
 		Key string
@@ -456,6 +484,223 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 	}
 	state.UpdatedAt = time.Now().UTC()
 	return nil
+}
+
+type osvScannerCustomLockfile struct {
+	Results []struct {
+		Packages []struct {
+			Package struct {
+				Name      string `json:"name"`
+				Version   string `json:"version,omitempty"`
+				Ecosystem string `json:"ecosystem,omitempty"`
+			} `json:"package"`
+		} `json:"packages"`
+	} `json:"results"`
+}
+
+type osvScannerOutput struct {
+	Results []struct {
+		Packages []struct {
+			Package struct {
+				Name      string `json:"name"`
+				Version   string `json:"version,omitempty"`
+				Ecosystem string `json:"ecosystem,omitempty"`
+			} `json:"package"`
+			Vulnerabilities []struct {
+				ID               string   `json:"id"`
+				Aliases          []string `json:"aliases"`
+				DatabaseSpecific struct {
+					Severity string `json:"severity"`
+				} `json:"database_specific"`
+			} `json:"vulnerabilities"`
+		} `json:"packages"`
+	} `json:"results"`
+}
+
+func applyOSVScannerFindings(ctx context.Context, state *State, opts ScanOptions, keys []string, offline bool) error {
+	if _, err := exec.LookPath("osv-scanner"); err != nil {
+		return fmt.Errorf("osv-scanner not available: %w", err)
+	}
+	exceptions, err := loadExceptions(opts.ExceptionsPath)
+	if err != nil {
+		return err
+	}
+	minLevel, err := parseSeverityLevel(opts.MinSeverity)
+	if err != nil {
+		return err
+	}
+	unknownLevel, err := parseSeverityLevel(opts.UnknownSeverity)
+	if err != nil {
+		return err
+	}
+
+	lockfile, err := buildOSVScannerLockfile(state, keys, opts.Source)
+	if err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp("", "golden-retriever-osv-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	lockfilePath := filepath.Join(tmpDir, "osv-scanner.json")
+	data, err := json.Marshal(lockfile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(lockfilePath, data, 0o644); err != nil {
+		return err
+	}
+
+	args := []string{"scan", "source", "--format", "json", "--lockfile", "osv-scanner:" + lockfilePath}
+	if offline {
+		args = append(args, "--offline-vulnerabilities")
+	}
+	if opts.Progress != nil {
+		mode := "online"
+		if offline {
+			mode = "offline"
+		}
+		opts.Progress("osv:scanner:start mode=%s provider=osv-scanner packages=%d", mode, countOSVScannerPackages(lockfile))
+	}
+	cmd := exec.CommandContext(ctx, "osv-scanner", args...)
+	cmd.Dir = tmpDir
+	env := os.Environ()
+	if strings.TrimSpace(opts.OSVOfflineDBDir) != "" {
+		env = append(env, "OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="+opts.OSVOfflineDBDir)
+	}
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || (exitErr.ExitCode() != 1 && exitErr.ExitCode() != 0) {
+			return fmt.Errorf("osv-scanner failed: %w: %s", runErr, strings.TrimSpace(stderr.String()))
+		}
+	}
+
+	var parsed osvScannerOutput
+	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+		return fmt.Errorf("parse osv-scanner output: %w", err)
+	}
+
+	for _, result := range parsed.Results {
+		for _, item := range result.Packages {
+			name := strings.TrimSpace(item.Package.Name)
+			version := strings.TrimSpace(item.Package.Version)
+			if name == "" || version == "" || len(item.Vulnerabilities) == 0 {
+				continue
+			}
+			key := name + "@" + version
+			rec, bucket := getStateRecord(state, key, opts.Source)
+			if rec.Name == "" || rec.Version == "" {
+				continue
+			}
+			hitIDs := make([]string, 0, len(item.Vulnerabilities))
+			block := false
+			for _, vuln := range item.Vulnerabilities {
+				if vuln.ID == "" {
+					continue
+				}
+				if isExceptionMatch(exceptions, rec, vuln.ID) {
+					continue
+				}
+				hitIDs = append(hitIDs, vuln.ID)
+				if parseScannerSeverity(vuln.DatabaseSpecific.Severity, unknownLevel) >= minLevel {
+					block = true
+				}
+			}
+			if len(hitIDs) == 0 || !block {
+				continue
+			}
+			rec.ScanStatus = "fail"
+			rec.ScanReason = fmt.Sprintf("osv vulnerabilities (%s+): %s", opts.MinSeverity, strings.Join(hitIDs, ","))
+			rec.ScannedAt = time.Now().UTC()
+			setStateRecord(state, key, bucket, rec)
+			if opts.Progress != nil {
+				opts.Progress("scan:vuln package=%s@%s ids=%s provider=osv-scanner", rec.Name, rec.Version, strings.Join(hitIDs, ","))
+			}
+		}
+	}
+	state.UpdatedAt = time.Now().UTC()
+	if opts.Progress != nil {
+		mode := "online"
+		if offline {
+			mode = "offline"
+		}
+		opts.Progress("osv:scanner:done mode=%s provider=osv-scanner", mode)
+	}
+	return nil
+}
+
+func buildOSVScannerLockfile(state *State, keys []string, source string) (osvScannerCustomLockfile, error) {
+	lockfile := osvScannerCustomLockfile{}
+	result := struct {
+		Packages []struct {
+			Package struct {
+				Name      string `json:"name"`
+				Version   string `json:"version,omitempty"`
+				Ecosystem string `json:"ecosystem,omitempty"`
+			} `json:"package"`
+		} `json:"packages"`
+	}{Packages: make([]struct {
+		Package struct {
+			Name      string `json:"name"`
+			Version   string `json:"version,omitempty"`
+			Ecosystem string `json:"ecosystem,omitempty"`
+		} `json:"package"`
+	}, 0, len(keys))}
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		rec, _ := getStateRecord(state, key, source)
+		if rec.Name == "" || rec.Version == "" {
+			continue
+		}
+		pkgKey := rec.Name + "@" + rec.Version
+		if _, ok := seen[pkgKey]; ok {
+			continue
+		}
+		seen[pkgKey] = struct{}{}
+		item := struct {
+			Package struct {
+				Name      string `json:"name"`
+				Version   string `json:"version,omitempty"`
+				Ecosystem string `json:"ecosystem,omitempty"`
+			} `json:"package"`
+		}{}
+		item.Package.Name = rec.Name
+		item.Package.Version = rec.Version
+		item.Package.Ecosystem = "npm"
+		result.Packages = append(result.Packages, item)
+	}
+	lockfile.Results = append(lockfile.Results, result)
+	return lockfile, nil
+}
+
+func countOSVScannerPackages(lockfile osvScannerCustomLockfile) int {
+	total := 0
+	for _, result := range lockfile.Results {
+		total += len(result.Packages)
+	}
+	return total
+}
+
+func parseScannerSeverity(raw string, unknown severityLevel) severityLevel {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "low":
+		return sevLow
+	case "medium":
+		return sevMedium
+	case "high":
+		return sevHigh
+	case "critical":
+		return sevCritical
+	default:
+		return unknown
+	}
 }
 
 func selectedScanKeys(state *State, source string) []string {
