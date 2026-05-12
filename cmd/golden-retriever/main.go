@@ -190,6 +190,7 @@ func mirror(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	tracef := newTraceLogger(*trace)
+	progressf := newProgressLogger(!*trace && !*jsonOut)
 	if len(resolvedInputs) > 1 {
 		tracef("mirror:batch:start projects=%d target=%s timeout=%s", len(resolvedInputs), *targetRegistry, *timeout)
 		return mirrorMany(ctx, mirrorManyOptions{
@@ -233,6 +234,7 @@ func mirror(args []string) error {
 			},
 			JSONOut:             *jsonOut,
 			Tracef:              tracef,
+			Progressf:           progressf,
 			ScanAuto:            *scanAuto,
 			ScanEnforce:         *scanEnforce,
 			ScanDenyPrefixes:    csvList(*scanDenyPackagePrefixes),
@@ -249,6 +251,7 @@ func mirror(args []string) error {
 		})
 	}
 	tracef("mirror:start input=%s target=%s timeout=%s", *input, *targetRegistry, *timeout)
+	progressf("resolve:start input=%s", *input)
 
 	sourceClient, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
@@ -276,6 +279,7 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
+	progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
 	tracef("mirror:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
@@ -319,7 +323,7 @@ func mirror(args []string) error {
 		Concurrency:        *fetchConcurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
-		Progress:           tracef,
+		Progress:           pickProgressLogger(tracef, progressf),
 	})
 	if err != nil {
 		return err
@@ -339,6 +343,7 @@ func mirror(args []string) error {
 			UnknownSeverity:   *scanUnknownSeverity,
 			ExceptionsPath:    *scanExceptions,
 			OSVConcurrency:    *scanOSVConcurrency,
+			Progress:          pickProgressLogger(tracef, progressf),
 		})
 		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
 			scanErr = writeErr
@@ -361,7 +366,7 @@ func mirror(args []string) error {
 		Tag:             *tag,
 		Access:          *access,
 		MaxRetries:      *publishRetries,
-		Progress:        tracef,
+		Progress:        pickProgressLogger(tracef, progressf),
 		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
@@ -421,6 +426,7 @@ func push(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	tracef := newTraceLogger(*trace)
+	progressf := newProgressLogger(!*trace && !*jsonOut)
 	tracef("push:start target=%s timeout=%s", *targetRegistry, *timeout)
 
 	state, err := npm.LoadState(*statePath)
@@ -438,7 +444,7 @@ func push(args []string) error {
 		Tag:             *tag,
 		Access:          *access,
 		MaxRetries:      *maxRetries,
-		Progress:        tracef,
+		Progress:        pickProgressLogger(tracef, progressf),
 		RequireScanPass: *scanEnforce,
 	})
 	if saveErr := npm.SaveState(*statePath, state); saveErr != nil && err == nil {
@@ -514,6 +520,7 @@ func fetch(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	tracef := newTraceLogger(*trace)
+	progressf := newProgressLogger(!*trace && !*jsonOut)
 	if len(resolvedInputs) > 1 {
 		tracef("fetch:batch:start projects=%d timeout=%s", len(resolvedInputs), *timeout)
 		return fetchMany(ctx, fetchManyOptions{
@@ -547,11 +554,13 @@ func fetch(args []string) error {
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
 			},
-			JSONOut: *jsonOut,
-			Tracef:  tracef,
+			JSONOut:   *jsonOut,
+			Tracef:    tracef,
+			Progressf: progressf,
 		})
 	}
 	tracef("fetch:start input=%s timeout=%s", *input, *timeout)
+	progressf("resolve:start input=%s", *input)
 
 	client, err := newClient(*input, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)
 	if err != nil {
@@ -579,6 +588,7 @@ func fetch(args []string) error {
 	if err != nil {
 		return err
 	}
+	progressf("resolve:done input=%s packages=%d", *input, len(graph.Packages()))
 	tracef("fetch:resolve:done packages=%d", len(graph.Packages()))
 	if !*jsonOut {
 		printEngineWarnings(graph)
@@ -591,7 +601,7 @@ func fetch(args []string) error {
 		Concurrency:        *concurrency,
 		MaxRetries:         *maxRetries,
 		OutputNameStrategy: *outputNaming,
-		Progress:           tracef,
+		Progress:           pickProgressLogger(tracef, progressf),
 	})
 	if err != nil {
 		return err
@@ -1057,10 +1067,11 @@ type fetchManyOptions struct {
 	ResolveOptions     npm.ResolveOptions
 	JSONOut            bool
 	Tracef             func(format string, args ...any)
+	Progressf          func(format string, args ...any)
 }
 
 func fetchMany(ctx context.Context, opts fetchManyOptions) error {
-	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
+	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, opts.Progressf, func(input string) (*npm.Graph, error) {
 		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
 		client, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries)
 		if err != nil {
@@ -1082,7 +1093,7 @@ func fetchMany(ctx context.Context, opts fetchManyOptions) error {
 		Concurrency:        opts.FetchConcurrency,
 		MaxRetries:         opts.MaxRetries,
 		OutputNameStrategy: opts.OutputNaming,
-		Progress:           opts.Tracef,
+		Progress:           pickProgressLogger(opts.Tracef, opts.Progressf),
 	})
 	if err != nil {
 		return err
@@ -1131,6 +1142,7 @@ type mirrorManyOptions struct {
 	ResolveOptions      npm.ResolveOptions
 	JSONOut             bool
 	Tracef              func(format string, args ...any)
+	Progressf           func(format string, args ...any)
 	ScanAuto            bool
 	ScanEnforce         bool
 	ScanDenyPrefixes    []string
@@ -1147,7 +1159,7 @@ type mirrorManyOptions struct {
 }
 
 func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
-	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, func(input string) (*npm.Graph, error) {
+	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, opts.Progressf, func(input string) (*npm.Graph, error) {
 		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
 		sourceClient, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries)
 		if err != nil {
@@ -1192,7 +1204,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		Concurrency:        opts.FetchConcurrency,
 		MaxRetries:         opts.MaxRetries,
 		OutputNameStrategy: opts.OutputNaming,
-		Progress:           opts.Tracef,
+		Progress:           pickProgressLogger(opts.Tracef, opts.Progressf),
 	})
 	if err != nil {
 		return err
@@ -1211,6 +1223,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			UnknownSeverity:   opts.ScanUnknownSeverity,
 			ExceptionsPath:    opts.ScanExceptionsPath,
 			OSVConcurrency:    opts.ScanOSVConcurrency,
+			Progress:          pickProgressLogger(opts.Tracef, opts.Progressf),
 		})
 		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
 			err = writeErr
@@ -1230,7 +1243,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 		Tag:             opts.Tag,
 		Access:          opts.Access,
 		MaxRetries:      opts.PublishRetries,
-		Progress:        opts.Tracef,
+		Progress:        pickProgressLogger(opts.Tracef, opts.Progressf),
 		RequireScanPass: opts.ScanEnforce,
 	})
 	if saveErr := npm.SaveState(opts.StateBase, state); saveErr != nil && err == nil {
@@ -1261,7 +1274,7 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 	return nil
 }
 
-func resolveProjectsParallel(ctx context.Context, inputs []string, workers int, resolveFn func(input string) (*npm.Graph, error)) ([]npm.Package, map[string]int, error) {
+func resolveProjectsParallel(ctx context.Context, inputs []string, workers int, progressf func(format string, args ...any), resolveFn func(input string) (*npm.Graph, error)) ([]npm.Package, map[string]int, error) {
 	type result struct {
 		input string
 		graph *npm.Graph
@@ -1276,7 +1289,13 @@ func resolveProjectsParallel(ctx context.Context, inputs []string, workers int, 
 		go func() {
 			defer wg.Done()
 			for input := range jobs {
+				if progressf != nil {
+					progressf("resolve:start input=%s", input)
+				}
 				graph, err := resolveFn(input)
+				if err == nil && progressf != nil {
+					progressf("resolve:done input=%s packages=%d", input, len(graph.Packages()))
+				}
 				results <- result{input: input, graph: graph, err: err}
 			}
 		}()
@@ -1448,6 +1467,22 @@ func newTraceLogger(enabled bool) func(format string, args ...any) {
 		ts := time.Now().UTC().Format(time.RFC3339)
 		fmt.Fprintf(os.Stderr, "trace time=%s %s\n", ts, fmt.Sprintf(format, args...))
 	}
+}
+
+func newProgressLogger(enabled bool) func(format string, args ...any) {
+	if !enabled {
+		return nil
+	}
+	return func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "progress %s\n", fmt.Sprintf(format, args...))
+	}
+}
+
+func pickProgressLogger(tracef, progressf func(format string, args ...any)) func(format string, args ...any) {
+	if progressf != nil {
+		return progressf
+	}
+	return tracef
 }
 
 func printEngineWarnings(graph *npm.Graph) {

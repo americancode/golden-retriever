@@ -31,6 +31,7 @@ type ScanOptions struct {
 	UnknownSeverity   string
 	ExceptionsPath    string
 	OSVConcurrency    int
+	Progress          func(format string, args ...any)
 }
 
 type ScanReport struct {
@@ -115,6 +116,7 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	keys := selectedScanKeys(state, opts.Source)
 	report := ScanReport{Total: len(keys)}
 	var firstErr error
+	processed := 0
 
 	for i := 0; i < opts.Concurrency; i++ {
 		wg.Add(1)
@@ -126,7 +128,9 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 					return
 				default:
 				}
+				mu.Lock()
 				rec, bucket := getStateRecord(state, key, opts.Source)
+				mu.Unlock()
 				status, reason, err := scanRecord(rec, opts, blocklist, bucket == "local")
 				mu.Lock()
 				if err != nil {
@@ -141,11 +145,18 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 					report.Passed++
 				} else {
 					report.Failed++
+					if opts.Progress != nil {
+						opts.Progress("scan:drop package=%s@%s reason=%s", rec.Name, rec.Version, reason)
+					}
 				}
 				rec.ScanStatus = status
 				rec.ScanReason = reason
 				rec.ScannedAt = time.Now().UTC()
 				setStateRecord(state, key, bucket, rec)
+				processed++
+				if opts.Progress != nil && (processed%25 == 0 || processed == report.Total) {
+					opts.Progress("scan:progress processed=%d/%d passed=%d failed=%d errors=%d", processed, report.Total, report.Passed, report.Failed, report.Errors)
+				}
 				mu.Unlock()
 			}
 		}()
@@ -362,6 +373,9 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 			end = len(records)
 		}
 		chunk := records[i:end]
+		if opts.Progress != nil {
+			opts.Progress("osv:batch:start endpoint=%s batch=%d queries=%d", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, len(chunk))
+		}
 		reqBody := osvBatchRequest{Queries: make([]osvQuery, 0, len(chunk))}
 		for _, item := range chunk {
 			reqBody.Queries = append(reqBody.Queries, osvQuery{
@@ -381,6 +395,9 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 		req.Header.Set("Accept", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
+			if opts.Progress != nil {
+				opts.Progress("osv:batch:error endpoint=%s batch=%d error=%v", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, err)
+			}
 			return err
 		}
 		body, readErr := io.ReadAll(resp.Body)
@@ -389,6 +406,9 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 			return readErr
 		}
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			if opts.Progress != nil {
+				opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, resp.Status)
+			}
 			return fmt.Errorf("osv query failed: %s", resp.Status)
 		}
 		var parsed osvBatchResponse
@@ -405,6 +425,9 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 					idsToResolve[v.ID] = struct{}{}
 				}
 			}
+		}
+		if opts.Progress != nil {
+			opts.Progress("osv:batch:done endpoint=%s batch=%d status=%s vuln_ids=%d", opts.OSVEndpoint, (i/opts.OSVBatchSize)+1, resp.Status, len(idsToResolve))
 		}
 		levels, err := fetchOSVSeverityLevels(ctx, client, opts, idsToResolve, unknownLevel, vulnCache)
 		if err != nil {
@@ -440,6 +463,9 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 				rec.ScanReason = fmt.Sprintf("osv vulnerabilities (%s+): %s", opts.MinSeverity, strings.Join(hitIDs, ","))
 				rec.ScannedAt = time.Now().UTC()
 				setStateRecord(state, chunk[idx].Key, bucket, rec)
+				if opts.Progress != nil {
+					opts.Progress("scan:vuln package=%s@%s ids=%s", rec.Name, rec.Version, strings.Join(hitIDs, ","))
+				}
 			}
 		}
 	}
@@ -570,6 +596,9 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 		err   error
 	}
 	endpointBase := strings.TrimSuffix(opts.OSVEndpoint, "/querybatch")
+	if opts.Progress != nil {
+		opts.Progress("osv:detail:start endpoint=%s ids=%d concurrency=%d", endpointBase+"/vulns/{id}", len(ids), opts.OSVConcurrency)
+	}
 	jobs := make(chan string)
 	results := make(chan out, len(ids))
 	var wg sync.WaitGroup
@@ -579,10 +608,20 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 			defer wg.Done()
 			for id := range jobs {
 				if level, ok := cache[id]; ok {
+					if opts.Progress != nil {
+						opts.Progress("osv:detail:cache id=%s", id)
+					}
 					results <- out{id: id, level: level}
 					continue
 				}
 				level, err := fetchOSVSeverityLevel(ctx, client, endpointBase+"/vulns/"+id, unknown)
+				if opts.Progress != nil {
+					if err != nil {
+						opts.Progress("osv:detail:error id=%s error=%v", id, err)
+					} else {
+						opts.Progress("osv:detail:done id=%s severity=%s", id, level.String())
+					}
+				}
 				results <- out{id: id, level: level, err: err}
 			}
 		}()
@@ -599,6 +638,9 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 			return nil, r.err
 		}
 		outMap[r.id] = r.level
+	}
+	if opts.Progress != nil {
+		opts.Progress("osv:detail:complete ids=%d", len(outMap))
 	}
 	return outMap, nil
 }
@@ -635,6 +677,21 @@ func fetchOSVSeverityLevel(ctx context.Context, client *http.Client, url string,
 		return sevCritical, nil
 	default:
 		return unknown, nil
+	}
+}
+
+func (s severityLevel) String() string {
+	switch s {
+	case sevLow:
+		return "low"
+	case sevMedium:
+		return "medium"
+	case sevHigh:
+		return "high"
+	case sevCritical:
+		return "critical"
+	default:
+		return "none"
 	}
 }
 
