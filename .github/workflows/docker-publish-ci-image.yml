@@ -127,15 +127,31 @@ jobs:
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # Sign digest directly.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          # Also sign each published tag@digest reference.
+          for tag in ${TAGS}; do
+            cosign sign --yes "${tag}@${DIGEST}"
+          done
 
       - name: Verify published image signature
         if: ${{ github.event_name != 'pull_request' }}
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
+          # Verify digest signature.
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/docker-publish-ci-image.yml@${{ github.ref }}" \
             "${IMAGE}@${DIGEST}"
+          # Verify all published tags resolve to signed digests.
+          for tag in ${TAGS}; do
+            cosign verify \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/docker-publish-ci-image.yml@${{ github.ref }}" \
+              "${tag}"
+          done
