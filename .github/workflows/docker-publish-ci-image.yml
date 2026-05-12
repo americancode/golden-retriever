@@ -4,14 +4,8 @@ on:
   push:
     branches: ["main"]
     tags: ["v*.*.*"]
-    paths:
-      - "Dockerfile.ci"
-      - ".github/workflows/docker-publish-ci-image.yml"
   pull_request:
     branches: ["main"]
-    paths:
-      - "Dockerfile.ci"
-      - ".github/workflows/docker-publish-ci-image.yml"
   workflow_dispatch:
 
 env:
