@@ -163,6 +163,7 @@ jobs:
           owner = os.environ["OWNER"]
           package = os.environ["PACKAGE_NAME"]
           keep_semver_count = int(os.environ.get("KEEP_SEMVER_COUNT", "5"))
+          max_passes = 5
 
           semver_re = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
           artifact_re = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
@@ -193,19 +194,20 @@ jobs:
               print(user_probe.stderr, file=sys.stderr)
               sys.exit(1)
 
-          base = api_base()
-          versions = []
-          page = 1
-          while True:
-              res = gh_api(f"{base}?per_page=100&page={page}")
-              if res.returncode != 0:
-                  print(res.stderr, file=sys.stderr)
-                  sys.exit(res.returncode)
-              batch = json.loads(res.stdout)
-              if not batch:
-                  break
-              versions.extend(batch)
-              page += 1
+          def list_versions(base):
+              versions = []
+              page = 1
+              while True:
+                  res = gh_api(f"{base}?per_page=100&page={page}")
+                  if res.returncode != 0:
+                      print(res.stderr, file=sys.stderr)
+                      sys.exit(res.returncode)
+                  batch = json.loads(res.stdout)
+                  if not batch:
+                      break
+                  versions.extend(batch)
+                  page += 1
+              return versions
 
           def tags_for(version):
               return version.get("metadata", {}).get("container", {}).get("tags", []) or []
@@ -224,65 +226,93 @@ jobs:
               pre_key = (1, "") if not sep else (0, pre)
               return nums, pre_key, build
 
-          semver_tags = sorted(
-              {tag for version in versions for tag in tags_for(version) if semver_re.match(tag)},
-              key=semver_key,
-              reverse=True,
-          )
-          keep_semver_tags = set(semver_tags[:keep_semver_count])
+          def classify(versions):
+              semver_tags = sorted(
+                  {tag for version in versions for tag in tags_for(version) if semver_re.match(tag)},
+                  key=semver_key,
+                  reverse=True,
+              )
+              keep_semver_tags = set(semver_tags[:keep_semver_count])
 
-          keep_image_digests = set()
-          keep_version_ids = set()
-          for version in versions:
-              tags = set(tags_for(version))
-              digest = digest_hex(version)
-              if "main" in tags or tags.intersection(keep_semver_tags):
-                  keep_version_ids.add(version["id"])
-                  if digest:
-                      keep_image_digests.add(digest)
+              keep_image_digests = set()
+              keep_version_ids = set()
+              artifact_subjects = {}
 
-          artifact_subjects = {}
-          for version in versions:
+              for version in versions:
+                  tags = set(tags_for(version))
+                  digest = digest_hex(version)
+                  if "main" in tags or tags.intersection(keep_semver_tags):
+                      keep_version_ids.add(version["id"])
+                      if digest:
+                          keep_image_digests.add(digest)
+
+              for version in versions:
+                  for tag in tags_for(version):
+                      match = artifact_re.match(tag)
+                      if match:
+                          artifact_subjects.setdefault(version["id"], set()).add(match.group(1))
+
+              for version in versions:
+                  subjects = artifact_subjects.get(version["id"], set())
+                  if subjects and subjects.intersection(keep_image_digests):
+                      keep_version_ids.add(version["id"])
+
+              return keep_semver_tags, keep_image_digests, keep_version_ids, artifact_subjects
+
+          def delete_order(version, artifact_subjects):
               tags = tags_for(version)
-              for tag in tags:
-                  match = artifact_re.match(tag)
-                  if match:
-                      artifact_subjects.setdefault(version["id"], set()).add(match.group(1))
+              if version["id"] in artifact_subjects:
+                  return 0
+              if not tags:
+                  return 1
+              return 2
 
-          for version in versions:
-              subjects = artifact_subjects.get(version["id"], set())
-              if subjects and subjects.intersection(keep_image_digests):
-                  keep_version_ids.add(version["id"])
+          base = api_base()
+          total_deleted = 0
+          final_kept = 0
+          for cleanup_pass in range(1, max_passes + 1):
+              versions = list_versions(base)
+              keep_semver_tags, keep_image_digests, keep_version_ids, artifact_subjects = classify(versions)
 
-          print(f"cleanup: package={owner}/{package} versions={len(versions)}")
-          print(f"cleanup: keeping main and semver tags={','.join(sorted(keep_semver_tags, key=semver_key, reverse=True)) or '<none>'}")
-          print(f"cleanup: keeping image digests={len(keep_image_digests)}")
+              print(f"cleanup:pass={cleanup_pass} package={owner}/{package} versions={len(versions)}")
+              print(f"cleanup:pass={cleanup_pass} keeping main and semver tags={','.join(sorted(keep_semver_tags, key=semver_key, reverse=True)) or '<none>'}")
+              print(f"cleanup:pass={cleanup_pass} keeping image digests={len(keep_image_digests)}")
 
-          deleted = 0
-          kept = 0
+              deleted_this_pass = 0
+              kept_this_pass = 0
+              for version in sorted(versions, key=lambda item: delete_order(item, artifact_subjects)):
+                  version_id = version["id"]
+                  tags = tags_for(version)
+                  digest = version.get("name", "")
+                  if version_id in keep_version_ids:
+                      kept_this_pass += 1
+                      print(f"cleanup:keep pass={cleanup_pass} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}")
+                      continue
 
-          def delete_order(version):
-              # Delete stale signatures/attestations before deleting their old subject image versions.
-              return 0 if version["id"] in artifact_subjects else 1
+                  subjects = artifact_subjects.get(version_id, set())
+                  if subjects:
+                      reason = "stale-artifact"
+                  elif not tags:
+                      reason = "orphan-untagged"
+                  else:
+                      reason = "stale-image"
 
-          for version in sorted(versions, key=delete_order):
-              version_id = version["id"]
-              tags = tags_for(version)
-              digest = version.get("name", "")
-              if version_id in keep_version_ids:
-                  kept += 1
-                  print(f"cleanup:keep id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}")
-                  continue
-              subjects = artifact_subjects.get(version_id, set())
-              reason = "stale-artifact" if subjects else "stale-image"
-              res = gh_api(f"{base}/{version_id}", method="DELETE")
-              if res.returncode not in (200, 202, 204):
-                  print(f"cleanup:delete-failed reason={reason} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}", file=sys.stderr)
-                  print(res.stderr, file=sys.stderr)
-                  sys.exit(res.returncode)
-              deleted += 1
-              subject_text = ",".join(sorted(subjects)) if subjects else "<none>"
-              print(f"cleanup:delete reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
+                  res = gh_api(f"{base}/{version_id}", method="DELETE")
+                  if res.returncode not in (200, 202, 204):
+                      print(f"cleanup:delete-failed pass={cleanup_pass} reason={reason} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}", file=sys.stderr)
+                      print(res.stderr, file=sys.stderr)
+                      sys.exit(res.returncode)
+                  deleted_this_pass += 1
+                  total_deleted += 1
+                  subject_text = ",".join(sorted(subjects)) if subjects else "<none>"
+                  print(f"cleanup:delete pass={cleanup_pass} reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
 
-          print(f"cleanup:done kept={kept} deleted={deleted}")
+              final_kept = kept_this_pass
+              print(f"cleanup:pass-done pass={cleanup_pass} kept={kept_this_pass} deleted={deleted_this_pass}")
+              if deleted_this_pass == 0:
+                  break
+          else:
+              print(f"cleanup:warning max cleanup passes reached; run may need another pass")
+
+          print(f"cleanup:done kept={final_kept} deleted={total_deleted}")
           PY
