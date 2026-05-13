@@ -381,6 +381,7 @@ The GitHub Actions workflow:
 - builds the CI image from `Dockerfile.ci`
 - publishes to GHCR on `main`, tags, and manual dispatch
 - signs pushed images with cosign on non-PR runs
+- cleans up old GHCR image versions after publish, keeping `main`, the five newest semver tags, and signature/artifact tags tied to the retained image digests
 
 Build locally:
 
