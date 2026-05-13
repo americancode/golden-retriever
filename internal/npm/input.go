@@ -33,6 +33,31 @@ type ResolveOptions struct {
 	Avoid              string
 	AvoidStrict        bool
 	ResolveConcurrency int
+	NPMPlatforms       []NPMPlatform
+	Progress           func(format string, args ...any)
+}
+
+type NPMPlatform struct {
+	OS   string
+	CPU  string
+	Libc string
+}
+
+func (p NPMPlatform) Label() string {
+	parts := []string{strings.TrimSpace(p.OS), strings.TrimSpace(p.CPU)}
+	if strings.TrimSpace(p.Libc) != "" {
+		parts = append(parts, strings.TrimSpace(p.Libc))
+	}
+	out := []string{}
+	for _, part := range parts {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return "current"
+	}
+	return strings.Join(out, "/")
 }
 
 type packageJSON struct {
@@ -106,8 +131,33 @@ func fileExists(path string) bool {
 
 func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts ResolveOptions) (*Graph, error) {
 	_ = client
-	_ = opts
-	return resolveViaNPMLockfile(ctx, path)
+	if len(opts.NPMPlatforms) == 0 {
+		if opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:start input=%s platform=current", path)
+		}
+		graph, err := resolveViaNPMLockfile(ctx, path, NPMPlatform{})
+		if err == nil && opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:done input=%s platform=current packages=%d", path, len(graph.Packages()))
+		}
+		return graph, err
+	}
+	merged := NewGraph()
+	for _, platform := range opts.NPMPlatforms {
+		if opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:start input=%s platform=%s", path, platform.Label())
+		}
+		graph, err := resolveViaNPMLockfile(ctx, path, platform)
+		if err != nil {
+			return nil, fmt.Errorf("platform %s: %w", platform.Label(), err)
+		}
+		for _, pkg := range graph.Packages() {
+			merged.Add(pkg)
+		}
+		if opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:done input=%s platform=%s packages=%d unique=%d", path, platform.Label(), len(graph.Packages()), len(merged.Packages()))
+		}
+	}
+	return merged, nil
 }
 
 func sortedDependencyNames(deps map[string]string) []string {
@@ -119,7 +169,7 @@ func sortedDependencyNames(deps map[string]string) []string {
 	return names
 }
 
-func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph, error) {
+func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string, platform NPMPlatform) (*Graph, error) {
 	if _, err := exec.LookPath("npm"); err != nil {
 		return nil, fmt.Errorf("npm is required to resolve package.json via lockfile generation: %w", err)
 	}
@@ -151,6 +201,7 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph,
 	}
 	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
 	cmd.Dir = filepath.Dir(resolvedPackageJSON)
+	cmd.Env = npmPlatformEnv(os.Environ(), platform)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
@@ -162,6 +213,19 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string) (*Graph,
 		_ = os.Remove(lockPath)
 	}
 	return g, loadErr
+}
+
+func npmPlatformEnv(env []string, platform NPMPlatform) []string {
+	if strings.TrimSpace(platform.OS) != "" {
+		env = append(env, "npm_config_os="+strings.TrimSpace(platform.OS))
+	}
+	if strings.TrimSpace(platform.CPU) != "" {
+		env = append(env, "npm_config_cpu="+strings.TrimSpace(platform.CPU))
+	}
+	if strings.TrimSpace(platform.Libc) != "" {
+		env = append(env, "npm_config_libc="+strings.TrimSpace(platform.Libc))
+	}
+	return env
 }
 
 func cloneProjectDirForResolution(srcDir string) (string, error) {

@@ -1,123 +1,291 @@
 # golden-retriever
 
-`golden-retriever` is a Go CLI for collecting npm package tarballs for air-gapped environments and publishing them into a target npm-compatible registry.
+Repository: https://github.com/americancode/golden-retriever
 
-The target behavior is npm-compatible resolution using the npm CLI 11.14.0 source in `cli-11.14.0` as the local reference. After this tool resolves and fetches the required tarballs, it is also responsible for pushing them to the target registry. npm should then be able to install the original `package.json` successfully when configured to use that target registry.
+`golden-retriever` mirrors npm package tarballs for air-gapped environments. It resolves npm inputs, downloads the required `.tgz` files, optionally scans them for known vulnerabilities, and publishes missing package versions to a target npm-compatible registry.
 
-## Usage
+The normal production flow is:
 
-```sh
-go run ./cmd/golden-retriever fetch \
-  --input ./package.json \
-  --out ./tgzs \
-  --state ./.gr/state.json \
-  --metadata-cache ./.gr/metadata \
-  --metadata-cache-ttl 24h \
-  --concurrency 32
+```text
+resolve inputs -> fetch missing tarballs -> scan/audit -> push missing versions -> update target state
 ```
 
-Mirror (resolve + deduped fetch + scan + push):
+State is central to the design. `.gr/state.json` records what the target registry already contains so later runs can skip package versions that are already present without needing to re-download or re-publish them.
+
+## Current Resolution Model
+
+`golden-retriever` intentionally uses npm to produce npm-compatible lockfiles for `package.json` inputs, then uses those lockfiles as the source of truth for tarball acquisition.
+
+- `package.json`: runs npm lockfile generation with scripts, audit, funding, and progress disabled, then imports the generated lockfile.
+- `package-lock.json` / `npm-shrinkwrap.json`: imports the lockfile directly and downloads the registry tarballs it references.
+- Multiple inputs can be processed in parallel with `--inputs` and `--project-concurrency`.
+- Duplicate package versions across projects are deduped before fetch and push.
+- Lockfile inputs are treated as authoritative. They are not re-resolved or platform-filtered by `golden-retriever`.
+
+For `package.json` inputs, `--npm-platforms` can run npm resolution once per target platform and union the results. This is useful for mirroring native optional packages for multiple deployment targets:
 
 ```sh
-go run ./cmd/golden-retriever mirror \
+golden-retriever mirror \
+  --input package.json \
+  --npm-platforms "linux/x64/glibc,linux/arm64/glibc,darwin/arm64,win32/x64" \
+  --target-registry "$NPM_TARGET_REGISTRY"
+```
+
+During multi-platform resolution, logs include one resolve start/done pair per platform, for example:
+
+```text
+resolve:npm-lock:start input=package.json platform=linux/x64/glibc
+resolve:npm-lock:done input=package.json platform=linux/x64/glibc packages=312 unique=312
+```
+
+## Quick Start
+
+Build locally:
+
+```sh
+go build ./cmd/golden-retriever
+```
+
+Mirror one project to a target registry:
+
+```sh
+./golden-retriever mirror \
   --input ./package.json \
+  --state ./.gr/state.json \
+  --metadata-cache ./.gr/metadata \
+  --out ./.gr/tgzs \
+  --target-registry "$NPM_TARGET_REGISTRY"
+```
+
+Mirror multiple projects in one run:
+
+```sh
+./golden-retriever mirror \
   --inputs "./apps/react/package.json,./apps/angular/package-lock.json" \
   --project-concurrency 4 \
-  --out ./.gr/tgzs \
   --state ./.gr/state.json \
   --metadata-cache ./.gr/metadata \
-  --target-registry https://registry.internal.example
+  --out ./.gr/tgzs \
+  --target-registry "$NPM_TARGET_REGISTRY"
 ```
 
-Supported inputs:
-
-- `package.json`: resolves the full dependency tree from the npm registry. Basic workspaces are supported by discovering workspace package globs, skipping local workspace tarball acquisition, and resolving each workspace package's external dependencies.
-- `package-lock.json` / `npm-shrinkwrap.json`: imports the resolved tarball set directly and skips bundled/link entries that are not separate registry tarballs.
-
-The output directory receives tarballs named as `<escaped-name>-<version>.tgz`; scoped packages are escaped as `@scope+pkg`.
-
-When `--inputs` is used, project resolution runs in parallel, then package sets are globally deduped before fetch/push so duplicate package versions are downloaded/published once per run.
-
-Registry metadata is cached on disk by default under `.gr/metadata`. Fresh entries are used directly; stale entries are revalidated with `ETag` / `Last-Modified` headers. The CLI reads `~/.npmrc`, a project `.npmrc` next to the input file, and an optional extra file from `--npmrc`; it supports default registries, scoped registries, and common registry auth keys.
-
-The state file is target registry inventory first, local download cache second. It is intended to be maintained locally and reused from CI cache, for example GitLab cache. Packages marked as present in the target registry are skipped by `fetch` even if no local tarball exists. Querying the target registry should be optional and used to rebuild or verify state when needed:
+Fetch tarballs without publishing:
 
 ```sh
-go run ./cmd/golden-retriever state sync-target \
-  --input ./package.json \
-  --state ./.gr/state.json \
-  --target-registry https://registry.internal.example
-
-go run ./cmd/golden-retriever state mark-target \
-  --state ./.gr/state.json \
-  --package left-pad@1.3.0 \
-  --integrity sha512-...
+./golden-retriever fetch \
+  --input ./package-lock.json \
+  --out ./.gr/tgzs \
+  --state ./.gr/state.json
 ```
 
-## Scanning and Vulnerability Controls
+Scan target inventory without local tarballs:
 
-`mirror` includes a scan step by default (`--scan-auto=true`) and writes a report (`--scan-report .gr/scan-report.json`).
+```sh
+./golden-retriever state sync-target \
+  --state ./.gr/state.json \
+  --target-registry "$NPM_TARGET_REGISTRY"
 
-Default mode is **audit**:
+./golden-retriever scan \
+  --state ./.gr/state.json \
+  --source target \
+  --provider osv-offline \
+  --osv-offline-db /var/lib/osv-scanner/db \
+  --report ./.gr/scan-report.json
+```
 
-- `--scan-enforce=false` (default): findings are reported but publish proceeds.
-- `--scan-enforce=true`: failing findings block publish.
+## Inputs
 
-### Manual blocks
+Supported direct inputs:
 
-Use blocklist file:
+- `package.json`
+- `package-lock.json`
+- `npm-shrinkwrap.json`
 
-- mirror: `--scan-blocklist .gr/scan-blocklist.json`
-- scan: `--blocklist .gr/scan-blocklist.json`
+Single input:
 
-Example blocklist file:
+```sh
+golden-retriever mirror --input package.json ...
+```
+
+Multiple inputs:
+
+```sh
+golden-retriever mirror --inputs "ui-a/package.json,ui-b/package-lock.json" ...
+```
+
+The GitLab CI template also discovers inputs from directories. By default it scans `package-jsons/` and `package-locks/` for:
+
+- `package.json`
+- `package-lock.json`
+- `npm-shrinkwrap.json`
+- `*.package.json`
+- `*.package-lock.json`
+
+Custom names like `myapp.package.json` and `myapp.package-lock.json` are supported by that CI discovery step.
+
+## State and Cache
+
+Common paths:
+
+- `.gr/state.json`: local target inventory state.
+- `.gr/metadata/`: npm source registry metadata cache.
+- `.gr/tgzs/`: local tarball staging directory.
+- `.gr/scan-report.json`: scan/audit report artifact.
+
+The state file is not just a resume file. It is the local record of target registry contents. If `state.target` says a package version is already present in the target registry, `golden-retriever` can skip fetching and pushing that version.
+
+Refresh state from the target registry:
+
+```sh
+golden-retriever state sync-target \
+  --state .gr/state.json \
+  --target-registry "$NPM_TARGET_REGISTRY"
+```
+
+Normal CI runs should usually rely on the cached state file. Use `state sync-target` when rebuilding or verifying inventory against the target registry.
+
+## Authentication
+
+Target registry auth is non-interactive and CI-friendly. When `--target-registry` is set, the target client can use npmrc auth and these environment variables.
+
+Token precedence:
+
+```text
+NPM_TARGET_TOKEN
+NPM_AUTH_TOKEN
+NODE_AUTH_TOKEN
+NPM_TOKEN
+CI_JOB_TOKEN
+```
+
+Username/password precedence:
+
+```text
+NPM_TARGET_USERNAME + NPM_TARGET_PASSWORD
+CI_DEPLOY_USER + CI_DEPLOY_PASSWORD
+NPM_USERNAME + NPM_PASSWORD
+```
+
+For GitLab Package Registry, `CI_JOB_TOKEN` can be used when the project/group permissions allow package publish.
+
+TLS verification can be disabled for a target registry when needed:
+
+```sh
+golden-retriever mirror ... --target-insecure-skip-verify
+```
+
+Prefer installing the correct CA certificate in the runner/image instead of disabling TLS verification.
+
+## Scanning
+
+`mirror` runs scanning by default before publish:
+
+```text
+--scan-auto=true
+--scan-osv=true
+--scan-enforce=false
+```
+
+The default mode is audit. Findings are printed and written to the report, but packages still publish unless enforcement is enabled.
+
+Turn enforcement on:
+
+```sh
+golden-retriever mirror ... --scan-enforce=true
+```
+
+Disable scanning entirely:
+
+```sh
+golden-retriever mirror ... --scan-auto=false --scan-osv=false
+```
+
+### OSV Providers
+
+Supported providers:
+
+- `osv-api`: direct OSV API queries. If the API fails, the scanner falls back once to local offline OSV scanning.
+- `osv-offline`: local `osv-scanner` only. No OSV API calls are made.
+
+Mirror flags:
+
+```sh
+--scan-provider osv-offline
+--scan-osv-offline-db /var/lib/osv-scanner/db
+--scan-osv-api-batch-size 200
+--scan-osv-api-concurrency 8
+--scan-osv-offline-chunk-size 50
+--scan-osv-offline-concurrency 4
+--scan-osv-offline-retry-failed-chunks=true
+```
+
+Standalone `scan` flags use the same names without the `scan-` prefix:
+
+```sh
+--provider osv-offline
+--osv-offline-db /var/lib/osv-scanner/db
+--osv-api-batch-size 200
+--osv-api-concurrency 8
+--osv-offline-chunk-size 50
+--osv-offline-concurrency 4
+--osv-offline-retry-failed-chunks=true
+```
+
+The CI image includes `osv-scanner` and a prewarmed offline npm vulnerability database at `/var/lib/osv-scanner/db`.
+
+### Severity Thresholds
+
+Block packages at or above a severity threshold:
+
+```sh
+golden-retriever mirror ... \
+  --scan-enforce=true \
+  --scan-min-severity high \
+  --scan-unknown-severity high
+```
+
+Valid severity values:
+
+```text
+low
+medium
+high
+critical
+```
+
+Findings include vulnerability IDs, severity, and URLs in stdout and `.gr/scan-report.json`.
+
+### Manual Blocklist
+
+Manual blocks are file-based:
+
+```sh
+golden-retriever mirror ... --scan-blocklist .gr/scan-blocklist.json
+golden-retriever scan ... --blocklist .gr/scan-blocklist.json
+```
+
+Example:
 
 ```json
 {
   "packages": ["lodash", "@blocked/some-lib"],
   "packageVersions": ["minimist@0.0.8", "lodash@4.17.20"],
-  "packagePrefixes": ["@blocked/"],
+  "packagePrefixes": ["@blocked/"]
 }
 ```
 
-### OSV-based CVE checks
+If the blocklist file is not present, it is ignored.
 
-- enable/disable OSV lookup: `--scan-osv=true|false`
-- provider selection: `--scan-provider osv-api|osv-offline`
-- OSV API batch size: `--scan-osv-api-batch-size 200`
-- OSV API detail concurrency: `--scan-osv-api-concurrency 8`
-- offline `osv-scanner` chunk size: `--scan-osv-offline-chunk-size 100`
-- offline `osv-scanner` worker concurrency: `--scan-osv-offline-concurrency 8`
-- offline failed-chunk recovery: `--scan-osv-offline-retry-failed-chunks=true`
-- fail threshold: `--scan-min-severity high`
-- fallback when severity missing: `--scan-unknown-severity high`
-- exceptions file: `--scan-exceptions .gr/scan-exceptions.json`
-- offline DB path: `--scan-osv-offline-db /var/lib/osv-scanner/db`
+### Exceptions
 
-Provider behavior:
-
-- `osv-api` (default): use direct OSV API queries first; if that fails, automatically fall back to local `osv-scanner` offline vulnerability matching.
-- `osv-offline`: skip direct API calls and use local `osv-scanner` offline vulnerability matching only.
-
-For GitLab CI, the baseline `.gitlab-ci.yml` defaults to `osv-offline`.
-
-`osv-scanner` offline mode uses a local vulnerability database. `golden-retriever` passes `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` through to the tool when set.
-
-The CI image also includes a prewarmed offline OSV database at `/var/lib/osv-scanner/db` and sets:
+Exceptions allow known findings to pass the severity gate:
 
 ```sh
-OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/var/lib/osv-scanner/db
+golden-retriever mirror ... --scan-exceptions .gr/scan-exceptions.json
+golden-retriever scan ... --exceptions .gr/scan-exceptions.json
 ```
 
-So `osv-offline` works immediately even before CI cache is populated. If GitLab CI sets `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`, that runtime path overrides the image default.
-
-Enforcement behavior:
-
-- With `--scan-enforce=true`, packages with OSV findings at or above `--scan-min-severity` are blocked from publish.
-- `--scan-exceptions` is applied before blocking, so matching exceptions can allow findings that would otherwise fail the threshold.
-- `expiresAt` on exceptions is enforced; expired exceptions no longer bypass threshold blocking.
-
-Example exceptions file:
+Example:
 
 ```json
 {
@@ -132,200 +300,176 @@ Example exceptions file:
 }
 ```
 
-### Disable all scanning/audit
-
-To fully disable scanning in `mirror`:
-
-```sh
-go run ./cmd/golden-retriever mirror ... \
-  --scan-auto=false \
-  --scan-osv=false
-```
-
-`scan` command can be run independently:
-
-```sh
-go run ./cmd/golden-retriever scan \
-  --state .gr/state.json \
-  --source local \
-  --osv=true \
-  --provider osv-offline \
-  --osv-offline-db /var/lib/osv-scanner/db \
-  --osv-offline-chunk-size 100 \
-  --osv-offline-concurrency 8 \
-  --osv-offline-retry-failed-chunks=true \
-  --report .gr/scan-report.json
-```
-
-`--source` values:
-- `local`: local tarball inventory
-- `target`: target registry inventory from `state.target` (no local tgzs required)
-- `both`
-
-Target registry pushes must be authenticated and should run in parallel wherever the registry can tolerate it. After a successful push, the program should update `state.target` so future runs avoid re-fetching and re-pushing that package version.
-
-## CI Image Build (GitHub Actions)
-
-This repository includes `.github/workflows/docker-publish-ci-image.yml` to build and publish the CI image from `Dockerfile.ci` to GHCR.
-
-- image name: `ghcr.io/<owner>/<repo>-ci`
-- push on `main`, tags, and manual dispatch
-- PRs build without push
-- uses Buildx cache and cosign signing (non-PR)
-
-`Dockerfile.ci` uses pinned base and installs Go + Node + npm latest:
-
-- base: `golang:1.24-alpine3.22`
-- installs `nodejs`, `npm`, and upgrades npm globally
+`package` can be a package name or `name@version`. Expired exceptions are ignored.
 
 ## GitLab CI
 
-The expected production trigger is a GitLab CI pipeline. The state file and metadata cache should be stored in GitLab cache so normal runs avoid querying the target registry unless explicitly requested.
+This repository includes `.gitlab-ci.yml` for the expected production flow.
 
-This repository includes a baseline `.gitlab-ci.yml` that:
+Jobs:
 
-- uses your custom CI image (`$GOLDEN_RETRIEVER_CI_IMAGE`)
-- discovers inputs from `package-jsons/` and `package-locks/`
-- runs one program-centric pipeline (`mirror`) with internal parallelism
-- serializes `mirror`, `state:rebuild`, and `rescan:target` with a shared `resource_group` so branch state is not mutated concurrently
-- caches:
-  - `.gr/state.json`
-  - `.gr/metadata/`
-- publishes scan report artifact (`.gr/scan-report.json`)
+- `mirror:npm`: discovers inputs, resolves/fetches/scans/pushes, updates cached state.
+- `state:rebuild`: manual job that rebuilds `.gr/state.json` from the target registry.
+- `rescan:target`: manual or scheduled job that rebuilds state in the job and scans target inventory.
 
-Typical flow:
+The jobs share:
 
-```sh
-go run ./cmd/golden-retriever mirror \
-  --input package.json \
-  --state .gr/state.json \
-  --metadata-cache .gr/metadata \
-  --out .gr/tgzs \
-  --target-registry "$NPM_TARGET_REGISTRY" \
-  --sync-target
+```yaml
+resource_group: "golden-retriever-state-${CI_PROJECT_ID}-${CI_COMMIT_REF_SLUG}"
 ```
 
-### Key GitLab variables
+That prevents state-mutating jobs from running concurrently on the same branch cache.
 
-- `NPM_TARGET_REGISTRY`: target npm-compatible registry (required)
-- `GOLDEN_RETRIEVER_INPUT`: fallback single input (default `package.json`)
-- `GOLDEN_RETRIEVER_INPUT_DIRS`: discovery dirs (default `package-jsons,package-locks`)
-- `GOLDEN_RETRIEVER_PROJECT_CONCURRENCY`: cross-project resolution parallelism
-- `GOLDEN_RETRIEVER_SCAN_ENFORCE`: `false` (audit) or `true` (block)
-- `GOLDEN_RETRIEVER_SCAN_OSV`: `true|false`
-- `GOLDEN_RETRIEVER_SCAN_PROVIDER`: `osv-api|osv-offline`
-- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB`: local OSV scanner DB path
-- `GOLDEN_RETRIEVER_SCAN_OSV_API_BATCH_SIZE`: OSV API batch size
-- `GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY`: OSV API detail lookup concurrency
-- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE`: offline `osv-scanner` chunk size
-- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY`: offline `osv-scanner` worker concurrency
-- `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_RETRY_FAILED_CHUNKS`: split failed offline chunks and retry smaller batches (`true` by default)
-- `GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY`: `low|medium|high|critical`
-- `GOLDEN_RETRIEVER_SCAN_EXCEPTIONS`: exceptions file path
-- `GOLDEN_RETRIEVER_SCAN_BLOCKLIST`: blocklist file path
-- `GOLDEN_RETRIEVER_SCAN_REPORT`: report path for artifacts
+The default cache key is branch/project scoped:
 
-### Proxy configuration (HTTP/HTTPS/NO_PROXY)
+```yaml
+key: "gr-${CI_PROJECT_ID}-${CI_COMMIT_REF_SLUG}"
+paths:
+  - .gr/state.json
+  - .gr/metadata/
+```
 
-`golden-retriever` and the npm subprocess it uses for `package.json` lockfile resolution both honor standard proxy environment variables:
+The cache does not store local tarballs by default. The point of state is to know what the destination registry already has, not to carry downloaded `.tgz` files between jobs.
 
-- `HTTP_PROXY` / `http_proxy`
-- `HTTPS_PROXY` / `https_proxy`
-- `NO_PROXY` / `no_proxy`
+Important variables:
+
+```yaml
+NPM_TARGET_REGISTRY: "https://gitlab.example.com/api/v4/projects/123/packages/npm/"
+GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever-ci:main"
+GOLDEN_RETRIEVER_INPUT_DIRS: "package-jsons,package-locks"
+GOLDEN_RETRIEVER_NPM_PLATFORMS: "linux/x64/glibc,linux/arm64/glibc"
+GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
+GOLDEN_RETRIEVER_SCAN_PROVIDER: "osv-offline"
+GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
+GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY: "high"
+```
+
+For audit-only scanning, keep:
+
+```yaml
+GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
+```
+
+To block publish on policy failures:
+
+```yaml
+GOLDEN_RETRIEVER_SCAN_ENFORCE: "true"
+```
+
+## CI Image
+
+The CI image is built from `Dockerfile.ci` and published by `.github/workflows/docker-publish-ci-image.yml`.
+
+Default image:
+
+```text
+ghcr.io/americancode/golden-retriever-ci:main
+```
+
+The image includes:
+
+- `golden-retriever`
+- Node.js
+- latest npm
+- `ca-certificates`
+- `osv-scanner`
+- prewarmed offline OSV database at `/var/lib/osv-scanner/db`
+
+The GitHub Actions workflow:
+
+- runs Trivy filesystem and image scans
+- builds the CI image from `Dockerfile.ci`
+- publishes to GHCR on `main`, tags, and manual dispatch
+- signs pushed images with cosign on non-PR runs
+
+Build locally:
+
+```sh
+podman build -f Dockerfile.ci -t golden-retriever-ci:local .
+```
+
+Verify a pushed image signature:
+
+```sh
+cosign verify ghcr.io/americancode/golden-retriever-ci:main \
+  --certificate-identity-regexp 'https://github.com/americancode/golden-retriever/.github/workflows/docker-publish-ci-image.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Proxy and CA Configuration
+
+The Go HTTP client and npm subprocess honor standard proxy variables:
+
+```sh
+export HTTP_PROXY=http://proxy.corp.local:3128
+export HTTPS_PROXY=http://proxy.corp.local:3128
+export NO_PROXY=127.0.0.1,localhost,.svc,.cluster.local,gitlab.example.com,registry.internal.example
+```
+
+Use lowercase variants too if your environment requires them:
+
+```sh
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export no_proxy="$NO_PROXY"
+```
+
+If your proxy or internal registry uses a private CA, install the CA into the runner/container trust store before running `golden-retriever`. The CI image includes `ca-certificates` and `update-ca-certificates`.
+
+## Logging
+
+Default logs show high-level progress for resolve, fetch, scan, and push. Use `--trace` for detailed diagnostics.
+
+Useful trace cases:
+
+- npm lockfile generation per input/platform
+- OSV API calls and offline scanner batches
+- target registry auth selection
+- target registry publish attempts
+- state rebuild progress
 
 Example:
 
 ```sh
-export HTTPS_PROXY=http://proxy.corp.local:3128
-export HTTP_PROXY=http://proxy.corp.local:3128
-export NO_PROXY=127.0.0.1,localhost,.svc,.cluster.local,gitlab.example.com,registry.internal.example
+golden-retriever mirror ... --trace
 ```
 
-Notes:
+## Commands
 
-- Include internal registry and GitLab hosts in `NO_PROXY` so internal traffic does not traverse the proxy.
-- If your proxy performs TLS interception, ensure runner/container trust store includes your corporate CA.
+```text
+fetch     resolve and download every package tarball
+mirror    resolve, optionally sync target state, fetch tarballs, scan, and push missing packages
+push      publish local tarballs missing from target registry
+scan      evaluate local or target inventory and persist scan status in state
+resolve   print the resolved package tarball set
+state     manage target registry inventory state
+cache     manage metadata cache
+```
 
-Authentication should come from CI variables. The CLI supports npmrc auth with environment expansion, and it also reads target registry credentials directly from environment variables when `--target-registry` is set. Token precedence is `NPM_TARGET_TOKEN`, `NPM_AUTH_TOKEN`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, then `CI_JOB_TOKEN`. Username/password precedence is `NPM_TARGET_USERNAME` + `NPM_TARGET_PASSWORD`, `CI_DEPLOY_USER` + `CI_DEPLOY_PASSWORD`, then `NPM_USERNAME` + `NPM_PASSWORD`.
-
-`mirror` is the CI-oriented command: it resolves the input once, optionally refreshes target-present state with `--sync-target`, fetches only tarballs still needed locally, publishes missing package versions to the target registry in parallel, and updates `state.target` after successful publishes. For fully cached normal runs, omit `--sync-target` and rely on the cached `.gr/state.json`.
-
-### Typical CI job flow
-
-Use the jobs in this order:
-
-1. `mirror:npm`
-   - normal branch pipeline job
-   - resolves project inputs, fetches tarballs, optionally scans, publishes missing packages
-   - writes the canonical cached `.gr/state.json`
-
-2. `state:rebuild`
-   - manual maintenance job
-   - available as soon as the pipeline starts
-   - rebuilds `state.target` from everything the target registry currently contains
-   - use this when cache is stale, lost, or you want target inventory to become canonical again
-   - this job is allowed to refresh the shared cache
-   - can be run before `mirror:npm` or after it in the same pipeline
-
-3. `rescan:target`
-   - manual or scheduled maintenance job
-   - rebuilds an in-job copy of `state.target` from the target registry, then scans `--source target`
-   - uploads `.gr/state.json` and `.gr/scan-report.json` as artifacts
-   - does **not** push state back into the shared cache
-
-The important distinction is:
-
-- `state:rebuild` is the canonical cache writer for maintenance
-- `rescan:target` is read-only from the cache perspective
-
-That prevents scan jobs from overwriting the branch cache with analysis-only state.
-
-`mirror:npm` and `state:rebuild` share the same `resource_group`, so they do not mutate branch state concurrently. If you trigger `state:rebuild` while `mirror:npm` is already running, it waits. If you trigger it first, `mirror:npm` waits.
-
-### Periodic target re-scan (new CVEs after publish)
-
-Use `rescan:target` job (manual or scheduled) to catch newly disclosed CVEs in target registry packages even after local cache loss:
-
-1. `state sync-target` rebuilds inventory from target registry
-2. `scan --source target` checks CVEs using OSV
-3. uploads `.gr/scan-report.json` and `.gr/state.json` artifacts
-
-`rescan:target` intentionally rebuilds target inventory again inside the job so it can run independently of `state:rebuild`, but the CI example keeps it from corrupting cached state by using cache `policy: pull` only.
-
-If outbound OSV API access is blocked, keep `GOLDEN_RETRIEVER_SCAN_PROVIDER=osv-api` and ensure the offline DB at `GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB` exists; scan will fall back automatically. If you explicitly set `osv-offline`, no OSV API calls are attempted.
-
-## State and Cache Strategy
-
-- `state.target`: what target registry already has; drives fetch/push skipping
-- `state.local`: local tarball records and scan metadata
-- `.gr/metadata`: packument metadata cache for fast resolution
-- `/var/lib/osv-scanner/db`: baked-in `osv-scanner` offline vulnerability database in the CI image
-
-Recommended:
-
-- keep `.gr/state.json` + `.gr/metadata` in GitLab cache
-- let `mirror:npm` and `state:rebuild` be the only jobs that refresh shared state cache
-- keep `rescan:target` read-only against cache and use its artifacts for review
-- do not cache `.gr/tgzs` unless you specifically need retry support on failed pushes
-- use branch-scoped cache keys for stable incremental performance
-
-## Test Strategy
-
-Fast tests use mock npm registry responses and lockfiles. npm parity tests are opt-in because they use real npm and the public registry:
+Use command help for full flag lists:
 
 ```sh
-NPM_PARITY=1 go test ./...
+golden-retriever mirror -h
+golden-retriever scan -h
+golden-retriever state sync-target -h
 ```
 
-The parity tests generate npm lockfiles and compare the package tarball set with this tool.
+## Development
 
-## Current override spec policy
+Run tests:
 
-For npm `overrides`, this tool currently supports registry-like replacement specs (versions, ranges, and dist-tags) and intentionally rejects non-registry override specs. Rejected override selectors/values include:
+```sh
+go test ./...
+```
 
-- alias override specs (`npm:...`)
-- directory/local path specs (`../...`, `./...`, absolute paths)
-- `file:` / `link:` specs
-- git/hosted git specs (`github:`, `git+ssh:`, `git@...`, etc.)
+Build:
 
-This keeps override behavior deterministic for registry mirroring. Support for those override classes can be added later as an explicit compatibility expansion.
+```sh
+go build ./cmd/golden-retriever
+```
+
+Run the CLI from source:
+
+```sh
+go run ./cmd/golden-retriever --help
+```

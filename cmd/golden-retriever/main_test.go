@@ -74,6 +74,25 @@ func TestParseBefore(t *testing.T) {
 	}
 }
 
+func TestParseNPMPlatforms(t *testing.T) {
+	platforms, err := parseNPMPlatforms("linux/x64/glibc, darwin/arm64, win32/x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(platforms) != 3 {
+		t.Fatalf("platforms = %#v", platforms)
+	}
+	if platforms[0].OS != "linux" || platforms[0].CPU != "x64" || platforms[0].Libc != "glibc" {
+		t.Fatalf("linux platform = %#v", platforms[0])
+	}
+	if platforms[1].OS != "darwin" || platforms[1].CPU != "arm64" || platforms[1].Libc != "" {
+		t.Fatalf("darwin platform = %#v", platforms[1])
+	}
+	if _, err := parseNPMPlatforms("linux"); err == nil {
+		t.Fatalf("invalid platform should fail")
+	}
+}
+
 func TestPrintEngineWarnings(t *testing.T) {
 	graph := npm.NewGraph()
 	graph.AddEngineWarning(&npm.PackageEngineError{

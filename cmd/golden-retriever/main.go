@@ -139,6 +139,7 @@ func mirror(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	npmPlatformsRaw := fs.String("npm-platforms", os.Getenv("GOLDEN_RETRIEVER_NPM_PLATFORMS"), "comma-separated npm resolve platforms for package.json inputs, such as linux/x64/glibc,darwin/arm64,win32/x64")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
 	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
@@ -192,6 +193,10 @@ func mirror(args []string) error {
 	if err != nil {
 		return err
 	}
+	npmPlatforms, err := parseNPMPlatforms(*npmPlatformsRaw)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -233,12 +238,14 @@ func mirror(args []string) error {
 				EngineStrict:       *engineStrict,
 				NodeVersion:        *nodeVersion,
 				Libc:               *libc,
+				NPMPlatforms:       npmPlatforms,
 				Before:             before,
 				DefaultTag:         *defaultTag,
 				IncludeStaged:      *includeStaged,
 				Avoid:              *avoid,
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
+				Progress:           progressf,
 			},
 			JSONOut:                   *jsonOut,
 			Tracef:                    tracef,
@@ -284,12 +291,14 @@ func mirror(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		NPMPlatforms:       npmPlatforms,
 		Before:             before,
 		DefaultTag:         *defaultTag,
 		IncludeStaged:      *includeStaged,
 		Avoid:              *avoid,
 		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
+		Progress:           progressf,
 	})
 	if err != nil {
 		return err
@@ -519,6 +528,7 @@ func fetch(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	npmPlatformsRaw := fs.String("npm-platforms", os.Getenv("GOLDEN_RETRIEVER_NPM_PLATFORMS"), "comma-separated npm resolve platforms for package.json inputs, such as linux/x64/glibc,darwin/arm64,win32/x64")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
 	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
@@ -539,6 +549,10 @@ func fetch(args []string) error {
 		return err
 	}
 	before, err := parseBefore(*beforeRaw)
+	if err != nil {
+		return err
+	}
+	npmPlatforms, err := parseNPMPlatforms(*npmPlatformsRaw)
 	if err != nil {
 		return err
 	}
@@ -573,12 +587,14 @@ func fetch(args []string) error {
 				EngineStrict:       *engineStrict,
 				NodeVersion:        *nodeVersion,
 				Libc:               *libc,
+				NPMPlatforms:       npmPlatforms,
 				Before:             before,
 				DefaultTag:         *defaultTag,
 				IncludeStaged:      *includeStaged,
 				Avoid:              *avoid,
 				AvoidStrict:        *avoidStrict,
 				ResolveConcurrency: *resolveConcurrency,
+				Progress:           progressf,
 			},
 			JSONOut:   *jsonOut,
 			Tracef:    tracef,
@@ -607,12 +623,14 @@ func fetch(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		NPMPlatforms:       npmPlatforms,
 		Before:             before,
 		DefaultTag:         *defaultTag,
 		IncludeStaged:      *includeStaged,
 		Avoid:              *avoid,
 		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
+		Progress:           progressf,
 	})
 	if err != nil {
 		return err
@@ -672,6 +690,7 @@ func resolve(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	npmPlatformsRaw := fs.String("npm-platforms", os.Getenv("GOLDEN_RETRIEVER_NPM_PLATFORMS"), "comma-separated npm resolve platforms for package.json inputs, such as linux/x64/glibc,darwin/arm64,win32/x64")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
 	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
@@ -686,6 +705,10 @@ func resolve(args []string) error {
 		return err
 	}
 	before, err := parseBefore(*beforeRaw)
+	if err != nil {
+		return err
+	}
+	npmPlatforms, err := parseNPMPlatforms(*npmPlatformsRaw)
 	if err != nil {
 		return err
 	}
@@ -705,12 +728,14 @@ func resolve(args []string) error {
 		EngineStrict:       *engineStrict,
 		NodeVersion:        *nodeVersion,
 		Libc:               *libc,
+		NPMPlatforms:       npmPlatforms,
 		Before:             before,
 		DefaultTag:         *defaultTag,
 		IncludeStaged:      *includeStaged,
 		Avoid:              *avoid,
 		AvoidStrict:        *avoidStrict,
 		ResolveConcurrency: *resolveConcurrency,
+		Progress:           newProgressLogger(true),
 	})
 	if err != nil {
 		return err
@@ -874,6 +899,7 @@ func stateSyncTarget(args []string) error {
 	engineStrict := fs.Bool("engine-strict", false, "fail on packages whose engines.node does not match --node-version")
 	nodeVersion := fs.String("node-version", os.Getenv("NODE_VERSION"), "Node.js version used for engines.node checks")
 	libc := fs.String("libc", os.Getenv("LIBC"), "libc value for package libc filters, such as glibc or musl")
+	npmPlatformsRaw := fs.String("npm-platforms", os.Getenv("GOLDEN_RETRIEVER_NPM_PLATFORMS"), "comma-separated npm resolve platforms for package.json inputs, such as linux/x64/glibc,darwin/arm64,win32/x64")
 	beforeRaw := fs.String("before", os.Getenv("NPM_BEFORE"), "only resolve package versions published at or before this RFC3339 timestamp")
 	defaultTag := fs.String("default-tag", "latest", "default npm dist-tag used when a dependency has no explicit spec")
 	includeStaged := fs.Bool("include-staged", false, "include npm stagedVersions metadata during manifest selection")
@@ -898,6 +924,7 @@ func stateSyncTarget(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	progressf := newProgressLogger(!*jsonOut)
 	state, err := npm.LoadState(*statePath)
 	if err != nil {
 		return err
@@ -922,6 +949,10 @@ func stateSyncTarget(args []string) error {
 		if err != nil {
 			return err
 		}
+		npmPlatforms, err := parseNPMPlatforms(*npmPlatformsRaw)
+		if err != nil {
+			return err
+		}
 		resolveOpts := npm.ResolveOptions{
 			IncludeDev:         dependencySet.includeDev,
 			IncludeOptional:    dependencySet.includeOptional,
@@ -933,12 +964,14 @@ func stateSyncTarget(args []string) error {
 			EngineStrict:       *engineStrict,
 			NodeVersion:        *nodeVersion,
 			Libc:               *libc,
+			NPMPlatforms:       npmPlatforms,
 			Before:             before,
 			DefaultTag:         *defaultTag,
 			IncludeStaged:      *includeStaged,
 			Avoid:              *avoid,
 			AvoidStrict:        *avoidStrict,
 			ResolveConcurrency: *resolveConcurrency,
+			Progress:           progressf,
 		}
 		selectedInput = resolvedInputs[0]
 		if len(resolvedInputs) > 1 {
@@ -1594,6 +1627,36 @@ func csvList(raw string) []string {
 		}
 	}
 	return out
+}
+
+func parseNPMPlatforms(raw string) ([]npm.NPMPlatform, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	platforms := []npm.NPMPlatform{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.Split(item, "/")
+		if len(parts) < 2 || len(parts) > 3 {
+			return nil, fmt.Errorf("invalid npm platform %q: expected os/cpu or os/cpu/libc", item)
+		}
+		platform := npm.NPMPlatform{
+			OS:  strings.TrimSpace(parts[0]),
+			CPU: strings.TrimSpace(parts[1]),
+		}
+		if len(parts) == 3 {
+			platform.Libc = strings.TrimSpace(parts[2])
+		}
+		if platform.OS == "" || platform.CPU == "" {
+			return nil, fmt.Errorf("invalid npm platform %q: os and cpu are required", item)
+		}
+		platforms = append(platforms, platform)
+	}
+	return platforms, nil
 }
 
 func newTraceLogger(enabled bool) func(format string, args ...any) {

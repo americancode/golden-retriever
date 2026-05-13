@@ -45,6 +45,22 @@ func TestLoadLockfileV3Packages(t *testing.T) {
 	}
 }
 
+func TestNPMPlatformEnv(t *testing.T) {
+	env := npmPlatformEnv([]string{"A=B"}, NPMPlatform{OS: "linux", CPU: "x64", Libc: "glibc"})
+	want := map[string]bool{
+		"A=B":                   true,
+		"npm_config_os=linux":   true,
+		"npm_config_cpu=x64":    true,
+		"npm_config_libc=glibc": true,
+	}
+	for _, item := range env {
+		delete(want, item)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing env entries: %#v from %#v", want, env)
+	}
+}
+
 func TestLoadLockfileV1NestedDependencies(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package-lock.json")
