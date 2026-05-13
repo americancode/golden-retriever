@@ -350,7 +350,7 @@ jobs:
 
                   if not deleted:
                       res = delete_version(base, version_id)
-                      if res.returncode in (200, 202, 204, 404):
+                      if res.returncode == 0:
                           deleted = True
                           print(f"cleanup:delete pass={cleanup_pass} method=github-api reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
                       else:
