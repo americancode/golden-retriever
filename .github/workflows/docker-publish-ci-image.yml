@@ -16,6 +16,9 @@ jobs:
   build-scan-publish:
     name: Build, Scan, Publish
     runs-on: ubuntu-latest
+    outputs:
+      published-digest: ${{ steps.build-and-push.outputs.digest }}
+      published-tags: ${{ steps.meta.outputs.tags }}
     permissions:
       contents: read
       packages: write
@@ -80,7 +83,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
+            type=ref,event=tag
             type=sha
 
       - name: Build Local Scan Image
@@ -165,6 +168,8 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           PACKAGE_NAME: ${{ github.event.repository.name }}-ci
           KEEP_SEMVER_COUNT: "5"
+          CURRENT_DIGEST: ${{ needs.build-scan-publish.outputs.published-digest }}
+          CURRENT_TAGS: ${{ needs.build-scan-publish.outputs.published-tags }}
         run: |
           python3 <<'PY'
           import json
@@ -180,6 +185,9 @@ jobs:
           image = f"{registry}/{owner}/{package}"
           keep_semver_count = int(os.environ.get("KEEP_SEMVER_COUNT", "5"))
           max_passes = 5
+          current_digest = os.environ.get("CURRENT_DIGEST", "")
+          current_digest_hex = current_digest.split(":", 1)[1] if current_digest.startswith("sha256:") else ""
+          current_tags = {line.strip().rsplit(":", 1)[-1] for line in os.environ.get("CURRENT_TAGS", "").splitlines() if line.strip()}
 
           semver_re = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
           artifact_re = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
@@ -259,9 +267,12 @@ jobs:
               for version in versions:
                   tags = set(tags_for(version))
                   digest = digest_hex(version)
-                  if "main" in tags or tags.intersection(keep_semver_tags):
+                  is_current_digest = bool(current_digest_hex) and digest == current_digest_hex
+                  if is_current_digest or "main" in tags or tags.intersection(keep_semver_tags) or tags.intersection(current_tags):
                       keep_version_ids.add(version["id"])
                       if digest:
+                          keep_image_digests.add(digest)
+                      if is_current_digest:
                           keep_image_digests.add(digest)
 
               for version in versions:
@@ -305,6 +316,7 @@ jobs:
 
               print(f"cleanup:pass={cleanup_pass} package={owner}/{package} versions={len(versions)}")
               print(f"cleanup:pass={cleanup_pass} keeping main and semver tags={','.join(sorted(keep_semver_tags, key=semver_key, reverse=True)) or '<none>'}")
+              print(f"cleanup:pass={cleanup_pass} keeping current digest={current_digest or '<none>'}")
               print(f"cleanup:pass={cleanup_pass} keeping image digests={len(keep_image_digests)}")
 
               deleted_this_pass = 0
