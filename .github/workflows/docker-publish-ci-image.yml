@@ -242,6 +242,9 @@ jobs:
                   return name.split(":", 1)[1]
               return ""
 
+          def digest_ref_hex(digest):
+              return digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
+
           def semver_key(tag):
               if tag.startswith("v"):
                   tag = tag[1:]
@@ -263,6 +266,7 @@ jobs:
               keep_image_digests = set()
               keep_version_ids = set()
               artifact_subjects = {}
+              keep_ref_tags = set()
 
               for version in versions:
                   tags = set(tags_for(version))
@@ -270,10 +274,19 @@ jobs:
                   is_current_digest = bool(current_digest_hex) and digest == current_digest_hex
                   if is_current_digest or "main" in tags or tags.intersection(keep_semver_tags) or tags.intersection(current_tags):
                       keep_version_ids.add(version["id"])
+                      keep_ref_tags.update(tags.intersection({"main"} | keep_semver_tags | current_tags))
                       if digest:
                           keep_image_digests.add(digest)
                       if is_current_digest:
                           keep_image_digests.add(digest)
+
+              for tag in sorted(keep_ref_tags):
+                  add_referenced_manifest_digests(f"{image}:{tag}", keep_image_digests)
+
+              for version in versions:
+                  digest = digest_hex(version)
+                  if digest and digest in keep_image_digests:
+                      keep_version_ids.add(version["id"])
 
               for version in versions:
                   for tag in tags_for(version):
@@ -302,6 +315,30 @@ jobs:
                   text=True,
                   capture_output=True,
               )
+
+          def fetch_manifest(ref):
+              res = subprocess.run(
+                  ["oras", "manifest", "fetch", ref],
+                  text=True,
+                  capture_output=True,
+              )
+              if res.returncode != 0:
+                  print(f"cleanup:manifest-fetch-failed ref={ref} error={res.stderr.strip() or res.stdout.strip() or res.returncode}", file=sys.stderr)
+                  return None
+              try:
+                  return json.loads(res.stdout)
+              except json.JSONDecodeError as err:
+                  print(f"cleanup:manifest-parse-failed ref={ref} error={err}", file=sys.stderr)
+                  return None
+
+          def add_referenced_manifest_digests(ref, keep_image_digests):
+              manifest = fetch_manifest(ref)
+              if not manifest:
+                  return
+              for desc in manifest.get("manifests", []) or []:
+                  digest = digest_ref_hex(desc.get("digest", ""))
+                  if digest:
+                      keep_image_digests.add(digest)
 
           def delete_version(base, version_id):
               return gh_api(f"{base}/{version_id}", method="DELETE")
