@@ -146,9 +146,22 @@ jobs:
       packages: write
 
     steps:
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Log In to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Delete Old Image and Artifact Versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: ${{ env.REGISTRY }}
           OWNER: ${{ github.repository_owner }}
           PACKAGE_NAME: ${{ github.event.repository.name }}-ci
           KEEP_SEMVER_COUNT: "5"
@@ -159,13 +172,16 @@ jobs:
           import re
           import subprocess
           import sys
+          import time
 
+          registry = os.environ["REGISTRY"]
           owner = os.environ["OWNER"]
           package = os.environ["PACKAGE_NAME"]
+          image = f"{registry}/{owner}/{package}"
           keep_semver_count = int(os.environ.get("KEEP_SEMVER_COUNT", "5"))
           max_passes = 5
 
-          semver_re = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+          semver_re = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
           artifact_re = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
 
           def gh_api(path, method="GET"):
@@ -192,7 +208,7 @@ jobs:
               print(f"Unable to identify package owner type for {owner}", file=sys.stderr)
               print(org_probe.stderr, file=sys.stderr)
               print(user_probe.stderr, file=sys.stderr)
-              sys.exit(1)
+              raise SystemExit(1)
 
           def list_versions(base):
               versions = []
@@ -201,7 +217,7 @@ jobs:
                   res = gh_api(f"{base}?per_page=100&page={page}")
                   if res.returncode != 0:
                       print(res.stderr, file=sys.stderr)
-                      sys.exit(res.returncode)
+                      raise SystemExit(res.returncode)
                   batch = json.loads(res.stdout)
                   if not batch:
                       break
@@ -219,6 +235,8 @@ jobs:
               return ""
 
           def semver_key(tag):
+              if tag.startswith("v"):
+                  tag = tag[1:]
               main, _, build = tag.partition("+")
               core, sep, pre = main.partition("-")
               nums = tuple(int(part) for part in core.split("."))
@@ -267,9 +285,20 @@ jobs:
                   return 1
               return 2
 
+          def delete_ref_with_oras(ref):
+              return subprocess.run(
+                  ["oras", "manifest", "delete", "--force", ref],
+                  text=True,
+                  capture_output=True,
+              )
+
+          def delete_version(base, version_id):
+              return gh_api(f"{base}/{version_id}", method="DELETE")
+
           base = api_base()
           total_deleted = 0
           final_kept = 0
+          failures = []
           for cleanup_pass in range(1, max_passes + 1):
               versions = list_versions(base)
               keep_semver_tags, keep_image_digests, keep_version_ids, artifact_subjects = classify(versions)
@@ -297,22 +326,56 @@ jobs:
                   else:
                       reason = "stale-image"
 
-                  res = gh_api(f"{base}/{version_id}", method="DELETE")
-                  if res.returncode not in (200, 202, 204):
-                      print(f"cleanup:delete-failed pass={cleanup_pass} reason={reason} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}", file=sys.stderr)
-                      print(res.stderr, file=sys.stderr)
-                      sys.exit(res.returncode)
-                  deleted_this_pass += 1
-                  total_deleted += 1
                   subject_text = ",".join(sorted(subjects)) if subjects else "<none>"
-                  print(f"cleanup:delete pass={cleanup_pass} reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
+                  deleted = False
+                  errors = []
+
+                  for tag in tags:
+                      ref = f"{image}:{tag}"
+                      res = delete_ref_with_oras(ref)
+                      if res.returncode == 0:
+                          deleted = True
+                          print(f"cleanup:delete pass={cleanup_pass} method=oras reason={reason} id={version_id} ref={ref} digest={digest} subjects={subject_text}")
+                          break
+                      errors.append(f"oras {ref}: {res.stderr.strip() or res.stdout.strip() or res.returncode}")
+
+                  if not deleted and digest.startswith("sha256:"):
+                      ref = f"{image}@{digest}"
+                      res = delete_ref_with_oras(ref)
+                      if res.returncode == 0:
+                          deleted = True
+                          print(f"cleanup:delete pass={cleanup_pass} method=oras-digest reason={reason} id={version_id} ref={ref} digest={digest} subjects={subject_text}")
+                      else:
+                          errors.append(f"oras {ref}: {res.stderr.strip() or res.stdout.strip() or res.returncode}")
+
+                  if not deleted:
+                      res = delete_version(base, version_id)
+                      if res.returncode in (200, 202, 204, 404):
+                          deleted = True
+                          print(f"cleanup:delete pass={cleanup_pass} method=github-api reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
+                      else:
+                          errors.append(f"github-api status={res.returncode}: {res.stderr.strip() or res.stdout.strip()}")
+
+                  if deleted:
+                      deleted_this_pass += 1
+                      total_deleted += 1
+                  else:
+                      message = f"cleanup:delete-failed pass={cleanup_pass} reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'} errors={' | '.join(errors)}"
+                      print(message, file=sys.stderr)
+                      failures.append(message)
 
               final_kept = kept_this_pass
               print(f"cleanup:pass-done pass={cleanup_pass} kept={kept_this_pass} deleted={deleted_this_pass}")
               if deleted_this_pass == 0:
                   break
+              time.sleep(2)
           else:
               print(f"cleanup:warning max cleanup passes reached; run may need another pass")
 
           print(f"cleanup:done kept={final_kept} deleted={total_deleted}")
+          if failures:
+              print(f"cleanup:warning delete failures={len(failures)}", file=sys.stderr)
+              for failure in failures:
+                  print(failure, file=sys.stderr)
+              raise SystemExit(1)
           PY
