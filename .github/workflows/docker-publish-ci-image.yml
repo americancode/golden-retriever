@@ -138,7 +138,7 @@ jobs:
           echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
 
   prune-registry:
-    name: Prune GHCR Images
+    name: Prune GHCR Images and Artifacts
     runs-on: ubuntu-latest
     needs: build-scan-publish
     if: ${{ github.event_name != 'pull_request' }}
@@ -146,7 +146,7 @@ jobs:
       packages: write
 
     steps:
-      - name: Delete Old Image Versions
+      - name: Delete Old Image and Artifact Versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
@@ -231,7 +231,7 @@ jobs:
           )
           keep_semver_tags = set(semver_tags[:keep_semver_count])
 
-          keep_digests = set()
+          keep_image_digests = set()
           keep_version_ids = set()
           for version in versions:
               tags = set(tags_for(version))
@@ -239,25 +239,33 @@ jobs:
               if "main" in tags or tags.intersection(keep_semver_tags):
                   keep_version_ids.add(version["id"])
                   if digest:
-                      keep_digests.add(digest)
+                      keep_image_digests.add(digest)
 
+          artifact_subjects = {}
           for version in versions:
               tags = tags_for(version)
-              digest = digest_hex(version)
               for tag in tags:
                   match = artifact_re.match(tag)
-                  if match and match.group(1) in keep_digests:
-                      keep_version_ids.add(version["id"])
-                      if digest:
-                          keep_digests.add(digest)
+                  if match:
+                      artifact_subjects.setdefault(version["id"], set()).add(match.group(1))
+
+          for version in versions:
+              subjects = artifact_subjects.get(version["id"], set())
+              if subjects and subjects.intersection(keep_image_digests):
+                  keep_version_ids.add(version["id"])
 
           print(f"cleanup: package={owner}/{package} versions={len(versions)}")
           print(f"cleanup: keeping main and semver tags={','.join(sorted(keep_semver_tags, key=semver_key, reverse=True)) or '<none>'}")
-          print(f"cleanup: keeping image digests={len(keep_digests)}")
+          print(f"cleanup: keeping image digests={len(keep_image_digests)}")
 
           deleted = 0
           kept = 0
-          for version in versions:
+
+          def delete_order(version):
+              # Delete stale signatures/attestations before deleting their old subject image versions.
+              return 0 if version["id"] in artifact_subjects else 1
+
+          for version in sorted(versions, key=delete_order):
               version_id = version["id"]
               tags = tags_for(version)
               digest = version.get("name", "")
@@ -265,13 +273,16 @@ jobs:
                   kept += 1
                   print(f"cleanup:keep id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}")
                   continue
+              subjects = artifact_subjects.get(version_id, set())
+              reason = "stale-artifact" if subjects else "stale-image"
               res = gh_api(f"{base}/{version_id}", method="DELETE")
               if res.returncode not in (200, 202, 204):
-                  print(f"cleanup:delete-failed id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}", file=sys.stderr)
+                  print(f"cleanup:delete-failed reason={reason} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}", file=sys.stderr)
                   print(res.stderr, file=sys.stderr)
                   sys.exit(res.returncode)
               deleted += 1
-              print(f"cleanup:delete id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}")
+              subject_text = ",".join(sorted(subjects)) if subjects else "<none>"
+              print(f"cleanup:delete reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
 
           print(f"cleanup:done kept={kept} deleted={deleted}")
           PY
