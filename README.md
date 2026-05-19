@@ -209,6 +209,27 @@ Supported providers:
 - `trivy`: local `trivy` CLI scanning against a generated npm `package-lock.json`. When DB updates are enabled, it performs one DB update/warm-up scan first. If that update fails, the scan fails; it does not fall back to local DB-only scanning.
 - `trivy-offline`: local `trivy` CLI scanning with `--offline-scan`, `--skip-db-update`, and `--skip-version-check`. No external Trivy API or DB calls are made.
 
+Trivy controls are split into provider selection and Trivy CLI tuning:
+
+- `trivy` vs `trivy-offline` selects the scan mode.
+- `trivy-offline-scan` only controls whether `--offline-scan` is passed to Trivy.
+- `trivy-skip-db-update` controls whether Trivy is allowed to refresh/download the vulnerability DB.
+
+For `trivy`, these are the common combinations:
+
+- `provider=trivy`, `trivy-offline-scan=true`, `trivy-skip-db-update=false`
+  - local dependency analysis
+  - fresh Trivy DB allowed
+  - this is the GitLab CI default
+- `provider=trivy`, `trivy-offline-scan=false`, `trivy-skip-db-update=false`
+  - normal Trivy mode
+  - fresh Trivy DB allowed
+- `provider=trivy`, `trivy-offline-scan=true`, `trivy-skip-db-update=true`
+  - local dependency analysis
+  - requires an existing local Trivy DB
+
+For strict local-only Trivy scanning, use `provider=trivy-offline`. That provider forces `--offline-scan` and `--skip-db-update`, and it ignores the online-mode Trivy tuning flags.
+
 Trivy mirror flags:
 
 ```sh
@@ -228,8 +249,6 @@ Trivy standalone `scan` flags use the same names without the `scan-` prefix:
 --trivy-chunk-size 50
 --trivy-concurrency 4
 ```
-
-For strict local-only Trivy scanning, use `--provider trivy-offline` or `--scan-provider trivy-offline`. That provider forces local DB usage and ignores the Trivy online-update flags.
 
 Trivy parallel scanning uses one warm-up chunk first when DB updates are enabled, then runs the remaining chunks in parallel with `--skip-db-update`. This avoids multiple Trivy processes attempting to update the vulnerability DB at the same time while still allowing parallel package scanning.
 
@@ -425,7 +444,10 @@ GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
 GOLDEN_RETRIEVER_SCAN_PROVIDER: "trivy"
 GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
 GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY: "high"
+# Only adds Trivy's --offline-scan flag. It does not block DB downloads.
 GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN: "true"
+# false => pipeline may pull a fresh Trivy DB
+# true  => require an existing local DB
 GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE: "false"
 GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE: "50"
 GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY: "4"

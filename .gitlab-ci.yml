@@ -15,8 +15,15 @@ variables:
   GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
   GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
   GOLDEN_RETRIEVER_SCAN_VULN: "true"
+  # Trivy mode selection:
+  # - GOLDEN_RETRIEVER_SCAN_PROVIDER=trivy          => normal mode; may refresh the vuln DB
+  # - GOLDEN_RETRIEVER_SCAN_PROVIDER=trivy-offline  => strict local-only mode; requires a preexisting local DB
   GOLDEN_RETRIEVER_SCAN_PROVIDER: "trivy"
+  # This only adds Trivy's --offline-scan flag. It does not prevent DB downloads.
+  # With provider=trivy, keep this true when you want local dependency analysis but still want a fresh DB per job.
   GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN: "true"
+  # false => allow DB refresh/downloads
+  # true  => require an existing local DB and skip Trivy DB updates
   GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE: "false"
   GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE: "50"
   GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY: "4"
