@@ -511,7 +511,7 @@ export https_proxy="$HTTPS_PROXY"
 export no_proxy="$NO_PROXY"
 ```
 
-If your proxy or internal registry uses a private CA, install the CA into the runner/container trust store before running `golden-retriever`. The CI image includes `ca-certificates` and `update-ca-certificates`.
+If your proxy or internal registry uses a private CA, install the CA into the runner/container trust store before running `golden-retriever`. The CI image includes `ca-certificates`; it does not run a certificate-update step during pipeline execution.
 
 ## Logging
 

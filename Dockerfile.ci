@@ -27,10 +27,6 @@ RUN apk upgrade --no-cache \
   && npm cache clean --force \
   && npm --version \
   && node --version \
-  && addgroup -S golden-retriever \
-  && adduser -S -G golden-retriever -s /bin/ash golden-retriever \
-  && mkdir -p /workspace \
-  && chown -R golden-retriever:golden-retriever /workspace
+  && mkdir -p /workspace
 COPY --from=builder /out/golden-retriever /usr/local/bin/golden-retriever
-USER golden-retriever
 WORKDIR /workspace
