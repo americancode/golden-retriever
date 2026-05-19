@@ -121,7 +121,7 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	if report.Failed != 1 {
 		t.Fatalf("report.Failed = %d, want 1", report.Failed)
 	}
-	if !slices.Contains(progress, "scan:provider provider=osv-offline source=target osv=true") {
+	if !slices.Contains(progress, "scan:provider provider=osv-offline inventory=target vuln=true") {
 		t.Fatalf("progress logs = %v, want explicit offline provider line", progress)
 	}
 	foundVuln := false
@@ -248,7 +248,7 @@ func TestScanStateSkipsOSVWhenNoPackagesSelected(t *testing.T) {
 	if report.Total != 0 || report.Passed != 0 || report.Failed != 0 || report.Errors != 0 {
 		t.Fatalf("report = %+v, want zero counts", report)
 	}
-	if !slices.Contains(progress, "scan:skip reason=no-packages source=target") {
+	if !slices.Contains(progress, "scan:skip reason=no-packages inventory=target") {
 		t.Fatalf("progress logs = %v, want skip line", progress)
 	}
 	for _, line := range progress {
@@ -428,6 +428,9 @@ func TestScanStateTrivyProvider(t *testing.T) {
 	if !containsPrefix(progress, "trivy:start packages=1 offline_scan=true skip_db_update=true") {
 		t.Fatalf("progress logs = %v, want trivy start line", progress)
 	}
+	if containsPrefix(progress, "trivy:db:") {
+		t.Fatalf("progress logs = %v, did not expect db update logs with skip-db-update", progress)
+	}
 }
 
 func TestScanStateTrivyProviderReturnsErrorWithoutOfflineFallback(t *testing.T) {
@@ -449,6 +452,12 @@ func TestScanStateTrivyProviderReturnsErrorWithoutOfflineFallback(t *testing.T) 
 	})
 	if err == nil {
 		t.Fatalf("ScanState error = nil, want Trivy error")
+	}
+	if !containsPrefix(progress, "trivy:db:start packages=1") {
+		t.Fatalf("progress logs = %v, want db start log", progress)
+	}
+	if !containsPrefix(progress, "trivy:db:fail elapsed=") {
+		t.Fatalf("progress logs = %v, want db fail log", progress)
 	}
 	if containsPrefix(progress, "trivy:provider:fallback from=trivy to=trivy-offline ") {
 		t.Fatalf("progress logs = %v, did not expect trivy offline fallback", progress)
@@ -547,6 +556,12 @@ func TestScanStateTrivyProviderParallelWarmsDBOnce(t *testing.T) {
 	}
 	if !containsPrefix(progress, "trivy:db-warmup packages=1") {
 		t.Fatalf("progress logs = %v, want db warmup", progress)
+	}
+	if !containsPrefix(progress, "trivy:db:start chunk=warmup packages=1") {
+		t.Fatalf("progress logs = %v, want db start log for warmup", progress)
+	}
+	if !containsPrefix(progress, "trivy:db:done chunk=warmup elapsed=") {
+		t.Fatalf("progress logs = %v, want db done log for warmup", progress)
 	}
 	if !containsPrefix(progress, "trivy:start chunk=warmup packages=1 offline_scan=true skip_db_update=false") {
 		t.Fatalf("progress logs = %v, want warmup without skip-db-update", progress)

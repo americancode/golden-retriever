@@ -220,6 +220,13 @@ func runTrivy(ctx context.Context, opts ScanOptions, records []osvScannerRecord,
 		} else {
 			opts.Progress("trivy:start chunk=%s packages=%d offline_scan=%t skip_db_update=%t", chunkLabel, len(records), opts.TrivyOfflineScan, skipDBUpdate)
 		}
+		if !skipDBUpdate {
+			if chunkLabel == "" {
+				opts.Progress("trivy:db:start packages=%d", len(records))
+			} else {
+				opts.Progress("trivy:db:start chunk=%s packages=%d", chunkLabel, len(records))
+			}
+		}
 	}
 	cmd := exec.CommandContext(ctx, "trivy", args...)
 	cmd.Dir = tmpDir
@@ -326,11 +333,34 @@ func runTrivyCommand(ctx context.Context, cmd *exec.Cmd, opts ScanOptions, packa
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	start := time.Now()
+	dbUpdateEnabled := !strings.Contains(strings.Join(cmd.Args, " "), "--skip-db-update")
 	for {
 		select {
 		case err := <-done:
+			if dbUpdateEnabled {
+				if err != nil {
+					if chunkLabel == "" {
+						opts.Progress("trivy:db:fail elapsed=%s packages=%d error=%v", time.Since(start).Round(time.Second), packageCount, err)
+					} else {
+						opts.Progress("trivy:db:fail chunk=%s elapsed=%s packages=%d error=%v", chunkLabel, time.Since(start).Round(time.Second), packageCount, err)
+					}
+				} else {
+					if chunkLabel == "" {
+						opts.Progress("trivy:db:done elapsed=%s packages=%d", time.Since(start).Round(time.Second), packageCount)
+					} else {
+						opts.Progress("trivy:db:done chunk=%s elapsed=%s packages=%d", chunkLabel, time.Since(start).Round(time.Second), packageCount)
+					}
+				}
+			}
 			return err
 		case <-ticker.C:
+			if dbUpdateEnabled {
+				if chunkLabel == "" {
+					opts.Progress("trivy:db:progress elapsed=%s packages=%d", time.Since(start).Round(time.Second), packageCount)
+				} else {
+					opts.Progress("trivy:db:progress chunk=%s elapsed=%s packages=%d", chunkLabel, time.Since(start).Round(time.Second), packageCount)
+				}
+			}
 			if chunkLabel == "" {
 				opts.Progress("trivy:progress elapsed=%s packages=%d", time.Since(start).Round(time.Second), packageCount)
 			} else {

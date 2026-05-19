@@ -53,7 +53,7 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 				provider = "osv-api"
 			}
 		}
-		opts.Progress("scan:provider provider=%s source=%s osv=%t", provider, opts.Source, opts.UseOSV)
+		opts.Progress("scan:provider provider=%s inventory=%s vuln=%t", provider, opts.Source, opts.UseOSV)
 	}
 
 	state, err := loadState(opts.StatePath)
@@ -77,7 +77,7 @@ func ScanState(ctx context.Context, opts ScanOptions) (ScanReport, error) {
 	report := ScanReport{Total: len(keys)}
 	if len(keys) == 0 {
 		if opts.Progress != nil {
-			opts.Progress("scan:skip reason=no-packages source=%s", opts.Source)
+			opts.Progress("scan:skip reason=no-packages inventory=%s", opts.Source)
 		}
 		report.Elapsed = time.Since(start)
 		return report, saveState(opts.StatePath, state)
