@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -295,6 +296,52 @@ func TestPublishAllGitLabCIJobTokenFallbackAuth(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("expected retry fallback call, got %d", calls)
+	}
+}
+
+func TestPublishAllAggregatesScanGateBlocks(t *testing.T) {
+	tgzA := testPackageTarball(t, `{"name":"demo-a","version":"1.0.0"}`)
+	tgzB := testPackageTarball(t, `{"name":"demo-b","version":"1.0.0"}`)
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "demo-a-1.0.0.tgz")
+	pathB := filepath.Join(dir, "demo-b-1.0.0.tgz")
+	if err := os.WriteFile(pathA, tgzA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, tgzB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := NewState()
+	state.Local["demo-a@1.0.0"] = StateRecord{
+		Name:       "demo-a",
+		Version:    "1.0.0",
+		Path:       pathA,
+		ScanStatus: "fail",
+		ScanReason: "trivy vulnerabilities (high+): GHSA-a",
+	}
+	state.Local["demo-b@1.0.0"] = StateRecord{
+		Name:       "demo-b",
+		Version:    "1.0.0",
+		Path:       pathB,
+		ScanStatus: "fail",
+		ScanReason: "trivy vulnerabilities (high+): GHSA-b",
+	}
+
+	report, err := PublishAll(context.Background(), NewClient("https://example.test"), state, PublishOptions{
+		RequireScanPass: true,
+		Concurrency:     2,
+	})
+	if err == nil {
+		t.Fatal("PublishAll error = nil, want aggregated scan gate error")
+	}
+	if got, want := err.Error(), "2 packages blocked by scan gate"; got != want {
+		t.Fatalf("PublishAll error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "demo-a@1.0.0") || strings.Contains(err.Error(), "demo-b@1.0.0") {
+		t.Fatalf("PublishAll error = %q, want abstract count only", err.Error())
+	}
+	if report.Failed != 2 {
+		t.Fatalf("report.Failed = %d, want 2", report.Failed)
 	}
 }
 

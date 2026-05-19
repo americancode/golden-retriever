@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,16 @@ type PublishReport struct {
 	Present int
 	Failed  int
 	Elapsed time.Duration
+}
+
+type scanGateBlockedError struct {
+	packageKey string
+	status     string
+	reason     string
+}
+
+func (e scanGateBlockedError) Error() string {
+	return fmt.Sprintf("%s blocked by scan gate status=%q reason=%q", e.packageKey, e.status, e.reason)
 }
 
 type publishManifest struct {
@@ -85,6 +96,7 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 	var report PublishReport
 	var processed int
 	var firstErr error
+	var blockedByScan int
 	var wg sync.WaitGroup
 
 	for i := 0; i < opts.Concurrency; i++ {
@@ -99,6 +111,10 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 					report.Failed++
 					if firstErr == nil {
 						firstErr = err
+					}
+					var blockedErr scanGateBlockedError
+					if errors.As(err, &blockedErr) {
+						blockedByScan++
 					}
 					if opts.Progress != nil {
 						opts.Progress("publish:fail processed=%d/%d package=%s@%s error=%v", processed, total, rec.Name, rec.Version, err)
@@ -154,6 +170,12 @@ func PublishAll(ctx context.Context, target *Client, state *State, opts PublishO
 		opts.Progress("publish:done total=%d pushed=%d present=%d skipped=%d failed=%d elapsed=%s",
 			total, report.Pushed, report.Present, report.Skipped, report.Failed, report.Elapsed)
 	}
+	if blockedByScan > 0 {
+		if report.Failed == blockedByScan {
+			return report, fmt.Errorf("%d packages blocked by scan gate", blockedByScan)
+		}
+		return report, fmt.Errorf("%d packages blocked by scan gate; first publish error: %w", blockedByScan, firstErr)
+	}
 	return report, firstErr
 }
 
@@ -170,7 +192,11 @@ func publishOne(ctx context.Context, target *Client, rec StateRecord, opts Publi
 		return publishSkipped, Package{}, nil
 	}
 	if opts.RequireScanPass && rec.ScanStatus != "pass" {
-		return publishSkipped, Package{}, fmt.Errorf("%s@%s blocked by scan gate status=%q reason=%q", rec.Name, rec.Version, rec.ScanStatus, rec.ScanReason)
+		return publishSkipped, Package{}, scanGateBlockedError{
+			packageKey: rec.Name + "@" + rec.Version,
+			status:     rec.ScanStatus,
+			reason:     rec.ScanReason,
+		}
 	}
 	tarballData, err := os.ReadFile(rec.Path)
 	if err != nil {
