@@ -44,6 +44,7 @@ cache:
     - .gr/state.json
     - .gr/metadata/
   policy: pull-push
+  when: always
 
 mirror:npm:
   stage: mirror
@@ -88,6 +89,7 @@ mirror:npm:
   artifacts:
     when: always
     paths:
+      - .gr/state.json
       - .gr/scan-report.json
     expire_in: 7 days
 
@@ -118,6 +120,7 @@ rescan:target:
       - .gr/state.json
       - .gr/metadata/
     policy: pull
+    when: always
   rules:
     - if: '$NPM_TARGET_REGISTRY && $CI_PIPELINE_SOURCE == "schedule"'
     - if: '$NPM_TARGET_REGISTRY'

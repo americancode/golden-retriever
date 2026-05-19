@@ -7,7 +7,7 @@ import (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintf(os.Stderr, "%serror: %v%s\n", ansiRed, err, ansiReset)
 		os.Exit(1)
 	}
 }

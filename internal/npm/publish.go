@@ -216,23 +216,30 @@ func publishOne(ctx context.Context, target *Client, rec StateRecord, opts Publi
 		return publishSkipped, Package{}, fmt.Errorf("state version %s does not match tarball manifest %s", rec.Version, manifest.Version)
 	}
 
-	doc, pkg, err := buildPublishDocument(target.registryForPackage(manifest.Name), manifest, tarballData, opts)
+	doc, _, err := buildPublishDocument(target.registryForPackage(manifest.Name), manifest, tarballData, opts)
 	if err != nil {
 		return publishSkipped, Package{}, err
+	}
+	statePkg := Package{
+		Name:      manifest.Name,
+		Version:   manifest.Version,
+		Tarball:   rec.Tarball,
+		Integrity: rec.Integrity,
+		Shasum:    rec.Shasum,
 	}
 	endpoint := publishEndpoint(target.registryForPackage(manifest.Name), manifest.Name)
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return publishSkipped, Package{}, err
 	}
-	result, err := publishDocumentWithRetries(ctx, target, endpoint, body, pkg, opts.MaxRetries, opts)
+	result, err := publishDocumentWithRetries(ctx, target, endpoint, body, statePkg, opts.MaxRetries, opts)
 	if err != nil {
 		return publishSkipped, Package{}, err
 	}
 	if result == publishPresent {
-		return publishPresent, pkg, nil
+		return publishPresent, statePkg, nil
 	}
-	return publishPushed, pkg, nil
+	return publishPushed, statePkg, nil
 }
 
 func publishDocumentWithRetries(ctx context.Context, target *Client, endpoint string, body []byte, pkg Package, maxRetries int, opts PublishOptions) (publishResult, error) {

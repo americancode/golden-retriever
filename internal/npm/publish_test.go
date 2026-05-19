@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -342,6 +344,76 @@ func TestPublishAllAggregatesScanGateBlocks(t *testing.T) {
 	}
 	if report.Failed != 2 {
 		t.Fatalf("report.Failed = %d, want 2", report.Failed)
+	}
+}
+
+func TestPublishAllPreservesSourceMetadataForTargetSkipOnRerun(t *testing.T) {
+	tgz := testPackageTarball(t, `{"name":"demo","version":"1.0.0"}`)
+	dir := t.TempDir()
+	tgzPath := filepath.Join(dir, "demo-1.0.0.tgz")
+	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha1Sum := sha1.Sum(tgz)
+	sha1Integrity := "sha1-" + base64.StdEncoding.EncodeToString(sha1Sum[:])
+	shasum := hex.EncodeToString(sha1Sum[:])
+
+	var publishHits int64
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			atomic.AddInt64(&publishHits, 1)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodGet:
+			t.Fatalf("unexpected fetch GET on rerun: %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	state := NewState()
+	state.Local["demo@1.0.0"] = StateRecord{
+		Name:      "demo",
+		Version:   "1.0.0",
+		Tarball:   srv.URL + "/demo/-/demo-1.0.0.tgz",
+		Integrity: sha1Integrity,
+		Shasum:    shasum,
+		Path:      tgzPath,
+		ScanStatus: "pass",
+	}
+
+	report, err := PublishAll(context.Background(), NewClient(srv.URL), state, PublishOptions{Source: "test-registry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Pushed != 1 {
+		t.Fatalf("unexpected publish report: %#v", report)
+	}
+	if got := state.Target["demo@1.0.0"].Integrity; got != sha1Integrity {
+		t.Fatalf("target integrity = %q, want source integrity %q", got, sha1Integrity)
+	}
+
+	statePath := filepath.Join(dir, ".gr", "state.json")
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	rerunReport, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{{
+		Name:      "demo",
+		Version:   "1.0.0",
+		Tarball:   srv.URL + "/demo/-/demo-1.0.0.tgz",
+		Integrity: sha1Integrity,
+		Shasum:    shasum,
+	}}, FetchOptions{
+		OutDir:      filepath.Join(dir, "rerun-tgzs"),
+		StatePath:   statePath,
+		Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerunReport.TargetSkipped != 1 || rerunReport.Downloaded != 0 {
+		t.Fatalf("unexpected rerun fetch report: %#v", rerunReport)
 	}
 }
 
