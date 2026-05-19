@@ -278,7 +278,7 @@ high
 critical
 ```
 
-Findings include vulnerability IDs, severity, and URLs in stdout and `.gr/scan-report.json`.
+Findings include vulnerability IDs, severity, URLs, and provider descriptions when available. Vulnerability lines are highlighted in red in command output, and `.gr/scan-report.json` includes `vulnUrls` plus `vulnDescriptions` for failed packages.
 
 ### Manual Blocklist
 

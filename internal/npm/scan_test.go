@@ -17,7 +17,7 @@ import (
 
 func TestScanStateOSVOfflineProvider(t *testing.T) {
 	statePath := writeScanTestState(t)
-	installFakeOSVScanner(t, `{"results":[{"packages":[{"package":{"name":"left-pad","version":"1.3.0","ecosystem":"npm"},"vulnerabilities":[{"id":"GHSA-test-123","database_specific":{"severity":"high"}}]}]}]}`)
+	installFakeOSVScanner(t, `{"results":[{"packages":[{"package":{"name":"left-pad","version":"1.3.0","ecosystem":"npm"},"vulnerabilities":[{"id":"GHSA-test-123","summary":"left-pad test vulnerability","database_specific":{"severity":"high"}}]}]}]}`)
 
 	report, err := ScanState(context.Background(), ScanOptions{
 		StatePath:       statePath,
@@ -46,6 +46,47 @@ func TestScanStateOSVOfflineProvider(t *testing.T) {
 	}
 	if len(rec.ScanVulnURLs) != 1 || rec.ScanVulnURLs[0] != "https://osv.dev/vulnerability/GHSA-test-123" {
 		t.Fatalf("ScanVulnURLs = %v, want OSV URL", rec.ScanVulnURLs)
+	}
+	if len(rec.ScanVulnDescriptions) != 1 || !strings.Contains(rec.ScanVulnDescriptions[0], "left-pad test vulnerability") {
+		t.Fatalf("ScanVulnDescriptions = %v, want OSV summary", rec.ScanVulnDescriptions)
+	}
+	if len(report.Findings) != 1 || len(report.Findings[0].VulnDescriptions) != 1 || !strings.Contains(report.Findings[0].VulnDescriptions[0], "left-pad test vulnerability") {
+		t.Fatalf("report.Findings = %+v, want vulnerability description", report.Findings)
+	}
+}
+
+func TestScanStateOSVAPIIncludesDescriptions(t *testing.T) {
+	statePath := writeScanTestState(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/querybatch":
+			fmt.Fprint(w, `{"results":[{"vulns":[{"id":"GHSA-api-123"}]}]}`)
+		case "/vulns/GHSA-api-123":
+			fmt.Fprint(w, `{"id":"GHSA-api-123","summary":"api summary","details":"api details","database_specific":{"severity":"high"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:       statePath,
+		Source:          "target",
+		UseOSV:          true,
+		OSVProvider:     "osv-api",
+		OSVEndpoint:     server.URL + "/querybatch",
+		MinSeverity:     "high",
+		UnknownSeverity: "high",
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Failed != 1 {
+		t.Fatalf("report.Failed = %d, want 1", report.Failed)
+	}
+	if len(report.Findings) != 1 || len(report.Findings[0].VulnDescriptions) != 1 || !strings.Contains(report.Findings[0].VulnDescriptions[0], "api summary") {
+		t.Fatalf("report.Findings = %+v, want OSV API summary", report.Findings)
 	}
 }
 
@@ -343,7 +384,7 @@ func TestScanStateOSVOfflineProviderParallelChunksRetryFailed(t *testing.T) {
 
 func TestScanStateTrivyProvider(t *testing.T) {
 	statePath := writeScanTestState(t)
-	installFakeTrivy(t, `{"Results":[{"Target":"package-lock.json","Class":"lang-pkgs","Type":"npm","Vulnerabilities":[{"VulnerabilityID":"GHSA-trivy-123","PkgName":"left-pad","InstalledVersion":"1.3.0","Severity":"HIGH","PrimaryURL":"https://avd.aquasec.com/nvd/GHSA-trivy-123"}]}]}`)
+	installFakeTrivy(t, `{"Results":[{"Target":"package-lock.json","Class":"lang-pkgs","Type":"npm","Vulnerabilities":[{"VulnerabilityID":"GHSA-trivy-123","PkgName":"left-pad","InstalledVersion":"1.3.0","Severity":"HIGH","Title":"left-pad trivy title","Description":"left-pad trivy description","PrimaryURL":"https://avd.aquasec.com/nvd/GHSA-trivy-123"}]}]}`)
 	var progress []string
 
 	report, err := ScanState(context.Background(), ScanOptions{
@@ -378,6 +419,12 @@ func TestScanStateTrivyProvider(t *testing.T) {
 	}
 	if len(rec.ScanVulnURLs) != 1 || rec.ScanVulnURLs[0] != "https://avd.aquasec.com/nvd/GHSA-trivy-123" {
 		t.Fatalf("ScanVulnURLs = %v, want Trivy primary URL", rec.ScanVulnURLs)
+	}
+	if len(rec.ScanVulnDescriptions) != 1 || !strings.Contains(rec.ScanVulnDescriptions[0], "left-pad trivy title") {
+		t.Fatalf("ScanVulnDescriptions = %v, want Trivy title", rec.ScanVulnDescriptions)
+	}
+	if len(report.Findings) != 1 || len(report.Findings[0].VulnDescriptions) != 1 || !strings.Contains(report.Findings[0].VulnDescriptions[0], "left-pad trivy title") {
+		t.Fatalf("report.Findings = %+v, want vulnerability description", report.Findings)
 	}
 	if !containsPrefix(progress, "trivy:start packages=1 offline_scan=true skip_db_update=true") {
 		t.Fatalf("progress logs = %v, want trivy start line", progress)

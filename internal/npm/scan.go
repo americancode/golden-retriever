@@ -54,11 +54,12 @@ type ScanReport struct {
 }
 
 type ScanFinding struct {
-	Package   string    `json:"package"`
-	Status    string    `json:"status"`
-	Reason    string    `json:"reason"`
-	VulnURLs  []string  `json:"vulnUrls,omitempty"`
-	ScannedAt time.Time `json:"scannedAt,omitempty"`
+	Package          string    `json:"package"`
+	Status           string    `json:"status"`
+	Reason           string    `json:"reason"`
+	VulnURLs         []string  `json:"vulnUrls,omitempty"`
+	VulnDescriptions []string  `json:"vulnDescriptions,omitempty"`
+	ScannedAt        time.Time `json:"scannedAt,omitempty"`
 }
 
 type ScanExceptionFile struct {
@@ -269,11 +270,12 @@ func recomputeScanReport(state *State, keys []string, source string) ScanReport 
 		case "fail":
 			report.Failed++
 			report.Findings = append(report.Findings, ScanFinding{
-				Package:   rec.Name + "@" + rec.Version,
-				Status:    "fail",
-				Reason:    rec.ScanReason,
-				VulnURLs:  append([]string(nil), rec.ScanVulnURLs...),
-				ScannedAt: rec.ScannedAt,
+				Package:          rec.Name + "@" + rec.Version,
+				Status:           "fail",
+				Reason:           rec.ScanReason,
+				VulnURLs:         append([]string(nil), rec.ScanVulnURLs...),
+				VulnDescriptions: append([]string(nil), rec.ScanVulnDescriptions...),
+				ScannedAt:        rec.ScannedAt,
 			})
 		default:
 			report.Errors++
@@ -405,10 +407,19 @@ type osvPackage struct {
 
 type osvBatchResponse struct {
 	Results []struct {
-		Vulns []struct {
-			ID string `json:"id"`
-		} `json:"vulns"`
+		Vulns []osvVulnerability `json:"vulns"`
 	} `json:"results"`
+}
+
+type osvVulnerability struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary,omitempty"`
+	Details string `json:"details,omitempty"`
+}
+
+type osvVulnDetail struct {
+	Level       severityLevel
+	Description string
 }
 
 func applyVulnerabilityProviderFindings(ctx context.Context, state *State, opts ScanOptions, keys []string) error {
@@ -460,7 +471,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 	if err != nil {
 		return err
 	}
-	vulnCache := map[string]severityLevel{}
+	vulnCache := map[string]osvVulnDetail{}
 	for i := 0; i < len(records); i += opts.OSVAPIBatchSize {
 		end := i + opts.OSVAPIBatchSize
 		if end > len(records) {
@@ -536,6 +547,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 				continue
 			}
 			hitIDs := make([]string, 0, len(result.Vulns))
+			descriptions := make([]string, 0, len(result.Vulns))
 			block := false
 			for _, v := range result.Vulns {
 				if v.ID == "" {
@@ -545,7 +557,15 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 					continue
 				}
 				hitIDs = append(hitIDs, v.ID)
-				if sev, ok := levels[v.ID]; ok && sev >= minLevel {
+				if detail, ok := levels[v.ID]; ok {
+					descriptions = appendVulnDescription(descriptions, v.ID, firstNonEmptyString(detail.Description, v.Summary, v.Details))
+					if detail.Level >= minLevel {
+						block = true
+					}
+					continue
+				}
+				descriptions = appendVulnDescription(descriptions, v.ID, firstNonEmptyString(v.Summary, v.Details))
+				if unknownLevel >= minLevel {
 					block = true
 				}
 			}
@@ -556,10 +576,11 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 				rec.ScanStatus = "fail"
 				rec.ScanReason = fmt.Sprintf("osv vulnerabilities (%s+): %s", opts.MinSeverity, strings.Join(hitIDs, ","))
 				rec.ScanVulnURLs = vulnURLs(hitIDs)
+				rec.ScanVulnDescriptions = appendUniqueStrings(rec.ScanVulnDescriptions, descriptions...)
 				rec.ScannedAt = time.Now().UTC()
 				setStateRecord(state, chunk[idx].Key, bucket, rec)
 				if opts.Progress != nil {
-					opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s", rec.Name, rec.Version, highestSeverityForIDs(hitIDs, levels, unknownLevel).String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","))
+					opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=osv-api", rec.Name, rec.Version, highestSeverityForIDs(hitIDs, levels, unknownLevel).String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
 				}
 			}
 		}
@@ -591,6 +612,8 @@ type osvScannerOutput struct {
 			Vulnerabilities []struct {
 				ID               string   `json:"id"`
 				Aliases          []string `json:"aliases"`
+				Summary          string   `json:"summary"`
+				Details          string   `json:"details"`
 				DatabaseSpecific struct {
 					Severity string `json:"severity"`
 				} `json:"database_specific"`
@@ -630,6 +653,8 @@ type trivyVulnerability struct {
 	PkgName          string   `json:"PkgName"`
 	InstalledVersion string   `json:"InstalledVersion"`
 	Severity         string   `json:"Severity"`
+	Title            string   `json:"Title"`
+	Description      string   `json:"Description"`
 	PrimaryURL       string   `json:"PrimaryURL"`
 	References       []string `json:"References"`
 }
@@ -934,10 +959,11 @@ func applyTrivyOutput(state *State, opts ScanOptions, parsed trivyOutput, minLev
 			rec.ScanStatus = "fail"
 			rec.ScanReason = fmt.Sprintf("trivy vulnerabilities (%s+): %s", opts.MinSeverity, id)
 			rec.ScanVulnURLs = appendUniqueStrings(rec.ScanVulnURLs, trivyVulnURLs(vuln)...)
+			rec.ScanVulnDescriptions = appendVulnDescription(rec.ScanVulnDescriptions, id, firstNonEmptyString(vuln.Title, vuln.Description))
 			rec.ScannedAt = time.Now().UTC()
 			setStateRecord(state, key, bucket, rec)
 			if opts.Progress != nil {
-				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s provider=trivy", rec.Name, rec.Version, level.String(), id, strings.Join(rec.ScanVulnURLs, ","))
+				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=trivy", rec.Name, rec.Version, level.String(), id, strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
 			}
 		}
 	}
@@ -974,6 +1000,27 @@ func appendUniqueStrings(base []string, values ...string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func appendVulnDescription(base []string, id, description string) []string {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return base
+	}
+	id = strings.TrimSpace(id)
+	if id != "" && !strings.HasPrefix(description, id+": ") {
+		description = id + ": " + description
+	}
+	return appendUniqueStrings(base, description)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func runTrivyCommand(ctx context.Context, cmd *exec.Cmd, opts ScanOptions, packageCount int, chunkLabel string) error {
@@ -1198,6 +1245,7 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 				continue
 			}
 			hitIDs := make([]string, 0, len(item.Vulnerabilities))
+			descriptions := make([]string, 0, len(item.Vulnerabilities))
 			block := false
 			highest := sevNone
 			for _, vuln := range item.Vulnerabilities {
@@ -1208,6 +1256,7 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 					continue
 				}
 				hitIDs = append(hitIDs, vuln.ID)
+				descriptions = appendVulnDescription(descriptions, vuln.ID, firstNonEmptyString(vuln.Summary, vuln.Details))
 				level := parseScannerSeverity(vuln.DatabaseSpecific.Severity, unknownLevel)
 				if level > highest {
 					highest = level
@@ -1222,10 +1271,11 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 			rec.ScanStatus = "fail"
 			rec.ScanReason = fmt.Sprintf("osv vulnerabilities (%s+): %s", opts.MinSeverity, strings.Join(hitIDs, ","))
 			rec.ScanVulnURLs = vulnURLs(hitIDs)
+			rec.ScanVulnDescriptions = appendUniqueStrings(rec.ScanVulnDescriptions, descriptions...)
 			rec.ScannedAt = time.Now().UTC()
 			setStateRecord(state, key, bucket, rec)
 			if opts.Progress != nil {
-				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s provider=osv-scanner", rec.Name, rec.Version, highest.String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","))
+				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=osv-scanner", rec.Name, rec.Version, highest.String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
 			}
 		}
 	}
@@ -1402,10 +1452,11 @@ func vulnURLs(ids []string) []string {
 	return urls
 }
 
-func highestSeverityForIDs(ids []string, levels map[string]severityLevel, unknown severityLevel) severityLevel {
+func highestSeverityForIDs(ids []string, levels map[string]osvVulnDetail, unknown severityLevel) severityLevel {
 	best := sevNone
 	for _, id := range ids {
-		level, ok := levels[id]
+		detail, ok := levels[id]
+		level := detail.Level
 		if !ok {
 			level = unknown
 		}
@@ -1532,11 +1583,11 @@ func isExceptionMatch(ex []ScanException, rec StateRecord, vulnID string) bool {
 	return false
 }
 
-func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanOptions, ids map[string]struct{}, unknown severityLevel, cache map[string]severityLevel) (map[string]severityLevel, error) {
+func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanOptions, ids map[string]struct{}, unknown severityLevel, cache map[string]osvVulnDetail) (map[string]osvVulnDetail, error) {
 	type out struct {
-		id    string
-		level severityLevel
-		err   error
+		id     string
+		detail osvVulnDetail
+		err    error
 	}
 	endpointBase := strings.TrimSuffix(opts.OSVEndpoint, "/querybatch")
 	if opts.Progress != nil {
@@ -1550,22 +1601,22 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 		go func() {
 			defer wg.Done()
 			for id := range jobs {
-				if level, ok := cache[id]; ok {
+				if detail, ok := cache[id]; ok {
 					if opts.Progress != nil {
 						opts.Progress("osv:detail:cache id=%s", id)
 					}
-					results <- out{id: id, level: level}
+					results <- out{id: id, detail: detail}
 					continue
 				}
-				level, err := fetchOSVSeverityLevel(ctx, client, endpointBase+"/vulns/"+id, unknown)
+				detail, err := fetchOSVVulnDetail(ctx, client, endpointBase+"/vulns/"+id, unknown)
 				if opts.Progress != nil {
 					if err != nil {
 						opts.Progress("osv:detail:error id=%s error=%v", id, err)
 					} else {
-						opts.Progress("osv:detail:done id=%s severity=%s", id, level.String())
+						opts.Progress("osv:detail:done id=%s severity=%s description=%t", id, detail.Level.String(), detail.Description != "")
 					}
 				}
-				results <- out{id: id, level: level, err: err}
+				results <- out{id: id, detail: detail, err: err}
 			}
 		}()
 	}
@@ -1575,12 +1626,12 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 	close(jobs)
 	wg.Wait()
 	close(results)
-	outMap := map[string]severityLevel{}
+	outMap := map[string]osvVulnDetail{}
 	for r := range results {
 		if r.err != nil {
 			return nil, r.err
 		}
-		outMap[r.id] = r.level
+		outMap[r.id] = r.detail
 	}
 	if opts.Progress != nil {
 		opts.Progress("osv:detail:complete ids=%d", len(outMap))
@@ -1588,39 +1639,44 @@ func fetchOSVSeverityLevels(ctx context.Context, client *http.Client, opts ScanO
 	return outMap, nil
 }
 
-func fetchOSVSeverityLevel(ctx context.Context, client *http.Client, url string, unknown severityLevel) (severityLevel, error) {
+func fetchOSVVulnDetail(ctx context.Context, client *http.Client, url string, unknown severityLevel) (osvVulnDetail, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return unknown, err
+		return osvVulnDetail{Level: unknown}, err
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return unknown, err
+		return osvVulnDetail{Level: unknown}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return unknown, fmt.Errorf("osv vuln lookup failed: %s", res.Status)
+		return osvVulnDetail{Level: unknown}, fmt.Errorf("osv vuln lookup failed: %s", res.Status)
 	}
 	var body struct {
+		Summary          string `json:"summary"`
+		Details          string `json:"details"`
 		DatabaseSpecific struct {
 			Severity string `json:"severity"`
 		} `json:"database_specific"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		return unknown, err
+		return osvVulnDetail{Level: unknown}, err
+	}
+	detail := osvVulnDetail{
+		Level:       unknown,
+		Description: firstNonEmptyString(body.Summary, body.Details),
 	}
 	switch strings.ToLower(strings.TrimSpace(body.DatabaseSpecific.Severity)) {
 	case "low":
-		return sevLow, nil
+		detail.Level = sevLow
 	case "medium":
-		return sevMedium, nil
+		detail.Level = sevMedium
 	case "high":
-		return sevHigh, nil
+		detail.Level = sevHigh
 	case "critical":
-		return sevCritical, nil
-	default:
-		return unknown, nil
+		detail.Level = sevCritical
 	}
+	return detail, nil
 }
 
 func (s severityLevel) String() string {

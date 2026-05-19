@@ -56,20 +56,21 @@ type FailureRecord struct {
 }
 
 type StateRecord struct {
-	Name         string    `json:"name"`
-	Version      string    `json:"version"`
-	Tarball      string    `json:"tarball"`
-	Integrity    string    `json:"integrity,omitempty"`
-	Shasum       string    `json:"shasum,omitempty"`
-	Path         string    `json:"path,omitempty"`
-	Size         int64     `json:"size,omitempty"`
-	DownloadedAt time.Time `json:"downloadedAt,omitempty"`
-	PresentAt    time.Time `json:"presentAt,omitempty"`
-	Source       string    `json:"source,omitempty"`
-	ScanStatus   string    `json:"scanStatus,omitempty"`
-	ScanReason   string    `json:"scanReason,omitempty"`
-	ScanVulnURLs []string  `json:"scanVulnUrls,omitempty"`
-	ScannedAt    time.Time `json:"scannedAt,omitempty"`
+	Name                 string    `json:"name"`
+	Version              string    `json:"version"`
+	Tarball              string    `json:"tarball"`
+	Integrity            string    `json:"integrity,omitempty"`
+	Shasum               string    `json:"shasum,omitempty"`
+	Path                 string    `json:"path,omitempty"`
+	Size                 int64     `json:"size,omitempty"`
+	DownloadedAt         time.Time `json:"downloadedAt,omitempty"`
+	PresentAt            time.Time `json:"presentAt,omitempty"`
+	Source               string    `json:"source,omitempty"`
+	ScanStatus           string    `json:"scanStatus,omitempty"`
+	ScanReason           string    `json:"scanReason,omitempty"`
+	ScanVulnURLs         []string  `json:"scanVulnUrls,omitempty"`
+	ScanVulnDescriptions []string  `json:"scanVulnDescriptions,omitempty"`
+	ScannedAt            time.Time `json:"scannedAt,omitempty"`
 }
 
 func FetchAll(ctx context.Context, client *Client, packages []Package, opts FetchOptions) (FetchReport, error) {

@@ -1726,7 +1726,12 @@ func newProgressLogger(enabled bool) func(format string, args ...any) {
 		return nil
 	}
 	return func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "progress %s\n", fmt.Sprintf(format, args...))
+		msg := fmt.Sprintf(format, args...)
+		if strings.HasPrefix(msg, "scan:vuln ") {
+			fmt.Fprintf(os.Stderr, "\x1b[31mprogress %s\x1b[0m\n", msg)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "progress %s\n", msg)
 	}
 }
 
