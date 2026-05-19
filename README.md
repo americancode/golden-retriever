@@ -249,6 +249,64 @@ OSV-specific tuning remains available when selecting `osv-api` or `osv-offline`:
 
 The CI image includes `trivy` and `osv-scanner`, but it does not include prewarmed vulnerability databases. The GitLab CI template sets `TRIVY_CACHE_DIR` to `.gr/trivy-run`, but does not include that directory in the GitLab cache. Each pipeline job fetches a fresh Trivy DB during the warm-up scan, then parallel Trivy workers reuse that per-job DB with updates disabled.
 
+### Offline DB Mounts
+
+Offline providers need local DB directories mounted into the container before scan runs.
+
+- Trivy (`trivy`/`trivy-offline` provider):
+  - Set `TRIVY_CACHE_DIR` to the mounted local directory.
+  - In strict offline mode (`trivy-offline`), scanning requires a local Trivy DB already present.
+  - For standalone `scan`, use `--provider trivy-offline` for strict local-only behavior.
+- OSV offline (`osv-offline` provider):
+  - Set `--scan-osv-offline-db /path/to/db` (scan mode) or `--osv-offline-db /path/to/db` (mirror mode).
+  - Or set `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/path/to/db`.
+  - If the OSV DB cache is missing, offline scanning fails.
+
+Example with mounted DBs in a container:
+
+```sh
+docker run --rm \
+  -v "$PWD/.gr/trivy-db:/mnt/trivy-db:ro" \
+  -v "$PWD/.gr/osv-run:/mnt/osv-run:ro" \
+  -e TRIVY_CACHE_DIR=/mnt/trivy-db \
+  -e OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/mnt/osv-run \
+  ghcr.io/americancode/golden-retriever-ci:main scan \
+    --state .gr/state.json \
+    --source target \
+    --provider trivy-offline \
+    --report .gr/scan-report.json
+
+docker run --rm \
+  -v "$PWD/.gr/osv-run:/mnt/osv-run:ro" \
+  -e OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/mnt/osv-run \
+  ghcr.io/americancode/golden-retriever-ci:main scan \
+    --state .gr/state.json \
+    --source target \
+    --provider osv-offline \
+    --osv-offline-db /mnt/osv-run \
+    --report .gr/scan-report.json
+```
+
+For GitLab CI, persist those directories in the job cache when you want offline-only runs:
+
+```yaml
+cache:
+  paths:
+    - .gr/trivy-run
+    - .gr/osv-run
+
+variables:
+  GOLDEN_RETRIEVER_TRIVY_CACHE: ".gr/trivy-run"
+  GOLDEN_RETRIEVER_OSV_CACHE: ".gr/osv-run"
+
+before_script:
+  - export TRIVY_CACHE_DIR="${GOLDEN_RETRIEVER_TRIVY_CACHE}"
+  - export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="${GOLDEN_RETRIEVER_OSV_CACHE}"
+```
+
+Then pass `--scan-trivy-offline-scan`, `--scan-trivy-skip-db-update`, or
+`--scan-osv-offline-db "$GOLDEN_RETRIEVER_OSV_CACHE"` explicitly for your selected offline provider.
+
 Real Trivy integration is covered by an opt-in test:
 
 ```sh
@@ -371,6 +429,15 @@ GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN: "true"
 GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE: "false"
 GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE: "50"
 GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY: "4"
+GOLDEN_RETRIEVER_TRIVY_CACHE: ".gr/trivy-run"
+GOLDEN_RETRIEVER_OSV_CACHE: ".gr/osv-run"
+```
+
+You can also set these directly as environment variables instead of through `GOLDEN_RETRIEVER_*`:
+
+```yaml
+TRIVY_CACHE_DIR: ".gr/trivy-run"
+OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: ".gr/osv-scanner-db"
 ```
 
 For audit-only scanning, keep:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +56,7 @@ func TestScanStateOSVOfflineProvider(t *testing.T) {
 
 func TestScanStateOSVAPIIncludesDescriptions(t *testing.T) {
 	statePath := writeScanTestState(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/querybatch":
@@ -95,7 +94,7 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	installFakeOSVScanner(t, `{"results":[{"packages":[{"package":{"name":"left-pad","version":"1.3.0","ecosystem":"npm"},"vulnerabilities":[{"id":"GHSA-test-offline","database_specific":{"severity":"high"}}]}]}]}`)
 	requests := 0
 	var progress []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		http.Error(w, "should not be called", http.StatusInternalServerError)
 	}))
@@ -139,7 +138,7 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 
 func TestScanStateOSVAPIReturnsErrorWithoutOfflineFallback(t *testing.T) {
 	statePath := writeScanTestState(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "blocked", http.StatusBadGateway)
 	}))
 	defer server.Close()
@@ -161,7 +160,7 @@ func TestScanStateOSVAPIReturnsErrorWithoutOfflineFallback(t *testing.T) {
 func TestScanStateOSVAPIStopsAfterSingleFailure(t *testing.T) {
 	statePath := writeScanTestState(t)
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		http.Error(w, fmt.Sprintf("blocked-%d", requests), http.StatusBadGateway)
 	}))

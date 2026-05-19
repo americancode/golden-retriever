@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -29,7 +28,7 @@ func TestPublishAllPublishesLocalTarballAndMarksTarget(t *testing.T) {
 	var npmAuthType string
 	var publishPath string
 	var body map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		userAgent = r.Header.Get("User-Agent")
 		npmCommand = r.Header.Get("npm-command")
@@ -122,7 +121,7 @@ func TestPublishAllTreatsConflictAsPresent(t *testing.T) {
 	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
 	}))
 	defer srv.Close()
@@ -148,7 +147,7 @@ func TestPublishAllTreatsGitLabAlreadyExistsAsPresent(t *testing.T) {
 	if err := os.WriteFile(tgzPath, tgz, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"message":"Package already exists.","error":"Package already exists."}`))
 	}))
@@ -182,7 +181,7 @@ func TestPublishAllPublishesScopedPackageWithAuth(t *testing.T) {
 
 	var authHeader string
 	var publishPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		publishPath = r.URL.EscapedPath()
 		w.WriteHeader(http.StatusCreated)
@@ -221,7 +220,7 @@ func TestPublishAllRetriesTransientFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt64(&hits, 1) == 1 {
 			http.Error(w, "temporary", http.StatusTooManyRequests)
 			return
@@ -266,7 +265,7 @@ func TestPublishAllGitLabCIJobTokenFallbackAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if calls == 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,7 +15,7 @@ import (
 
 func TestClientCoalescesPackumentFetches(t *testing.T) {
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		time.Sleep(25 * time.Millisecond)
 		fmt.Fprint(w, `{"name":"demo","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"name":"demo","version":"1.0.0"}}}`)
@@ -43,7 +42,7 @@ func TestClientCoalescesPackumentFetches(t *testing.T) {
 
 func TestClientUsesPackumentCacheOffline(t *testing.T) {
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		fmt.Fprint(w, `{"name":"demo","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"name":"demo","version":"1.0.0"}}}`)
 	}))
@@ -73,7 +72,7 @@ func TestClientUsesPackumentCacheOffline(t *testing.T) {
 
 func TestClientAppliesScopedRegistryAndAuth(t *testing.T) {
 	var authHeader string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		if r.URL.EscapedPath() != "/@scope%2Fpkg" {
 			t.Errorf("path = %s", r.URL.EscapedPath())
@@ -95,7 +94,7 @@ func TestClientAppliesScopedRegistryAndAuth(t *testing.T) {
 }
 
 func TestClientIgnoresNonObjectEnginesMetadata(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
   "name": "demo",
   "dist-tags": {"latest": "1.0.0"},
@@ -122,7 +121,7 @@ func TestClientIgnoresNonObjectEnginesMetadata(t *testing.T) {
 func TestClientRevalidatesStalePackumentWithETag(t *testing.T) {
 	var ifNoneMatch string
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		ifNoneMatch = r.Header.Get("If-None-Match")
 		if ifNoneMatch == `"abc"` {
@@ -161,7 +160,7 @@ func TestClientRevalidatesStalePackumentWithETag(t *testing.T) {
 
 func TestClientRetriesTransientPackumentFailure(t *testing.T) {
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt64(&hits, 1) == 1 {
 			http.Error(w, "temporary", http.StatusInternalServerError)
 			return
@@ -181,7 +180,7 @@ func TestClientRetriesTransientPackumentFailure(t *testing.T) {
 }
 
 func TestClientUsesStalePackumentOnTransientFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary", http.StatusInternalServerError)
 	}))
 	defer srv.Close()

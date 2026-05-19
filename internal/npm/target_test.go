@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 )
 
 func TestSyncTargetMarksPresentAndMissingPackages(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/present":
 			fmt.Fprintf(w, `{
@@ -65,7 +64,7 @@ func TestSyncTargetMarksPresentAndMissingPackages(t *testing.T) {
 func TestSyncTargetUsesScopedRegistryAuth(t *testing.T) {
 	const token = "scoped-secret"
 	var sawAuth bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "Bearer "+token {
 			sawAuth = true
 		}
@@ -110,7 +109,7 @@ func TestSyncTargetUsesScopedRegistryAuth(t *testing.T) {
 }
 
 func TestSyncTargetReportsPartialFailures(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/present":
 			fmt.Fprintf(w, `{
@@ -147,7 +146,7 @@ func TestSyncTargetReportsPartialFailures(t *testing.T) {
 
 func TestSyncTargetRetriesTransientPackumentFailure(t *testing.T) {
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt64(&hits, 1) == 1 {
 			http.Error(w, "temporary", http.StatusTooManyRequests)
 			return
@@ -179,7 +178,7 @@ func TestSyncTargetRetriesTransientPackumentFailure(t *testing.T) {
 func TestRebuildTargetFromGitLabRegistry(t *testing.T) {
 	const token = "target-secret"
 	var sawAuth bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "Bearer "+token {
 			sawAuth = true
 		}

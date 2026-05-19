@@ -6,7 +6,6 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -18,7 +17,7 @@ func TestFetchSkipsTargetPresentPackage(t *testing.T) {
 	tgz := []byte("already pushed")
 	integrity := sri(tgz)
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		w.Write(tgz)
 	}))
@@ -53,7 +52,7 @@ func TestFetchSkipsExistingValidTarballWithoutState(t *testing.T) {
 	tgz := []byte("already local")
 	integrity := sri(tgz)
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		w.Write(tgz)
 	}))
@@ -119,7 +118,7 @@ func TestFetchRecordsFailureAndClearsOnSuccess(t *testing.T) {
 	var fail bool = true
 	tgz := []byte("retry later")
 	integrity := sri(tgz)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fail {
 			http.Error(w, "temporary", http.StatusInternalServerError)
 			return
@@ -232,7 +231,7 @@ func TestFetchRetriesTransientFailure(t *testing.T) {
 	tgz := []byte("retry tarball")
 	integrity := sri(tgz)
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt64(&hits, 1) == 1 {
 			http.Error(w, "temporary", http.StatusInternalServerError)
 			return
@@ -266,7 +265,7 @@ func TestFetchContinuesAfterTarballFailureAndDownloadsRemaining(t *testing.T) {
 	okIntegrity := sri(okTGZ)
 	var okHits int64
 	var failHits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ok-1.0.0.tgz":
 			atomic.AddInt64(&okHits, 1)
@@ -314,7 +313,7 @@ func TestFetchContinuesAfterTarballFailureAndDownloadsRemaining(t *testing.T) {
 
 func TestFetchDoesNotRetryNonRetryableTarballFailure(t *testing.T) {
 	var hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
 		http.Error(w, "missing", http.StatusNotFound)
 	}))
@@ -352,7 +351,7 @@ func TestFetchAppliesTarballAuth(t *testing.T) {
 	tgz := []byte("private tarball")
 	integrity := sri(tgz)
 	var authHeader string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		w.Write(tgz)
 	}))
