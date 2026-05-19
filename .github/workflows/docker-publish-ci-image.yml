@@ -32,12 +32,14 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
         with:
-          trivy-version: v0.70.0
+          trivy-version: latest
 
       - name: Scan Source Files
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           skip-setup-trivy: true
+          scanners: vuln
+          skip-files: "usr/local/bin/trivy"
           scan-type: fs
           scan-ref: .
           format: sarif
@@ -104,6 +106,8 @@ jobs:
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           skip-setup-trivy: true
+          scanners: vuln
+          skip-files: "usr/local/bin/trivy"
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan
           format: sarif
           output: trivy-image.sarif

@@ -1,7 +1,6 @@
 ARG GO_VERSION=1.25
 ARG NODE_VERSION=22
 ARG ALPINE_VERSION=3.22
-ARG TRIVY_VERSION=0.70.0
 
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 WORKDIR /src
@@ -11,21 +10,27 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/golden-retriever ./cmd/golden-retriever
 
 FROM alpine:${ALPINE_VERSION}
-ARG TRIVY_VERSION
 RUN apk upgrade --no-cache \
   && apk add --no-cache nodejs npm ca-certificates osv-scanner wget \
   && trivy_arch="$(uname -m)" \
   && case "$trivy_arch" in x86_64) trivy_arch="64bit" ;; aarch64) trivy_arch="ARM64" ;; armv7*) trivy_arch="ARM" ;; *) echo "unsupported Trivy arch: $trivy_arch" >&2; exit 1 ;; esac \
-  && wget -O /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz" \
+  && trivy_version="$(wget -qO- https://api.github.com/repos/aquasecurity/trivy/releases/latest | sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' | head -n 1)" \
+  && if [ -z "$trivy_version" ]; then echo "failed to resolve latest trivy version" >&2; exit 1; fi \
+  && trivy_version="${trivy_version#v}" \
+  && wget -O /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-${trivy_arch}.tar.gz" \
   && tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy \
   && chmod +x /usr/local/bin/trivy \
   && rm -f /tmp/trivy.tar.gz \
-  && npm install -g npm@latest \
-  && npm cache clean --force \
   && osv-scanner --version \
   && trivy --version \
+  && npm install -g npm@latest \
+  && npm cache clean --force \
   && npm --version \
   && node --version \
-  && mkdir -p /workspace
+  && addgroup -S golden-retriever \
+  && adduser -S -G golden-retriever -s /bin/ash golden-retriever \
+  && mkdir -p /workspace \
+  && chown -R golden-retriever:golden-retriever /workspace
 COPY --from=builder /out/golden-retriever /usr/local/bin/golden-retriever
+USER golden-retriever
 WORKDIR /workspace
