@@ -160,7 +160,10 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 				if v.ID == "" {
 					continue
 				}
-				if isExceptionMatch(exceptions, rec, v.ID) {
+				if matched, ok := matchingException(exceptions, rec, v.ID); ok {
+					if opts.Progress != nil {
+						opts.Progress("scan:exception package=%s@%s severity=%s ids=%s provider=osv-api reason=%s", rec.Name, rec.Version, firstNonEmptyString(highestSeverityForIDs([]string{v.ID}, levels, unknownLevel).String(), unknownLevel.String()), v.ID, matched.Reason)
+					}
 					continue
 				}
 				hitIDs = append(hitIDs, v.ID)
@@ -187,7 +190,7 @@ func applyOSVFindings(ctx context.Context, state *State, opts ScanOptions, keys 
 				rec.ScannedAt = time.Now().UTC()
 				setStateRecord(state, chunk[idx].Key, bucket, rec)
 				if opts.Progress != nil {
-					opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=osv-api", rec.Name, rec.Version, highestSeverityForIDs(hitIDs, levels, unknownLevel).String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
+					opts.Progress("scan:vuln-json severity=%s provider=osv-api finding=%s", highestSeverityForIDs(hitIDs, levels, unknownLevel).String(), scanFindingJSON(rec))
 				}
 			}
 		}

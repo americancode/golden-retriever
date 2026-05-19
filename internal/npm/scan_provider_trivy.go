@@ -105,23 +105,13 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 	if opts.Progress != nil {
 		opts.Progress("trivy:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.TrivyChunkSize, opts.TrivyConcurrency, len(records))
 	}
-	startIndex := 0
 	if !opts.TrivySkipDBUpdate && len(chunks) > 0 {
 		if opts.Progress != nil {
-			opts.Progress("trivy:db-warmup packages=%d", len(chunks[0]))
+			opts.Progress("trivy:db:download-start packages=%d", len(records))
 		}
-		parsed, err := runTrivy(ctx, opts, chunks[0], false, "warmup")
-		if err != nil {
+		if err := runTrivyDBDownload(ctx, opts, len(records)); err != nil {
 			return err
 		}
-		applyTrivyOutput(state, opts, parsed, minLevel, unknownLevel, exceptions)
-		startIndex = 1
-	}
-	if startIndex >= len(chunks) {
-		if opts.Progress != nil {
-			opts.Progress("trivy:parallel-done chunks=%d completed=%d", len(chunks), len(chunks))
-		}
-		return nil
 	}
 	type chunkResult struct {
 		index  int
@@ -129,10 +119,10 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 		err    error
 	}
 	jobs := make(chan int)
-	results := make(chan chunkResult, len(chunks)-startIndex)
+	results := make(chan chunkResult, len(chunks))
 	workerCount := opts.TrivyConcurrency
-	if workerCount > len(chunks)-startIndex {
-		workerCount = len(chunks) - startIndex
+	if workerCount > len(chunks) {
+		workerCount = len(chunks)
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
@@ -150,7 +140,7 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 			}
 		}()
 	}
-	for idx := startIndex; idx < len(chunks); idx++ {
+	for idx := 0; idx < len(chunks); idx++ {
 		jobs <- idx
 	}
 	close(jobs)
@@ -158,7 +148,7 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 		wg.Wait()
 		close(results)
 	}()
-	completed := startIndex
+	completed := 0
 	var firstErr error
 	for result := range results {
 		completed++
@@ -185,6 +175,23 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 		}
 	}
 	return firstErr
+}
+
+func runTrivyDBDownload(ctx context.Context, opts ScanOptions, packageCount int) error {
+	args := []string{"fs", "--download-db-only", "--skip-version-check"}
+	if opts.TrivyOfflineScan {
+		args = append(args, "--offline-scan")
+	}
+	if opts.Progress != nil {
+		opts.Progress("trivy:db:start packages=%d", packageCount)
+	}
+	cmd := exec.CommandContext(ctx, "trivy", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := runTrivyCommand(ctx, cmd, opts, packageCount, ""); err != nil {
+		return fmt.Errorf("trivy db download failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 func runTrivy(ctx context.Context, opts ScanOptions, records []osvScannerRecord, skipDBUpdate bool, chunkLabel string) (trivyOutput, error) {
@@ -283,7 +290,11 @@ func applyTrivyOutput(state *State, opts ScanOptions, parsed trivyOutput, minLev
 			if rec.Name == "" || rec.Version == "" {
 				continue
 			}
-			if isExceptionMatch(exceptions, rec, id) {
+			if matched, ok := matchingException(exceptions, rec, id); ok {
+				if opts.Progress != nil {
+					level := parseScannerSeverity(vuln.Severity, unknownLevel)
+					opts.Progress("scan:exception package=%s@%s severity=%s ids=%s provider=trivy reason=%s", rec.Name, rec.Version, level.String(), id, matched.Reason)
+				}
 				continue
 			}
 			level := parseScannerSeverity(vuln.Severity, unknownLevel)
@@ -297,7 +308,7 @@ func applyTrivyOutput(state *State, opts ScanOptions, parsed trivyOutput, minLev
 			rec.ScannedAt = time.Now().UTC()
 			setStateRecord(state, key, bucket, rec)
 			if opts.Progress != nil {
-				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=trivy", rec.Name, rec.Version, level.String(), id, strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
+				opts.Progress("scan:vuln-json severity=%s provider=trivy finding=%s", level.String(), scanFindingJSON(rec))
 			}
 		}
 	}

@@ -327,7 +327,11 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 				if vuln.ID == "" {
 					continue
 				}
-				if isExceptionMatch(exceptions, rec, vuln.ID) {
+				if matched, ok := matchingException(exceptions, rec, vuln.ID); ok {
+					if opts.Progress != nil {
+						level := parseScannerSeverity(vuln.DatabaseSpecific.Severity, unknownLevel)
+						opts.Progress("scan:exception package=%s@%s severity=%s ids=%s provider=osv-scanner reason=%s", rec.Name, rec.Version, level.String(), vuln.ID, matched.Reason)
+					}
 					continue
 				}
 				hitIDs = append(hitIDs, vuln.ID)
@@ -350,7 +354,7 @@ func applyOSVScannerOutput(state *State, opts ScanOptions, parsed osvScannerOutp
 			rec.ScannedAt = time.Now().UTC()
 			setStateRecord(state, key, bucket, rec)
 			if opts.Progress != nil {
-				opts.Progress("scan:vuln package=%s@%s severity=%s ids=%s urls=%s descriptions=%s provider=osv-scanner", rec.Name, rec.Version, highest.String(), strings.Join(hitIDs, ","), strings.Join(rec.ScanVulnURLs, ","), strings.Join(rec.ScanVulnDescriptions, " | "))
+				opts.Progress("scan:vuln-json severity=%s provider=osv-scanner finding=%s", highest.String(), scanFindingJSON(rec))
 			}
 		}
 	}

@@ -140,7 +140,23 @@ func loadExceptions(path string) ([]ScanException, error) {
 	return file.Exceptions, nil
 }
 
-func isExceptionMatch(ex []ScanException, rec StateRecord, vulnID string) bool {
+func scanFindingJSON(rec StateRecord) string {
+	finding := ScanFinding{
+		Package:          rec.Name + "@" + rec.Version,
+		Status:           "fail",
+		Reason:           rec.ScanReason,
+		VulnURLs:         append([]string(nil), rec.ScanVulnURLs...),
+		VulnDescriptions: append([]string(nil), rec.ScanVulnDescriptions...),
+		ScannedAt:        rec.ScannedAt,
+	}
+	data, err := json.Marshal(finding)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func matchingException(ex []ScanException, rec StateRecord, vulnID string) (ScanException, bool) {
 	now := time.Now().UTC()
 	pkg := rec.Name
 	key := rec.Name + "@" + rec.Version
@@ -157,7 +173,12 @@ func isExceptionMatch(ex []ScanException, rec StateRecord, vulnID string) bool {
 				continue
 			}
 		}
-		return true
+		return item, true
 	}
-	return false
+	return ScanException{}, false
+}
+
+func isExceptionMatch(ex []ScanException, rec StateRecord, vulnID string) bool {
+	_, ok := matchingException(ex, rec, vulnID)
+	return ok
 }

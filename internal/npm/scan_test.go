@@ -126,7 +126,9 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	}
 	foundVuln := false
 	for _, line := range progress {
-		if strings.Contains(line, "scan:vuln package=left-pad@1.3.0 severity=high ids=GHSA-test-offline") {
+		if strings.Contains(line, "scan:vuln-json severity=high provider=osv-scanner finding={") &&
+			strings.Contains(line, `"package":"left-pad@1.3.0"`) &&
+			strings.Contains(line, `"status":"fail"`) {
 			foundVuln = true
 			break
 		}
@@ -554,20 +556,23 @@ func TestScanStateTrivyProviderParallelWarmsDBOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanState error = %v", err)
 	}
-	if !containsPrefix(progress, "trivy:db-warmup packages=1") {
-		t.Fatalf("progress logs = %v, want db warmup", progress)
+	if !containsPrefix(progress, "trivy:db:download-start packages=3") {
+		t.Fatalf("progress logs = %v, want db download start", progress)
 	}
-	if !containsPrefix(progress, "trivy:db:start chunk=warmup packages=1") {
-		t.Fatalf("progress logs = %v, want db start log for warmup", progress)
+	if !containsPrefix(progress, "trivy:db:start packages=3") {
+		t.Fatalf("progress logs = %v, want db start log", progress)
 	}
-	if !containsPrefix(progress, "trivy:db:done chunk=warmup elapsed=") {
-		t.Fatalf("progress logs = %v, want db done log for warmup", progress)
+	if !containsPrefix(progress, "trivy:db:done elapsed=") {
+		t.Fatalf("progress logs = %v, want db done log", progress)
 	}
-	if !containsPrefix(progress, "trivy:start chunk=warmup packages=1 offline_scan=true skip_db_update=false") {
-		t.Fatalf("progress logs = %v, want warmup without skip-db-update", progress)
+	if containsPrefix(progress, "trivy:start chunk=warmup ") {
+		t.Fatalf("progress logs = %v, did not expect warmup scan chunk", progress)
+	}
+	if !containsPrefix(progress, "trivy:start chunk=1/3 packages=1 offline_scan=true skip_db_update=true") {
+		t.Fatalf("progress logs = %v, want worker chunk 1/3", progress)
 	}
 	if !containsPrefix(progress, "trivy:start chunk=2/3 packages=1 offline_scan=true skip_db_update=true") {
-		t.Fatalf("progress logs = %v, want worker with skip-db-update", progress)
+		t.Fatalf("progress logs = %v, want worker chunk 2/3", progress)
 	}
 }
 
