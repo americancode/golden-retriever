@@ -107,7 +107,6 @@ jobs:
           trivy image \
             --scanners vuln \
             --skip-files usr/local/bin/trivy \
-            --skip-files usr/local/bin/golden-retriever \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --pkg-types os,library \
