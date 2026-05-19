@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -95,15 +96,14 @@ func TestScanStateOSVOfflineProviderDoesNotCallAPI(t *testing.T) {
 	}
 }
 
-func TestScanStateOSVAPIFallsBackOffline(t *testing.T) {
+func TestScanStateOSVAPIReturnsErrorWithoutOfflineFallback(t *testing.T) {
 	statePath := writeScanTestState(t)
-	installFakeOSVScanner(t, `{"results":[{"packages":[{"package":{"name":"left-pad","version":"1.3.0","ecosystem":"npm"},"vulnerabilities":[{"id":"GHSA-test-456","database_specific":{"severity":"critical"}}]}]}]}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "blocked", http.StatusBadGateway)
 	}))
 	defer server.Close()
 
-	report, err := ScanState(context.Background(), ScanOptions{
+	_, err := ScanState(context.Background(), ScanOptions{
 		StatePath:       statePath,
 		Source:          "target",
 		UseOSV:          true,
@@ -112,28 +112,13 @@ func TestScanStateOSVAPIFallsBackOffline(t *testing.T) {
 		MinSeverity:     "high",
 		UnknownSeverity: "high",
 	})
-	if err != nil {
-		t.Fatalf("ScanState error = %v", err)
-	}
-	if report.Failed != 1 {
-		t.Fatalf("report.Failed = %d, want 1", report.Failed)
-	}
-	state, err := loadState(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := state.Target["left-pad@1.3.0"]
-	if !strings.Contains(rec.ScanReason, "GHSA-test-456") {
-		t.Fatalf("ScanReason = %q, want fallback vuln id", rec.ScanReason)
-	}
-	if len(rec.ScanVulnURLs) != 1 || rec.ScanVulnURLs[0] != "https://osv.dev/vulnerability/GHSA-test-456" {
-		t.Fatalf("ScanVulnURLs = %v, want OSV URL", rec.ScanVulnURLs)
+	if err == nil {
+		t.Fatalf("ScanState error = nil, want OSV API error")
 	}
 }
 
-func TestScanStateOSVAPIFallsBackAfterSingleFailure(t *testing.T) {
+func TestScanStateOSVAPIStopsAfterSingleFailure(t *testing.T) {
 	statePath := writeScanTestState(t)
-	installFakeOSVScanner(t, `{"results":[{"packages":[{"package":{"name":"left-pad","version":"1.3.0","ecosystem":"npm"},"vulnerabilities":[{"id":"GHSA-test-789","database_specific":{"severity":"high"}}]}]}]}`)
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -141,7 +126,7 @@ func TestScanStateOSVAPIFallsBackAfterSingleFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	report, err := ScanState(context.Background(), ScanOptions{
+	_, err := ScanState(context.Background(), ScanOptions{
 		StatePath:       statePath,
 		Source:          "target",
 		UseOSV:          true,
@@ -151,14 +136,11 @@ func TestScanStateOSVAPIFallsBackAfterSingleFailure(t *testing.T) {
 		MinSeverity:     "high",
 		UnknownSeverity: "high",
 	})
-	if err != nil {
-		t.Fatalf("ScanState error = %v", err)
+	if err == nil {
+		t.Fatalf("ScanState error = nil, want OSV API error")
 	}
 	if requests != 1 {
 		t.Fatalf("OSV API requests = %d, want 1", requests)
-	}
-	if report.Failed != 1 {
-		t.Fatalf("report.Failed = %d, want 1", report.Failed)
 	}
 }
 
@@ -359,6 +341,233 @@ func TestScanStateOSVOfflineProviderParallelChunksRetryFailed(t *testing.T) {
 	}
 }
 
+func TestScanStateTrivyProvider(t *testing.T) {
+	statePath := writeScanTestState(t)
+	installFakeTrivy(t, `{"Results":[{"Target":"package-lock.json","Class":"lang-pkgs","Type":"npm","Vulnerabilities":[{"VulnerabilityID":"GHSA-trivy-123","PkgName":"left-pad","InstalledVersion":"1.3.0","Severity":"HIGH","PrimaryURL":"https://avd.aquasec.com/nvd/GHSA-trivy-123"}]}]}`)
+	var progress []string
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:         statePath,
+		Source:            "target",
+		UseOSV:            true,
+		OSVProvider:       "trivy",
+		TrivyOfflineScan:  true,
+		TrivySkipDBUpdate: true,
+		MinSeverity:       "high",
+		UnknownSeverity:   "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Failed != 1 {
+		t.Fatalf("report.Failed = %d, want 1", report.Failed)
+	}
+	state, err := loadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := state.Target["left-pad@1.3.0"]
+	if rec.ScanStatus != "fail" {
+		t.Fatalf("ScanStatus = %q, want fail", rec.ScanStatus)
+	}
+	if !strings.Contains(rec.ScanReason, "GHSA-trivy-123") {
+		t.Fatalf("ScanReason = %q, want trivy vuln id", rec.ScanReason)
+	}
+	if len(rec.ScanVulnURLs) != 1 || rec.ScanVulnURLs[0] != "https://avd.aquasec.com/nvd/GHSA-trivy-123" {
+		t.Fatalf("ScanVulnURLs = %v, want Trivy primary URL", rec.ScanVulnURLs)
+	}
+	if !containsPrefix(progress, "trivy:start packages=1 offline_scan=true skip_db_update=true") {
+		t.Fatalf("progress logs = %v, want trivy start line", progress)
+	}
+}
+
+func TestScanStateTrivyProviderReturnsErrorWithoutOfflineFallback(t *testing.T) {
+	statePath := writeScanTestState(t)
+	installFakeTrivyFail(t)
+	var progress []string
+
+	_, err := ScanState(context.Background(), ScanOptions{
+		StatePath:       statePath,
+		Source:          "target",
+		UseOSV:          true,
+		OSVProvider:     "trivy",
+		TrivyChunkSize:  100,
+		MinSeverity:     "high",
+		UnknownSeverity: "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err == nil {
+		t.Fatalf("ScanState error = nil, want Trivy error")
+	}
+	if containsPrefix(progress, "trivy:provider:fallback from=trivy to=trivy-offline ") {
+		t.Fatalf("progress logs = %v, did not expect trivy offline fallback", progress)
+	}
+}
+
+func TestScanStateTrivyOfflineProviderUsesLocalDBOnly(t *testing.T) {
+	statePath := writeScanTestState(t)
+	installFakeTrivy(t, `{"Results":[]}`)
+
+	_, err := ScanState(context.Background(), ScanOptions{
+		StatePath:       statePath,
+		Source:          "target",
+		UseOSV:          true,
+		OSVProvider:     "trivy-offline",
+		MinSeverity:     "high",
+		UnknownSeverity: "high",
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+}
+
+func TestScanStateTrivyProviderParallelChunks(t *testing.T) {
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "pkg-a", Version: "1.0.0"},
+		{Name: "pkg-b", Version: "1.0.0"},
+		{Name: "pkg-c", Version: "1.0.0"},
+		{Name: "pkg-d", Version: "1.0.0"},
+	})
+	installFakeTrivyParallel(t, 2*time.Second, `{"Results":[]}`)
+	var progress []string
+	start := time.Now()
+
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:         statePath,
+		Source:            "target",
+		UseOSV:            true,
+		OSVProvider:       "trivy",
+		TrivyOfflineScan:  true,
+		TrivySkipDBUpdate: true,
+		TrivyChunkSize:    1,
+		TrivyConcurrency:  2,
+		MinSeverity:       "high",
+		UnknownSeverity:   "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if report.Total != 4 || report.Passed != 4 || report.Failed != 0 || report.Errors != 0 {
+		t.Fatalf("report = %+v, want total=4 passed=4 failed=0 errors=0", report)
+	}
+	if elapsed >= 7*time.Second {
+		t.Fatalf("elapsed = %s, want parallel chunks substantially under serial 8s", elapsed)
+	}
+	if !containsPrefix(progress, "trivy:parallel-start ") {
+		t.Fatalf("progress logs = %v, want parallel start", progress)
+	}
+	if !containsPrefix(progress, "trivy:chunk:start chunk=") {
+		t.Fatalf("progress logs = %v, want chunk start", progress)
+	}
+	if !containsPrefix(progress, "trivy:chunk:done chunk=") {
+		t.Fatalf("progress logs = %v, want chunk done", progress)
+	}
+}
+
+func TestScanStateTrivyProviderParallelWarmsDBOnce(t *testing.T) {
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "pkg-a", Version: "1.0.0"},
+		{Name: "pkg-b", Version: "1.0.0"},
+		{Name: "pkg-c", Version: "1.0.0"},
+	})
+	installFakeTrivyParallel(t, 0, `{"Results":[]}`)
+	var progress []string
+
+	_, err := ScanState(context.Background(), ScanOptions{
+		StatePath:        statePath,
+		Source:           "target",
+		UseOSV:           true,
+		OSVProvider:      "trivy",
+		TrivyOfflineScan: true,
+		TrivyChunkSize:   1,
+		TrivyConcurrency: 2,
+		MinSeverity:      "high",
+		UnknownSeverity:  "high",
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanState error = %v", err)
+	}
+	if !containsPrefix(progress, "trivy:db-warmup packages=1") {
+		t.Fatalf("progress logs = %v, want db warmup", progress)
+	}
+	if !containsPrefix(progress, "trivy:start chunk=warmup packages=1 offline_scan=true skip_db_update=false") {
+		t.Fatalf("progress logs = %v, want warmup without skip-db-update", progress)
+	}
+	if !containsPrefix(progress, "trivy:start chunk=2/3 packages=1 offline_scan=true skip_db_update=true") {
+		t.Fatalf("progress logs = %v, want worker with skip-db-update", progress)
+	}
+}
+
+func TestScanStateTrivyProviderRealIntegration(t *testing.T) {
+	if os.Getenv("GOLDEN_RETRIEVER_TRIVY_INTEGRATION") != "1" {
+		t.Skip("set GOLDEN_RETRIEVER_TRIVY_INTEGRATION=1 to run real Trivy integration test")
+	}
+	if _, err := exec.LookPath("trivy"); err != nil {
+		t.Skipf("trivy not available: %v", err)
+	}
+	statePath := writeScanTestStateWithPackages(t, []StateRecord{
+		{Name: "left-pad", Version: "1.3.0"},
+		{Name: "minimist", Version: "0.0.8"},
+		{Name: "lodash", Version: "4.17.20"},
+		{Name: "debug", Version: "2.6.8"},
+		{Name: "ansi-regex", Version: "3.0.0"},
+	})
+	report, err := ScanState(context.Background(), ScanOptions{
+		StatePath:        statePath,
+		Source:           "target",
+		UseOSV:           true,
+		OSVProvider:      "trivy",
+		TrivyOfflineScan: true,
+		TrivyChunkSize:   1,
+		TrivyConcurrency: 4,
+		MinSeverity:      "high",
+		UnknownSeverity:  "high",
+	})
+	if err != nil {
+		t.Fatalf("ScanState real Trivy error = %v", err)
+	}
+	if report.Total != 5 {
+		t.Fatalf("report.Total = %d, want 5", report.Total)
+	}
+}
+
+func TestVulnerabilityProviderFor(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "", want: "osv-api"},
+		{raw: "osv-api", want: "osv-api"},
+		{raw: "osv-offline", want: "osv-offline"},
+		{raw: "trivy", want: "trivy"},
+		{raw: "trivy-offline", want: "trivy-offline"},
+	}
+	for _, tt := range tests {
+		provider, err := vulnerabilityProviderFor(tt.raw)
+		if err != nil {
+			t.Fatalf("vulnerabilityProviderFor(%q) error = %v", tt.raw, err)
+		}
+		if provider.Name() != tt.want {
+			t.Fatalf("vulnerabilityProviderFor(%q).Name = %q, want %q", tt.raw, provider.Name(), tt.want)
+		}
+	}
+	if _, err := vulnerabilityProviderFor("unknown"); err == nil {
+		t.Fatalf("vulnerabilityProviderFor unknown error = nil, want error")
+	}
+}
+
 func writeScanTestState(t testing.TB) string {
 	t.Helper()
 	return writeScanTestStateWithPackages(t, []StateRecord{{Name: "left-pad", Version: "1.3.0"}})
@@ -442,6 +651,55 @@ cat <<'EOF'
 EOF
 exit 1
 `, maxPackages, json)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+}
+
+func installFakeTrivy(t testing.TB, json string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script helper is unix-only")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trivy")
+	script := "#!/bin/sh\nif [ \"$1\" != \"fs\" ]; then echo \"expected fs command\" >&2; exit 9; fi\nfound_offline=0\nfound_skip=0\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--offline-scan\" ]; then found_offline=1; fi\n  if [ \"$arg\" = \"--skip-db-update\" ]; then found_skip=1; fi\ndone\nif [ \"$found_offline\" != \"1\" ]; then echo \"missing --offline-scan\" >&2; exit 10; fi\nif [ \"$found_skip\" != \"1\" ]; then echo \"missing --skip-db-update\" >&2; exit 11; fi\nif [ ! -f package-lock.json ]; then echo \"missing package-lock.json\" >&2; exit 12; fi\ncat <<'EOF'\n" + json + "\nEOF\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+}
+
+func installFakeTrivyParallel(t testing.TB, delay time.Duration, json string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script helper is unix-only")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trivy")
+	sleepLine := ""
+	if delay > 0 {
+		sleepLine = fmt.Sprintf("sleep %d\n", int(delay/time.Second))
+	}
+	script := "#!/bin/sh\nif [ \"$1\" != \"fs\" ]; then echo \"expected fs command\" >&2; exit 9; fi\n" + sleepLine + "cat <<'EOF'\n" + json + "\nEOF\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+}
+
+func installFakeTrivyFail(t testing.TB) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script helper is unix-only")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trivy")
+	script := "#!/bin/sh\nif [ \"$1\" != \"fs\" ]; then echo \"expected fs command\" >&2; exit 9; fi\necho \"simulated trivy failure\" >&2\nexit 2\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

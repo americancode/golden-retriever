@@ -6,6 +6,7 @@ variables:
   GOLDEN_RETRIEVER_STATE: ".gr/state.json"
   GOLDEN_RETRIEVER_METADATA_CACHE: ".gr/metadata"
   GOLDEN_RETRIEVER_TARBALLS: ".gr/tgzs"
+  GOLDEN_RETRIEVER_TRIVY_CACHE: ".gr/trivy-run"
   GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever-ci:main"
   GOLDEN_RETRIEVER_INPUT: "package.json"
   GOLDEN_RETRIEVER_INPUTS: ""
@@ -13,14 +14,12 @@ variables:
   GOLDEN_RETRIEVER_NPM_PLATFORMS: ""
   GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
   GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
-  GOLDEN_RETRIEVER_SCAN_OSV: "true"
-  GOLDEN_RETRIEVER_SCAN_PROVIDER: "osv-offline"
-  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB: "/var/lib/osv-scanner/db"
-  GOLDEN_RETRIEVER_SCAN_OSV_API_BATCH_SIZE: "200"
-  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE: "50"
-  GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY: "8"
-  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY: "4"
-  GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_RETRY_FAILED_CHUNKS: "true"
+  GOLDEN_RETRIEVER_SCAN_VULN: "true"
+  GOLDEN_RETRIEVER_SCAN_PROVIDER: "trivy"
+  GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN: "true"
+  GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE: "false"
+  GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE: "50"
+  GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY: "4"
   GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY: "high"
   GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY: "high"
   GOLDEN_RETRIEVER_SCAN_EXCEPTIONS: ".gr/scan-exceptions.json"
@@ -48,13 +47,15 @@ mirror:npm:
   before_script:
     - node --version
     - npm --version
+    - trivy --version
     - golden-retriever --help >/dev/null
   script:
     - |
       export http_proxy="${HTTP_PROXY}"
       export https_proxy="${HTTPS_PROXY}"
       export no_proxy="${NO_PROXY}"
-      export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="${GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB}"
+      export TRIVY_CACHE_DIR="${GOLDEN_RETRIEVER_TRIVY_CACHE}"
+      mkdir -p "$TRIVY_CACHE_DIR"
       DISCOVERED_INPUTS=""
       OLD_IFS="$IFS"
       IFS=','
@@ -76,7 +77,7 @@ mirror:npm:
         GOLDEN_RETRIEVER_INPUTS="$DISCOVERED_INPUTS"
       fi
       echo "golden-retriever inputs: ${GOLDEN_RETRIEVER_INPUTS:-$GOLDEN_RETRIEVER_INPUT}"
-      golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --npm-platforms "$GOLDEN_RETRIEVER_NPM_PLATFORMS" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-osv="$GOLDEN_RETRIEVER_SCAN_OSV" --scan-provider "$GOLDEN_RETRIEVER_SCAN_PROVIDER" --scan-osv-offline-db "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB" --scan-osv-api-batch-size "$GOLDEN_RETRIEVER_SCAN_OSV_API_BATCH_SIZE" --scan-osv-api-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY" --scan-osv-offline-chunk-size "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE" --scan-osv-offline-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY" --scan-osv-offline-retry-failed-chunks="$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_RETRY_FAILED_CHUNKS" --scan-min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist "$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
+      golden-retriever mirror --input "$GOLDEN_RETRIEVER_INPUT" --inputs "$GOLDEN_RETRIEVER_INPUTS" --project-concurrency "$GOLDEN_RETRIEVER_PROJECT_CONCURRENCY" --npm-platforms "$GOLDEN_RETRIEVER_NPM_PLATFORMS" --state "$GOLDEN_RETRIEVER_STATE" --metadata-cache "$GOLDEN_RETRIEVER_METADATA_CACHE" --out "$GOLDEN_RETRIEVER_TARBALLS" --target-registry "$NPM_TARGET_REGISTRY" --scan-enforce="$GOLDEN_RETRIEVER_SCAN_ENFORCE" --scan-vuln="$GOLDEN_RETRIEVER_SCAN_VULN" --scan-provider "$GOLDEN_RETRIEVER_SCAN_PROVIDER" --scan-trivy-offline-scan="$GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN" --scan-trivy-skip-db-update="$GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE" --scan-trivy-chunk-size "$GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE" --scan-trivy-concurrency "$GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY" --scan-min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --scan-unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --scan-exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --scan-blocklist "$GOLDEN_RETRIEVER_SCAN_BLOCKLIST" --scan-report "$GOLDEN_RETRIEVER_SCAN_REPORT"
   artifacts:
     when: always
     paths:
@@ -94,9 +95,10 @@ state:rebuild:
   before_script:
     - node --version
     - npm --version
+    - trivy --version
     - golden-retriever --help >/dev/null
   script:
-    - export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="${GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB}"
+    - export TRIVY_CACHE_DIR="${GOLDEN_RETRIEVER_TRIVY_CACHE}"
     - golden-retriever state sync-target --state "$GOLDEN_RETRIEVER_STATE" --target-registry "$NPM_TARGET_REGISTRY"
 
 rescan:target:
@@ -117,11 +119,13 @@ rescan:target:
   before_script:
     - node --version
     - npm --version
+    - trivy --version
     - golden-retriever --help >/dev/null
   script:
-    - export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="${GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB}"
+    - export TRIVY_CACHE_DIR="${GOLDEN_RETRIEVER_TRIVY_CACHE}"
+    - mkdir -p "$TRIVY_CACHE_DIR"
     - golden-retriever state sync-target --state "$GOLDEN_RETRIEVER_STATE" --target-registry "$NPM_TARGET_REGISTRY"
-    - golden-retriever scan --state "$GOLDEN_RETRIEVER_STATE" --source target --osv="$GOLDEN_RETRIEVER_SCAN_OSV" --provider "$GOLDEN_RETRIEVER_SCAN_PROVIDER" --osv-offline-db "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_DB" --osv-api-batch-size "$GOLDEN_RETRIEVER_SCAN_OSV_API_BATCH_SIZE" --osv-api-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_API_CONCURRENCY" --osv-offline-chunk-size "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CHUNK_SIZE" --osv-offline-concurrency "$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_CONCURRENCY" --osv-offline-retry-failed-chunks="$GOLDEN_RETRIEVER_SCAN_OSV_OFFLINE_RETRY_FAILED_CHUNKS" --min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --report "$GOLDEN_RETRIEVER_SCAN_REPORT"
+    - golden-retriever scan --state "$GOLDEN_RETRIEVER_STATE" --source target --vuln="$GOLDEN_RETRIEVER_SCAN_VULN" --provider "$GOLDEN_RETRIEVER_SCAN_PROVIDER" --trivy-offline-scan="$GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN" --trivy-skip-db-update="$GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE" --trivy-chunk-size "$GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE" --trivy-concurrency "$GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY" --min-severity "$GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY" --unknown-severity "$GOLDEN_RETRIEVER_SCAN_UNKNOWN_SEVERITY" --exceptions "$GOLDEN_RETRIEVER_SCAN_EXCEPTIONS" --report "$GOLDEN_RETRIEVER_SCAN_REPORT"
   artifacts:
     when: always
     paths:

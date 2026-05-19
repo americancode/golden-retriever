@@ -182,7 +182,7 @@ Prefer installing the correct CA certificate in the runner/image instead of disa
 
 ```text
 --scan-auto=true
---scan-osv=true
+--scan-vuln=true
 --scan-enforce=false
 ```
 
@@ -197,17 +197,45 @@ golden-retriever mirror ... --scan-enforce=true
 Disable scanning entirely:
 
 ```sh
-golden-retriever mirror ... --scan-auto=false --scan-osv=false
+golden-retriever mirror ... --scan-auto=false --scan-vuln=false
 ```
 
-### OSV Providers
+### Vulnerability Providers
 
 Supported providers:
 
-- `osv-api`: direct OSV API queries. If the API fails, the scanner falls back once to local offline OSV scanning.
+- `osv-api`: direct OSV API queries. If the API fails, the scan fails; it does not fall back to local OSV scanning.
 - `osv-offline`: local `osv-scanner` only. No OSV API calls are made.
+- `trivy`: local `trivy` CLI scanning against a generated npm `package-lock.json`. When DB updates are enabled, it performs one DB update/warm-up scan first. If that update fails, the scan fails; it does not fall back to local DB-only scanning.
+- `trivy-offline`: local `trivy` CLI scanning with `--offline-scan`, `--skip-db-update`, and `--skip-version-check`. No external Trivy API or DB calls are made.
 
-Mirror flags:
+Trivy mirror flags:
+
+```sh
+--scan-provider trivy
+--scan-trivy-offline-scan=true
+--scan-trivy-skip-db-update=false
+--scan-trivy-chunk-size 50
+--scan-trivy-concurrency 4
+```
+
+Trivy standalone `scan` flags use the same names without the `scan-` prefix:
+
+```sh
+--provider trivy
+--trivy-offline-scan=true
+--trivy-skip-db-update=false
+--trivy-chunk-size 50
+--trivy-concurrency 4
+```
+
+For strict local-only Trivy scanning, use `--provider trivy-offline` or `--scan-provider trivy-offline`. That provider forces local DB usage and ignores the Trivy online-update flags.
+
+Trivy parallel scanning uses one warm-up chunk first when DB updates are enabled, then runs the remaining chunks in parallel with `--skip-db-update`. This avoids multiple Trivy processes attempting to update the vulnerability DB at the same time while still allowing parallel package scanning.
+
+To run Trivy without dependency-identification network calls while still refreshing the DB, set `--trivy-offline-scan=true` / `--scan-trivy-offline-scan=true`. To require an existing local Trivy DB and prevent DB downloads, use `trivy-offline` or set `--trivy-skip-db-update=true` / `--scan-trivy-skip-db-update=true`.
+
+OSV-specific tuning remains available when selecting `osv-api` or `osv-offline`:
 
 ```sh
 --scan-provider osv-offline
@@ -219,19 +247,16 @@ Mirror flags:
 --scan-osv-offline-retry-failed-chunks=true
 ```
 
-Standalone `scan` flags use the same names without the `scan-` prefix:
+The CI image includes `trivy` and `osv-scanner`, but it does not include prewarmed vulnerability databases. The GitLab CI template sets `TRIVY_CACHE_DIR` to `.gr/trivy-run`, but does not include that directory in the GitLab cache. Each pipeline job fetches a fresh Trivy DB during the warm-up scan, then parallel Trivy workers reuse that per-job DB with updates disabled.
+
+Real Trivy integration is covered by an opt-in test:
 
 ```sh
---provider osv-offline
---osv-offline-db /var/lib/osv-scanner/db
---osv-api-batch-size 200
---osv-api-concurrency 8
---osv-offline-chunk-size 50
---osv-offline-concurrency 4
---osv-offline-retry-failed-chunks=true
+GOLDEN_RETRIEVER_TRIVY_INTEGRATION=1 \
+  go test ./internal/npm -run TestScanStateTrivyProviderRealIntegration -count=1 -timeout 10m
 ```
 
-The CI image includes `osv-scanner` and a prewarmed offline npm vulnerability database at `/var/lib/osv-scanner/db`.
+That test uses the installed `trivy` binary with `TrivyChunkSize=1` and `TrivyConcurrency=4`; it performs one DB warmup scan and then runs four concurrent Trivy workers against the same cache with DB updates disabled.
 
 ### Severity Thresholds
 
@@ -339,9 +364,13 @@ GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever-ci:main"
 GOLDEN_RETRIEVER_INPUT_DIRS: "package-jsons,package-locks"
 GOLDEN_RETRIEVER_NPM_PLATFORMS: "linux/x64/glibc,linux/arm64/glibc"
 GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
-GOLDEN_RETRIEVER_SCAN_PROVIDER: "osv-offline"
+GOLDEN_RETRIEVER_SCAN_PROVIDER: "trivy"
 GOLDEN_RETRIEVER_SCAN_ENFORCE: "false"
 GOLDEN_RETRIEVER_SCAN_MIN_SEVERITY: "high"
+GOLDEN_RETRIEVER_SCAN_TRIVY_OFFLINE_SCAN: "true"
+GOLDEN_RETRIEVER_SCAN_TRIVY_SKIP_DB_UPDATE: "false"
+GOLDEN_RETRIEVER_SCAN_TRIVY_CHUNK_SIZE: "50"
+GOLDEN_RETRIEVER_SCAN_TRIVY_CONCURRENCY: "4"
 ```
 
 For audit-only scanning, keep:
@@ -372,8 +401,8 @@ The image includes:
 - Node.js
 - latest npm
 - `ca-certificates`
+- `trivy`
 - `osv-scanner`
-- prewarmed offline OSV database at `/var/lib/osv-scanner/db`
 
 The GitHub Actions workflow:
 

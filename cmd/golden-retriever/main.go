@@ -158,18 +158,23 @@ func mirror(args []string) error {
 	tag := fs.String("tag", "latest", "dist-tag to apply while publishing")
 	access := fs.String("access", "public", "npm package access value")
 	scanDenyPackagePrefixes := fs.String("scan-deny-package-prefixes", "", "comma-separated package name prefixes to block")
-	scanOSV := fs.Bool("scan-osv", true, "query OSV for known vulnerable package versions")
-	scanProvider := fs.String("scan-provider", "osv-api", "scan provider: osv-api or osv-offline")
+	scanVuln := fs.Bool("scan-vuln", true, "query the selected vulnerability provider for known vulnerable package versions")
+	scanOSV := fs.Bool("scan-osv", true, "legacy alias for --scan-vuln")
+	scanProvider := fs.String("scan-provider", "osv-api", "scan provider: osv-api, osv-offline, trivy, or trivy-offline")
 	scanOSVEndpoint := fs.String("scan-osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
-	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
+	scanOSVOfflineDBDir := fs.String("scan-osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for osv-offline provider")
 	scanOSVAPIBatchSize := fs.Int("scan-osv-api-batch-size", 200, "OSV API query batch size")
 	scanOSVOfflineChunkSize := fs.Int("scan-osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	scanOSVOfflineRetryFailed := fs.Bool("scan-osv-offline-retry-failed-chunks", true, "split and retry failed offline osv-scanner chunks with smaller package batches")
+	scanTrivyOfflineScan := fs.Bool("scan-trivy-offline-scan", false, "pass --offline-scan to Trivy to avoid dependency-identification API calls")
+	scanTrivySkipDBUpdate := fs.Bool("scan-trivy-skip-db-update", false, "pass --skip-db-update to Trivy and require an existing local Trivy vulnerability DB")
+	scanTrivyChunkSize := fs.Int("scan-trivy-chunk-size", 100, "Trivy package chunk size for parallel scans")
 	scanMinSeverity := fs.String("scan-min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	scanUnknownSeverity := fs.String("scan-unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	scanExceptions := fs.String("scan-exceptions", "", "path to scan exceptions JSON file")
 	scanOSVAPIConcurrency := fs.Int("scan-osv-api-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV API vulnerability detail lookup count")
 	scanOSVOfflineConcurrency := fs.Int("scan-osv-offline-concurrency", max(4, runtime.NumCPU()/2), "parallel offline osv-scanner worker count")
+	scanTrivyConcurrency := fs.Int("scan-trivy-concurrency", max(4, runtime.NumCPU()/2), "parallel Trivy worker count")
 	scanBlocklist := fs.String("scan-blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	scanReportPath := fs.String("scan-report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
@@ -178,6 +183,7 @@ func mirror(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	scanEnabled := selectedBoolAlias(fs, "scan-vuln", *scanVuln, "scan-osv", *scanOSV)
 	if *targetRegistry == "" {
 		return fmt.Errorf("missing --target-registry")
 	}
@@ -253,13 +259,16 @@ func mirror(args []string) error {
 			ScanAuto:                  *scanAuto,
 			ScanEnforce:               *scanEnforce,
 			ScanDenyPrefixes:          csvList(*scanDenyPackagePrefixes),
-			ScanOSV:                   *scanOSV,
+			ScanOSV:                   scanEnabled,
 			ScanProvider:              *scanProvider,
 			ScanOSVEndpoint:           *scanOSVEndpoint,
 			ScanOSVOfflineDBDir:       *scanOSVOfflineDBDir,
 			ScanOSVAPIBatchSize:       *scanOSVAPIBatchSize,
 			ScanOSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
 			ScanOSVOfflineRetryFailed: *scanOSVOfflineRetryFailed,
+			ScanTrivyOfflineScan:      *scanTrivyOfflineScan,
+			ScanTrivySkipDBUpdate:     *scanTrivySkipDBUpdate,
+			ScanTrivyChunkSize:        *scanTrivyChunkSize,
 			ScanBlocklistPath:         *scanBlocklist,
 			ScanReportPath:            *scanReportPath,
 			ScanMinSeverity:           *scanMinSeverity,
@@ -267,6 +276,7 @@ func mirror(args []string) error {
 			ScanExceptionsPath:        *scanExceptions,
 			ScanOSVAPIConcurrency:     *scanOSVAPIConcurrency,
 			ScanOSVOfflineConcurrency: *scanOSVOfflineConcurrency,
+			ScanTrivyConcurrency:      *scanTrivyConcurrency,
 		})
 	}
 	selectedInput := resolvedInputs[0]
@@ -363,7 +373,7 @@ func mirror(args []string) error {
 			Concurrency:           *fetchConcurrency,
 			BlocklistPath:         *scanBlocklist,
 			DenyPackagePrefix:     csvList(*scanDenyPackagePrefixes),
-			UseOSV:                *scanOSV,
+			UseOSV:                scanEnabled,
 			OSVProvider:           *scanProvider,
 			OSVEndpoint:           *scanOSVEndpoint,
 			OSVOfflineDBDir:       *scanOSVOfflineDBDir,
@@ -371,10 +381,14 @@ func mirror(args []string) error {
 			OSVAPIConcurrency:     *scanOSVAPIConcurrency,
 			OSVOfflineChunkSize:   *scanOSVOfflineChunkSize,
 			OSVOfflineRetryFailed: *scanOSVOfflineRetryFailed,
+			TrivyOfflineScan:      *scanTrivyOfflineScan,
+			TrivySkipDBUpdate:     *scanTrivySkipDBUpdate,
+			TrivyChunkSize:        *scanTrivyChunkSize,
 			MinSeverity:           *scanMinSeverity,
 			UnknownSeverity:       *scanUnknownSeverity,
 			ExceptionsPath:        *scanExceptions,
 			OSVOfflineConcurrency: *scanOSVOfflineConcurrency,
+			TrivyConcurrency:      *scanTrivyConcurrency,
 			Progress:              pickProgressLogger(*trace, tracef, progressf),
 		})
 		if writeErr := writeScanReport(*scanReportPath, *statePath, scanReport); writeErr != nil && scanErr == nil {
@@ -755,24 +769,30 @@ func scan(args []string) error {
 	concurrency := fs.Int("concurrency", max(4, runtime.NumCPU()*2), "parallel scan worker count")
 	blocklist := fs.String("blocklist", ".gr/scan-blocklist.json", "path to scan blocklist JSON file")
 	denyPrefixes := fs.String("deny-package-prefixes", "", "comma-separated package name prefixes to block")
-	useOSV := fs.Bool("osv", true, "query OSV for known vulnerable package versions")
-	provider := fs.String("provider", "osv-api", "scan provider: osv-api or osv-offline")
+	useVuln := fs.Bool("vuln", true, "query the selected vulnerability provider for known vulnerable package versions")
+	useOSV := fs.Bool("osv", true, "legacy alias for --vuln")
+	provider := fs.String("provider", "osv-api", "scan provider: osv-api, osv-offline, trivy, or trivy-offline")
 	osvEndpoint := fs.String("osv-endpoint", "https://api.osv.dev/v1/querybatch", "OSV querybatch API endpoint")
-	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for offline fallback")
+	osvOfflineDBDir := fs.String("osv-offline-db", os.Getenv("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"), "local OSV scanner database cache directory for osv-offline provider")
 	osvAPIBatchSize := fs.Int("osv-api-batch-size", 200, "OSV API query batch size")
 	osvOfflineChunkSize := fs.Int("osv-offline-chunk-size", 100, "offline osv-scanner package chunk size")
 	osvOfflineRetryFailed := fs.Bool("osv-offline-retry-failed-chunks", true, "split and retry failed offline osv-scanner chunks with smaller package batches")
+	trivyOfflineScan := fs.Bool("trivy-offline-scan", false, "pass --offline-scan to Trivy to avoid dependency-identification API calls")
+	trivySkipDBUpdate := fs.Bool("trivy-skip-db-update", false, "pass --skip-db-update to Trivy and require an existing local Trivy vulnerability DB")
+	trivyChunkSize := fs.Int("trivy-chunk-size", 100, "Trivy package chunk size for parallel scans")
 	minSeverity := fs.String("min-severity", "high", "minimum OSV severity to fail: low, medium, high, critical")
 	unknownSeverity := fs.String("unknown-severity", "high", "severity to assume when OSV severity is unavailable")
 	exceptions := fs.String("exceptions", "", "path to scan exceptions JSON file")
 	osvAPIConcurrency := fs.Int("osv-api-concurrency", max(4, runtime.NumCPU()/2), "parallel OSV API vulnerability detail lookup count")
 	osvOfflineConcurrency := fs.Int("osv-offline-concurrency", max(4, runtime.NumCPU()/2), "parallel offline osv-scanner worker count")
+	trivyConcurrency := fs.Int("trivy-concurrency", max(4, runtime.NumCPU()/2), "parallel Trivy worker count")
 	reportPath := fs.String("report", ".gr/scan-report.json", "scan report JSON output path")
 	jsonOut := fs.Bool("json", false, "print machine-readable JSON summary")
 	trace := fs.Bool("trace", envBool("GR_TRACE"), "print detailed stage/progress logs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	vulnEnabled := selectedBoolAlias(fs, "vuln", *useVuln, "osv", *useOSV)
 	tracef := newTraceLogger(*trace)
 	progressf := newProgressLogger(!*trace && !*jsonOut)
 	report, err := npm.ScanState(context.Background(), npm.ScanOptions{
@@ -781,7 +801,7 @@ func scan(args []string) error {
 		Source:                *source,
 		BlocklistPath:         *blocklist,
 		DenyPackagePrefix:     csvList(*denyPrefixes),
-		UseOSV:                *useOSV,
+		UseOSV:                vulnEnabled,
 		OSVProvider:           *provider,
 		OSVEndpoint:           *osvEndpoint,
 		OSVOfflineDBDir:       *osvOfflineDBDir,
@@ -789,10 +809,14 @@ func scan(args []string) error {
 		OSVAPIConcurrency:     *osvAPIConcurrency,
 		OSVOfflineChunkSize:   *osvOfflineChunkSize,
 		OSVOfflineRetryFailed: *osvOfflineRetryFailed,
+		TrivyOfflineScan:      *trivyOfflineScan,
+		TrivySkipDBUpdate:     *trivySkipDBUpdate,
+		TrivyChunkSize:        *trivyChunkSize,
 		MinSeverity:           *minSeverity,
 		UnknownSeverity:       *unknownSeverity,
 		ExceptionsPath:        *exceptions,
 		OSVOfflineConcurrency: *osvOfflineConcurrency,
+		TrivyConcurrency:      *trivyConcurrency,
 		Progress:              pickProgressLogger(*trace, tracef, progressf),
 	})
 	if writeErr := writeScanReport(*reportPath, *statePath, report); writeErr != nil && err == nil {
@@ -1307,11 +1331,15 @@ type mirrorManyOptions struct {
 	ScanOSVAPIBatchSize       int
 	ScanOSVOfflineChunkSize   int
 	ScanOSVOfflineRetryFailed bool
+	ScanTrivyOfflineScan      bool
+	ScanTrivySkipDBUpdate     bool
+	ScanTrivyChunkSize        int
 	ScanMinSeverity           string
 	ScanUnknownSeverity       string
 	ScanExceptionsPath        string
 	ScanOSVAPIConcurrency     int
 	ScanOSVOfflineConcurrency int
+	ScanTrivyConcurrency      int
 	ScanBlocklistPath         string
 	ScanReportPath            string
 }
@@ -1385,10 +1413,14 @@ func mirrorMany(ctx context.Context, opts mirrorManyOptions) error {
 			OSVAPIConcurrency:     opts.ScanOSVAPIConcurrency,
 			OSVOfflineChunkSize:   opts.ScanOSVOfflineChunkSize,
 			OSVOfflineRetryFailed: opts.ScanOSVOfflineRetryFailed,
+			TrivyOfflineScan:      opts.ScanTrivyOfflineScan,
+			TrivySkipDBUpdate:     opts.ScanTrivySkipDBUpdate,
+			TrivyChunkSize:        opts.ScanTrivyChunkSize,
 			MinSeverity:           opts.ScanMinSeverity,
 			UnknownSeverity:       opts.ScanUnknownSeverity,
 			ExceptionsPath:        opts.ScanExceptionsPath,
 			OSVOfflineConcurrency: opts.ScanOSVOfflineConcurrency,
+			TrivyConcurrency:      opts.ScanTrivyConcurrency,
 			Progress:              pickProgressLogger(false, opts.Tracef, opts.Progressf),
 		})
 		if writeErr := writeScanReport(opts.ScanReportPath, opts.StateBase, scanReport); writeErr != nil && err == nil {
@@ -1528,6 +1560,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func selectedBoolAlias(fs *flag.FlagSet, primary string, primaryValue bool, legacy string, legacyValue bool) bool {
+	primarySet := false
+	legacySet := false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case primary:
+			primarySet = true
+		case legacy:
+			legacySet = true
+		}
+	})
+	if primarySet {
+		return primaryValue
+	}
+	if legacySet {
+		return legacyValue
+	}
+	return primaryValue
 }
 
 func resolveInputs(input, inputs string) ([]string, error) {
