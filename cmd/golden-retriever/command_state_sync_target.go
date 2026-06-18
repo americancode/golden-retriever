@@ -114,31 +114,31 @@ func stateSyncTarget(args []string) error {
 		selectedInput = resolvedInputs[0]
 		if len(resolvedInputs) > 1 {
 			var warningsMu sync.Mutex
-			perProjectWarnings := map[string]*npm.Graph{}
-			packages, _, err = resolveProjectsParallel(ctx, resolvedInputs, *projectConcurrency, nil, func(currentInput string) (*npm.Graph, error) {
+			packages, _, err = resolveProjectsParallel(ctx, resolvedInputs, *projectConcurrency, resolveOpts.NPMPlatforms, nil, func(currentInput string, platform *npm.NPMPlatform) (*npm.Graph, error) {
 				_, _, metadata := multiProjectPaths(currentInput, "", *statePath, *metadataCache)
 				sourceClient, clientErr := newClient(currentInput, *registry, *npmrc, metadata, *metadataCacheTTL, *metadataRetries)
 				if clientErr != nil {
 					return nil, clientErr
 				}
-				graph, loadErr := npm.LoadInput(ctx, sourceClient, currentInput, resolveOpts)
+				var (
+					graph   *npm.Graph
+					loadErr error
+				)
+				if platform != nil {
+					graph, loadErr = npm.LoadInputForPlatform(ctx, sourceClient, currentInput, resolveOpts, *platform)
+				} else {
+					graph, loadErr = npm.LoadInput(ctx, sourceClient, currentInput, resolveOpts)
+				}
 				if loadErr == nil {
 					warningsMu.Lock()
-					perProjectWarnings[currentInput] = graph
+					engineWarnings = append(engineWarnings, graph.EngineWarnings...)
+					deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
 					warningsMu.Unlock()
 				}
 				return graph, loadErr
 			})
 			if err != nil {
 				return err
-			}
-			for _, currentInput := range resolvedInputs {
-				graph := perProjectWarnings[currentInput]
-				if graph == nil {
-					continue
-				}
-				engineWarnings = append(engineWarnings, graph.EngineWarnings...)
-				deprecationWarnings = append(deprecationWarnings, graph.DeprecationWarnings...)
 			}
 		} else {
 			sourceClient, clientErr := newClient(selectedInput, *registry, *npmrc, *metadataCache, *metadataCacheTTL, *metadataRetries)

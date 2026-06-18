@@ -103,6 +103,14 @@ func (e *InvalidTagNameError) Error() string {
 }
 
 func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOptions) (*Graph, error) {
+	return loadInput(ctx, client, input, opts, nil, false)
+}
+
+func LoadInputForPlatform(ctx context.Context, client *Client, input string, opts ResolveOptions, platform NPMPlatform) (*Graph, error) {
+	return loadInput(ctx, client, input, opts, &platform, true)
+}
+
+func loadInput(ctx context.Context, client *Client, input string, opts ResolveOptions, platform *NPMPlatform, isolatePlatform bool) (*Graph, error) {
 	info, err := os.Stat(input)
 	if err == nil && info.IsDir() {
 		yarnPath := filepath.Join(input, "yarn.lock")
@@ -112,7 +120,7 @@ func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOp
 		if fileExists(filepath.Join(input, "package-lock.json")) {
 			return loadLockfile(filepath.Join(input, "package-lock.json"), yarnPath)
 		}
-		return ResolvePackageJSON(ctx, client, filepath.Join(input, "package.json"), opts)
+		return resolvePackageJSONInput(ctx, client, filepath.Join(input, "package.json"), opts, platform, isolatePlatform)
 	}
 	base := filepath.Base(input)
 	if base == "package-lock.json" || base == "npm-shrinkwrap.json" {
@@ -121,7 +129,7 @@ func LoadInput(ctx context.Context, client *Client, input string, opts ResolveOp
 	if isLockfilePath(input) {
 		return loadLockfile(input, filepath.Join(filepath.Dir(input), "yarn.lock"))
 	}
-	return ResolvePackageJSON(ctx, client, input, opts)
+	return resolvePackageJSONInput(ctx, client, input, opts, platform, isolatePlatform)
 }
 
 func fileExists(path string) bool {
@@ -130,12 +138,26 @@ func fileExists(path string) bool {
 }
 
 func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts ResolveOptions) (*Graph, error) {
+	return resolvePackageJSONInput(ctx, client, path, opts, nil, false)
+}
+
+func resolvePackageJSONInput(ctx context.Context, client *Client, path string, opts ResolveOptions, platform *NPMPlatform, isolatePlatform bool) (*Graph, error) {
 	_ = client
+	if platform != nil {
+		if opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:start input=%s platform=%s", path, platform.Label())
+		}
+		graph, err := resolveViaNPMLockfile(ctx, path, *platform, isolatePlatform)
+		if err == nil && opts.Progress != nil {
+			opts.Progress("resolve:npm-lock:done input=%s platform=%s packages=%d", path, platform.Label(), len(graph.Packages()))
+		}
+		return graph, err
+	}
 	if len(opts.NPMPlatforms) == 0 {
 		if opts.Progress != nil {
 			opts.Progress("resolve:npm-lock:start input=%s platform=current", path)
 		}
-		graph, err := resolveViaNPMLockfile(ctx, path, NPMPlatform{})
+		graph, err := resolveViaNPMLockfile(ctx, path, NPMPlatform{}, false)
 		if err == nil && opts.Progress != nil {
 			opts.Progress("resolve:npm-lock:done input=%s platform=current packages=%d", path, len(graph.Packages()))
 		}
@@ -146,7 +168,7 @@ func ResolvePackageJSON(ctx context.Context, client *Client, path string, opts R
 		if opts.Progress != nil {
 			opts.Progress("resolve:npm-lock:start input=%s platform=%s", path, platform.Label())
 		}
-		graph, err := resolveViaNPMLockfile(ctx, path, platform)
+		graph, err := resolveViaNPMLockfile(ctx, path, platform, false)
 		if err != nil {
 			return nil, fmt.Errorf("platform %s: %w", platform.Label(), err)
 		}
@@ -169,7 +191,7 @@ func sortedDependencyNames(deps map[string]string) []string {
 	return names
 }
 
-func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string, platform NPMPlatform) (*Graph, error) {
+func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string, platform NPMPlatform, isolate bool) (*Graph, error) {
 	if _, err := exec.LookPath("npm"); err != nil {
 		return nil, fmt.Errorf("npm is required to resolve package.json via lockfile generation: %w", err)
 	}
@@ -180,39 +202,69 @@ func resolveViaNPMLockfile(ctx context.Context, packageJSONPath string, platform
 	projectDir := filepath.Dir(packageJSONPath)
 	resolvedPackageJSON := packageJSONPath
 	lockPath := filepath.Join(projectDir, "package-lock.json")
-	if filepath.Base(packageJSONPath) != "package.json" {
+	tempProjectDir := ""
+	if filepath.Base(packageJSONPath) != "package.json" || isolate {
 		tempProjectDir, err := cloneProjectDirForResolution(projectDir)
 		if err != nil {
 			return nil, err
 		}
 		defer os.RemoveAll(tempProjectDir)
 		tempPackageJSON := filepath.Join(tempProjectDir, "package.json")
-		if err := os.WriteFile(tempPackageJSON, srcData, 0o644); err != nil {
-			return nil, err
+		if filepath.Base(packageJSONPath) != "package.json" {
+			if err := os.WriteFile(tempPackageJSON, srcData, 0o644); err != nil {
+				return nil, err
+			}
 		}
 		resolvedPackageJSON = tempPackageJSON
 		lockPath = filepath.Join(tempProjectDir, "package-lock.json")
 	}
 
-	origLockData, lockReadErr := os.ReadFile(lockPath)
-	origLockExists := lockReadErr == nil
-	if lockReadErr != nil && !os.IsNotExist(lockReadErr) {
-		return nil, lockReadErr
+	origLockData := []byte(nil)
+	origLockExists := false
+	if tempProjectDir == "" {
+		origLockData, err = os.ReadFile(lockPath)
+		origLockExists = err == nil
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
 	}
-	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
-	cmd.Dir = filepath.Dir(resolvedPackageJSON)
-	cmd.Env = npmPlatformEnv(os.Environ(), platform)
-	out, err := cmd.CombinedOutput()
+	out, err := runNPMLockfileInstall(ctx, filepath.Dir(resolvedPackageJSON), platform, false)
 	if err != nil {
-		return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
+		if shouldRetryWithLegacyPeerDeps(out) {
+			outText := strings.TrimSpace(string(out))
+			fmt.Fprintf(os.Stderr, "warn npm lockfile resolution failed input=%s platform=%s retry=legacy-peer-deps error=%s\n", packageJSONPath, platform.Label(), outText)
+			out, err = runNPMLockfileInstall(ctx, filepath.Dir(resolvedPackageJSON), platform, true)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("npm lockfile resolution failed: %w: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	g, loadErr := LoadLockfile(lockPath)
-	if filepath.Base(packageJSONPath) == "package.json" && origLockExists {
+	if tempProjectDir == "" && filepath.Base(packageJSONPath) == "package.json" && origLockExists {
 		_ = os.WriteFile(lockPath, origLockData, 0o644)
-	} else if filepath.Base(packageJSONPath) == "package.json" {
+	} else if tempProjectDir == "" && filepath.Base(packageJSONPath) == "package.json" {
 		_ = os.Remove(lockPath)
 	}
 	return g, loadErr
+}
+
+func runNPMLockfileInstall(ctx context.Context, dir string, platform NPMPlatform, legacyPeerDeps bool) ([]byte, error) {
+	args := []string{"install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false"}
+	if legacyPeerDeps {
+		args = append(args, "--legacy-peer-deps")
+	}
+	cmd := exec.CommandContext(ctx, "npm", args...)
+	cmd.Dir = dir
+	cmd.Env = npmPlatformEnv(os.Environ(), platform)
+	return cmd.CombinedOutput()
+}
+
+func shouldRetryWithLegacyPeerDeps(out []byte) bool {
+	msg := strings.ToLower(strings.TrimSpace(string(out)))
+	return strings.Contains(msg, "fix upstream dependency conflict") ||
+		strings.Contains(msg, "retry this command with --force or --legacy-peer-deps") ||
+		strings.Contains(msg, "unable to resolve dependency tree") ||
+		strings.Contains(msg, "code eresolve")
 }
 
 func npmPlatformEnv(env []string, platform NPMPlatform) []string {

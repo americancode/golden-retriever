@@ -28,11 +28,14 @@ type fetchManyOptions struct {
 }
 
 func fetchMany(ctx context.Context, opts fetchManyOptions) error {
-	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, opts.Progressf, func(input string) (*npm.Graph, error) {
+	packages, perProjectCounts, err := resolveProjectsParallel(ctx, opts.Inputs, opts.ProjectConcurrency, opts.ResolveOptions.NPMPlatforms, opts.Progressf, func(input string, platform *npm.NPMPlatform) (*npm.Graph, error) {
 		_, _, metadata := multiProjectPaths(input, opts.OutBase, opts.StateBase, opts.MetadataCacheBase)
 		client, err := newClient(input, opts.Registry, opts.NPMRC, metadata, opts.MetadataCacheTTL, opts.MetadataRetries)
 		if err != nil {
 			return nil, err
+		}
+		if platform != nil {
+			return npm.LoadInputForPlatform(ctx, client, input, opts.ResolveOptions, *platform)
 		}
 		return npm.LoadInput(ctx, client, input, opts.ResolveOptions)
 	})
