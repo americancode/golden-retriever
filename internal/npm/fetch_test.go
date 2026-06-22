@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 func TestFetchSkipsTargetPresentPackage(t *testing.T) {
 	tgz := []byte("already pushed")
 	integrity := sri(tgz)
+	shasum := sha1Hex(tgz)
 	var hits int64
 	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
@@ -27,15 +29,16 @@ func TestFetchSkipsTargetPresentPackage(t *testing.T) {
 	statePath := filepath.Join(dir, ".gr", "state.json")
 	state := NewState()
 	MarkTargetPresent(state, Package{
-		Name: "present", Version: "1.0.0", Tarball: srv.URL + "/present-1.0.0.tgz", Integrity: integrity,
+		Name: "present", Version: "1.0.0",
 	}, "test")
 	if err := SaveState(statePath, state); err != nil {
 		t.Fatal(err)
 	}
 
-	report, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{{
-		Name: "present", Version: "1.0.0", Tarball: srv.URL + "/present-1.0.0.tgz", Integrity: integrity,
-	}}, FetchOptions{
+	pkg := Package{
+		Name: "present", Version: "1.0.0", Tarball: srv.URL + "/present-1.0.0.tgz", Integrity: integrity, Shasum: shasum,
+	}
+	report, err := FetchAll(context.Background(), NewClient(srv.URL), []Package{pkg}, FetchOptions{
 		OutDir:      filepath.Join(dir, "tgzs"),
 		StatePath:   statePath,
 		Concurrency: 1,
@@ -45,6 +48,17 @@ func TestFetchSkipsTargetPresentPackage(t *testing.T) {
 	}
 	if report.TargetSkipped != 1 || report.Downloaded != 0 || atomic.LoadInt64(&hits) != 0 {
 		t.Fatalf("report=%#v hits=%d", report, hits)
+	}
+	state, err = LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := state.Target[pkg.Key()]
+	if rec.Tarball != pkg.Tarball || rec.Integrity != pkg.Integrity || rec.Shasum != pkg.Shasum {
+		t.Fatalf("target state not refreshed on skip: %#v", rec)
+	}
+	if rec.Source != "test" {
+		t.Fatalf("target source = %q, want test", rec.Source)
 	}
 }
 
@@ -380,6 +394,11 @@ func TestFetchAppliesTarballAuth(t *testing.T) {
 func sri(data []byte) string {
 	sum := sha512.Sum512(data)
 	return "sha512-" + base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func sha1Hex(data []byte) string {
+	sum := sha1.Sum(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func serverURL(r *http.Request) string {

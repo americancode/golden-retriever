@@ -117,6 +117,9 @@ func loadInput(ctx context.Context, client *Client, input string, opts ResolveOp
 		if fileExists(filepath.Join(input, "npm-shrinkwrap.json")) {
 			return loadLockfile(filepath.Join(input, "npm-shrinkwrap.json"), yarnPath)
 		}
+		if fileExists(filepath.Join(input, "package.json")) && (platform != nil || len(opts.NPMPlatforms) > 0) {
+			return resolvePackageJSONInput(ctx, client, filepath.Join(input, "package.json"), opts, platform, isolatePlatform)
+		}
 		if fileExists(filepath.Join(input, "package-lock.json")) {
 			return loadLockfile(filepath.Join(input, "package-lock.json"), yarnPath)
 		}

@@ -182,6 +182,7 @@ func fetchOne(ctx context.Context, client *Client, pkg Package, outDir, outputNa
 	}
 	stateMu.Lock()
 	if targetContainsPackage(state, pkg) {
+		MarkTargetPresent(state, pkg, state.Target[pkg.Key()].Source)
 		stateMu.Unlock()
 		return fetchTargetPresent, 0, nil
 	}

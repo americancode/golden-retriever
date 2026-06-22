@@ -1,0 +1,11 @@
+{
+  "_goldenRetrieverFixture": {
+    "framework": "vite"
+  },
+  "name": "vite-only",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "vite": "^5.0.8"
+  }
+}

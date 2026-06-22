@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -209,6 +211,97 @@ func TestLoadInputDirectoryPrioritizesShrinkwrap(t *testing.T) {
 	}
 	if !graph.Has("from-shrinkwrap@1.0.0") || graph.Has("from-lock@1.0.0") {
 		t.Fatalf("directory input should prioritize shrinkwrap: %#v", graph.Packages())
+	}
+}
+
+func TestLoadInputDirectoryWithLockfileRegeneratesForNPMPlatforms(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{
+  "name": "root",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react-scripts": "5.0.1"
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	npmPath := filepath.Join(binDir, "npm")
+	script := `#!/bin/sh
+if [ "$1" != "install" ]; then
+  echo "unexpected command: $1" >&2
+  exit 9
+fi
+if [ "${npm_config_os}" != "linux" ]; then
+  echo "missing npm_config_os=linux" >&2
+  exit 10
+fi
+if [ "${npm_config_cpu}" != "x64" ]; then
+  echo "missing npm_config_cpu=x64" >&2
+  exit 11
+fi
+cat > package-lock.json <<'EOF'
+{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/react-scripts": {
+      "version": "5.0.1",
+      "resolved": "https://registry.npmjs.org/react-scripts/-/react-scripts-5.0.1.tgz"
+    },
+    "node_modules/@esbuild/linux-x64": {
+      "version": "0.21.5",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.21.5.tgz"
+    }
+  }
+}
+EOF
+`
+	if err := os.WriteFile(npmPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{
+  "name": "root",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "root", "version": "1.0.0"},
+    "node_modules/react-scripts": {
+      "version": "5.0.1",
+      "resolved": "https://registry.npmjs.org/react-scripts/-/react-scripts-5.0.1.tgz"
+    }
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	progress := []string{}
+	graph, err := LoadInput(context.Background(), NewClient("https://example.test"), dir, ResolveOptions{
+		NPMPlatforms: []NPMPlatform{{OS: "linux", CPU: "x64"}},
+		Progress: func(format string, args ...any) {
+			progress = append(progress, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Has("react-scripts@5.0.1") {
+		t.Fatalf("directory input should retain react-scripts: %#v", graph.Packages())
+	}
+	if !graph.Has("@esbuild/linux-x64@0.21.5") {
+		t.Fatalf("directory input with npm platforms should regenerate lockfile and include esbuild package: %#v", graph.Packages())
+	}
+	sawNPMResolution := false
+	for _, line := range progress {
+		if strings.HasPrefix(line, "resolve:npm-lock:start ") {
+			sawNPMResolution = true
+			break
+		}
+	}
+	if !sawNPMResolution {
+		t.Fatalf("expected npm-backed resolution progress, got %v", progress)
 	}
 }
 

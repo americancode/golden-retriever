@@ -694,6 +694,92 @@ func TestNPMParityPlatformFiltersOSCPUAndLibcCombinations(t *testing.T) {
 	}
 }
 
+func TestNPMParityReactScriptsIncludesESBuildForPlatformedDirectoryInput(t *testing.T) {
+	requireNPMParity(t)
+
+	fixture := filepath.Join("..", "..", "test", "package-jsons", "react-scripts-app.package.json")
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	platform := NPMPlatform{OS: "linux", CPU: "x64"}
+	runNPMInstallPackageLockOnlyForPlatform(t, dir, platform)
+
+	lockPath := filepath.Join(dir, "package-lock.json")
+	want := lockPackageSet(t, lockPath)
+	graph, err := LoadInput(context.Background(), NewClient("https://registry.npmjs.org"), dir, ResolveOptions{
+		NPMPlatforms: []NPMPlatform{platform},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resolvedPackageSet(graph.Packages())
+	if !equalStringSlices(got.Keys, want.Keys) {
+		missing, extra := stringSetDiff(want.Keys, got.Keys)
+		t.Fatalf("package set mismatch missing=%v extra=%v", missing, extra)
+	}
+	if !equalStringSlices(got.Tarballs, want.Tarballs) {
+		missing, extra := stringSetDiff(want.Tarballs, got.Tarballs)
+		t.Fatalf("tarball set mismatch missing=%v extra=%v", missing, extra)
+	}
+	if !containsString(got.Keys, "react-scripts@5.0.1") {
+		t.Fatalf("expected react-scripts in resolved package set: %v", got.Keys)
+	}
+	if !containsItemWithPrefix(got.Keys, "@esbuild/") {
+		t.Fatalf("expected @esbuild platform package in resolved package set: %v", got.Keys)
+	}
+}
+
+func TestNPMParityViteIncludesRollupForPlatformedDirectoryInput(t *testing.T) {
+	requireNPMParity(t)
+
+	fixture := filepath.Join("..", "..", "test", "package-jsons", "vite-only.package.json")
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "package.json")
+	if err := os.WriteFile(input, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	platform := NPMPlatform{OS: "linux", CPU: "x64"}
+	runNPMInstallPackageLockOnlyForPlatform(t, dir, platform)
+
+	lockPath := filepath.Join(dir, "package-lock.json")
+	want := lockPackageSet(t, lockPath)
+	graph, err := LoadInput(context.Background(), NewClient("https://registry.npmjs.org"), dir, ResolveOptions{
+		NPMPlatforms: []NPMPlatform{platform},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resolvedPackageSet(graph.Packages())
+	if !equalStringSlices(got.Keys, want.Keys) {
+		missing, extra := stringSetDiff(want.Keys, got.Keys)
+		t.Fatalf("package set mismatch missing=%v extra=%v", missing, extra)
+	}
+	if !equalStringSlices(got.Tarballs, want.Tarballs) {
+		missing, extra := stringSetDiff(want.Tarballs, got.Tarballs)
+		t.Fatalf("tarball set mismatch missing=%v extra=%v", missing, extra)
+	}
+	if !containsItemWithPrefix(got.Keys, "vite@") {
+		t.Fatalf("expected vite in resolved package set: %v", got.Keys)
+	}
+	if !containsItemWithPrefix(got.Keys, "@rollup/rollup-") {
+		t.Fatalf("expected @rollup platform package in resolved package set: %v", got.Keys)
+	}
+}
+
 func TestNPMParityLockfilePackageSetFixtures(t *testing.T) {
 	if os.Getenv("NPM_PARITY") != "1" {
 		t.Skip("set NPM_PARITY=1 to run npm-backed parity test")
@@ -904,4 +990,33 @@ func runNPMInstallPackageLockOnly(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatalf("npm install failed: %v\n%s", err, out)
 	}
+}
+
+func runNPMInstallPackageLockOnlyForPlatform(t *testing.T, dir string, platform NPMPlatform) {
+	t.Helper()
+	cmd := exec.Command("npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--progress=false")
+	cmd.Dir = dir
+	cmd.Env = npmPlatformEnv(os.Environ(), platform)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("npm install failed for platform %s: %v\n%s", platform.Label(), err, out)
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsItemWithPrefix(items []string, prefix string) bool {
+	for _, item := range items {
+		if strings.HasPrefix(item, prefix) {
+			return true
+		}
+	}
+	return false
 }

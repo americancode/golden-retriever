@@ -1,0 +1,14 @@
+{
+  "_goldenRetrieverFixture": {
+    "source": "https://github.com/facebook/create-react-app/blob/main/packages/cra-template/template/package.json",
+    "framework": "react-scripts"
+  },
+  "name": "react-scripts-app",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-scripts": "5.0.1"
+  }
+}
