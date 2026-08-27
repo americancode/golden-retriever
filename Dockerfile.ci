@@ -1,5 +1,5 @@
 ARG GO_VERSION=1.26.6
-ARG NODE_VERSION=22
+ARG NODE_VERSION=26.8.1
 ARG ALPINE_VERSION=3.24
 
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
@@ -9,9 +9,9 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/golden-retriever ./cmd/golden-retriever
 
-FROM alpine:${ALPINE_VERSION}
+FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 RUN apk upgrade --no-cache \
-  && apk add --no-cache nodejs npm ca-certificates osv-scanner wget \
+  && apk add --no-cache ca-certificates osv-scanner wget \
   && trivy_arch="$(uname -m)" \
   && case "$trivy_arch" in x86_64) trivy_arch="64bit" ;; aarch64) trivy_arch="ARM64" ;; armv7*) trivy_arch="ARM" ;; *) echo "unsupported Trivy arch: $trivy_arch" >&2; exit 1 ;; esac \
   && trivy_version="$(wget -qO- https://api.github.com/repos/aquasecurity/trivy/releases/latest | sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' | head -n 1)" \
