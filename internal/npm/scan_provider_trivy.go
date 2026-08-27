@@ -102,14 +102,25 @@ func applyTrivyFindings(ctx context.Context, state *State, opts ScanOptions, key
 
 func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOptions, records []osvScannerRecord, minLevel, unknownLevel severityLevel, exceptions []ScanException) error {
 	chunks := chunkOSVScannerRecords(records, opts.TrivyChunkSize)
+	var progressMu sync.Mutex
+	progress := opts.Progress
+	if progress != nil {
+		progress = func(format string, args ...any) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			opts.Progress(format, args...)
+		}
+	}
+	workerOpts := opts
+	workerOpts.Progress = progress
 	if opts.Progress != nil {
-		opts.Progress("trivy:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.TrivyChunkSize, opts.TrivyConcurrency, len(records))
+		progress("trivy:parallel-start chunks=%d chunk_size=%d concurrency=%d packages=%d", len(chunks), opts.TrivyChunkSize, opts.TrivyConcurrency, len(records))
 	}
 	if !opts.TrivySkipDBUpdate && len(chunks) > 0 {
 		if opts.Progress != nil {
-			opts.Progress("trivy:db:download-start packages=%d", len(records))
+			progress("trivy:db:download-start packages=%d", len(records))
 		}
-		if err := runTrivyDBDownload(ctx, opts, len(records)); err != nil {
+		if err := runTrivyDBDownload(ctx, workerOpts, len(records)); err != nil {
 			return err
 		}
 	}
@@ -132,10 +143,10 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 			for idx := range jobs {
 				chunk := chunks[idx]
 				label := fmt.Sprintf("%d/%d", idx+1, len(chunks))
-				if opts.Progress != nil {
-					opts.Progress("trivy:chunk:start chunk=%s packages=%d", label, len(chunk))
+				if progress != nil {
+					progress("trivy:chunk:start chunk=%s packages=%d", label, len(chunk))
 				}
-				output, err := runTrivy(ctx, opts, chunk, true, label)
+				output, err := runTrivy(ctx, workerOpts, chunk, true, label)
 				results <- chunkResult{index: idx, output: output, err: err}
 			}
 		}()
@@ -157,21 +168,21 @@ func applyTrivyFindingsParallel(ctx context.Context, state *State, opts ScanOpti
 			if firstErr == nil {
 				firstErr = result.err
 			}
-			if opts.Progress != nil {
-				opts.Progress("trivy:chunk:fail chunk=%s error=%v", label, result.err)
+			if progress != nil {
+				progress("trivy:chunk:fail chunk=%s error=%v", label, result.err)
 			}
 			continue
 		}
 		applyTrivyOutput(state, opts, result.output, minLevel, unknownLevel, exceptions)
-		if opts.Progress != nil {
-			opts.Progress("trivy:chunk:done chunk=%s completed=%d/%d", label, completed, len(chunks))
+		if progress != nil {
+			progress("trivy:chunk:done chunk=%s completed=%d/%d", label, completed, len(chunks))
 		}
 	}
-	if opts.Progress != nil {
+	if progress != nil {
 		if firstErr != nil {
-			opts.Progress("trivy:parallel-fail chunks=%d completed=%d error=%v", len(chunks), completed, firstErr)
+			progress("trivy:parallel-fail chunks=%d completed=%d error=%v", len(chunks), completed, firstErr)
 		} else {
-			opts.Progress("trivy:parallel-done chunks=%d completed=%d", len(chunks), completed)
+			progress("trivy:parallel-done chunks=%d completed=%d", len(chunks), completed)
 		}
 	}
 	return firstErr
