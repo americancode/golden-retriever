@@ -23,7 +23,6 @@ RUN apk upgrade --no-cache \
   && rm -f /tmp/trivy.tar.gz \
   && osv-scanner --version \
   && trivy --version \
-  && npm install -g npm@latest \
   && npm cache clean --force \
   && npm --version \
   && node --version \

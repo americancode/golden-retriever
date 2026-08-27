@@ -488,7 +488,7 @@ The image includes:
 
 - `golden-retriever`
 - Node.js
-- latest npm
+- npm bundled with the official Node image
 - `ca-certificates`
 - `trivy`
 - `osv-scanner`

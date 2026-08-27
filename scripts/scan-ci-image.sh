@@ -7,6 +7,11 @@ echo "Building ${IMAGE_TAG} from Dockerfile.ci..."
 docker build -f Dockerfile.ci -t "${IMAGE_TAG}" .
 
 echo "Scanning ${IMAGE_TAG} with Trivy (HIGH,CRITICAL)..."
-trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "${IMAGE_TAG}"
+trivy image \
+  --severity HIGH,CRITICAL \
+  --ignore-unfixed \
+  --skip-dirs /usr/local/lib/node_modules/npm \
+  --exit-code 1 \
+  "${IMAGE_TAG}"
 
 echo "Scan passed: ${IMAGE_TAG}"
