@@ -495,7 +495,10 @@ The image includes:
 
 The GitHub Actions workflow:
 
+- runs the Go test suite before producing an image
+- runs `govulncheck` against the Go packages
 - runs Trivy filesystem and image scans
+- blocks publishing when Trivy reports a fixable HIGH or CRITICAL vulnerability
 - builds the CI image from `Dockerfile.ci`
 - publishes to GHCR on `main`, tags, and manual dispatch
 - signs pushed images with cosign on non-PR runs

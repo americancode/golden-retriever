@@ -3,10 +3,17 @@ name: CI Image
 on:
   push:
     branches: ["main"]
-    tags: ["v*.*.*"]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -30,6 +37,20 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v6
 
+      - name: Set Up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test Go Packages
+        run: go test ./...
+
+      - name: Run Go Vulnerability Check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
         with:
@@ -48,7 +69,7 @@ jobs:
             --ignore-unfixed \
             --format sarif \
             --output trivy-fs.sarif \
-            --exit-code 0 \
+            --exit-code 1 \
             .
 
       - name: Upload Source Scan SARIF
@@ -110,7 +131,7 @@ jobs:
             --pkg-types os,library \
             --format sarif \
             --output trivy-image.sarif \
-            --exit-code 0 \
+            --exit-code 1 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan
 
       - name: Upload Image Scan SARIF
@@ -190,7 +211,7 @@ jobs:
           current_digest_hex = current_digest.split(":", 1)[1] if current_digest.startswith("sha256:") else ""
           current_tags = {line.strip().rsplit(":", 1)[-1] for line in os.environ.get("CURRENT_TAGS", "").splitlines() if line.strip()}
 
-          semver_re = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+          semver_re = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
           artifact_re = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
 
           def gh_api(path, method="GET"):
@@ -247,8 +268,6 @@ jobs:
               return digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
 
           def semver_key(tag):
-              if tag.startswith("v"):
-                  tag = tag[1:]
               main, _, build = tag.partition("+")
               core, sep, pre = main.partition("-")
               nums = tuple(int(part) for part in core.split("."))
