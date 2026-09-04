@@ -173,7 +173,7 @@ jobs:
 
     steps:
       - name: Install ORAS
-        uses: oras-project/setup-oras@v1
+        uses: oras-project/setup-oras@v2
 
       - name: Log In to GHCR
         uses: docker/login-action@v4
