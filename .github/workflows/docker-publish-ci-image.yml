@@ -17,7 +17,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}-ci
+  IMAGE_NAME: ${{ github.repository }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -189,7 +189,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY: ${{ env.REGISTRY }}
           OWNER: ${{ github.repository_owner }}
-          PACKAGE_NAME: ${{ github.event.repository.name }}-ci
+          PACKAGE_NAME: ${{ github.event.repository.name }}
           KEEP_SEMVER_COUNT: "5"
           CURRENT_DIGEST: ${{ needs.build-scan-publish.outputs.published-digest }}
           CURRENT_TAGS: ${{ needs.build-scan-publish.outputs.published-tags }}

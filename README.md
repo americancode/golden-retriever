@@ -289,7 +289,7 @@ docker run --rm \
   -v "$PWD/.gr/osv-run:/mnt/osv-run:ro" \
   -e TRIVY_CACHE_DIR=/mnt/trivy-db \
   -e OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/mnt/osv-run \
-  ghcr.io/americancode/golden-retriever-ci:main scan \
+  ghcr.io/americancode/golden-retriever:main scan \
     --state .gr/state.json \
     --source target \
     --provider trivy-offline \
@@ -298,7 +298,7 @@ docker run --rm \
 docker run --rm \
   -v "$PWD/.gr/osv-run:/mnt/osv-run:ro" \
   -e OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/mnt/osv-run \
-  ghcr.io/americancode/golden-retriever-ci:main scan \
+  ghcr.io/americancode/golden-retriever:main scan \
     --state .gr/state.json \
     --source target \
     --provider osv-offline \
@@ -437,7 +437,7 @@ Important variables:
 
 ```yaml
 NPM_TARGET_REGISTRY: "https://gitlab.example.com/api/v4/projects/123/packages/npm/"
-GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever-ci:main"
+GOLDEN_RETRIEVER_CI_IMAGE: "ghcr.io/americancode/golden-retriever:main"
 GOLDEN_RETRIEVER_INPUT_DIRS: "package-jsons,package-locks"
 GOLDEN_RETRIEVER_NPM_PLATFORMS: "linux/x64/glibc,linux/arm64/glibc"
 GOLDEN_RETRIEVER_PROJECT_CONCURRENCY: "4"
@@ -481,7 +481,7 @@ The CI image is built from `Dockerfile.ci` and published by `.github/workflows/d
 Default image:
 
 ```text
-ghcr.io/americancode/golden-retriever-ci:main
+ghcr.io/americancode/golden-retriever:main
 ```
 
 The image includes:
@@ -507,13 +507,13 @@ The GitHub Actions workflow:
 Build locally:
 
 ```sh
-podman build -f Dockerfile.ci -t golden-retriever-ci:local .
+podman build -f Dockerfile.ci -t golden-retriever:local .
 ```
 
 Verify a pushed image signature:
 
 ```sh
-cosign verify ghcr.io/americancode/golden-retriever-ci:main \
+cosign verify ghcr.io/americancode/golden-retriever:main \
   --certificate-identity-regexp 'https://github.com/americancode/golden-retriever/.github/workflows/docker-publish-ci-image.yml@refs/heads/main' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
