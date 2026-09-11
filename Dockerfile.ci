@@ -3,14 +3,21 @@ ARG NODE_VERSION=26.8.1
 ARG ALPINE_VERSION=3.24
 ARG TRIVY_VERSION=0.74.0
 
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
+FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/golden-retriever ./cmd/golden-retriever
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w" -o /out/golden-retriever ./cmd/golden-retriever
 
-FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
+FROM --platform=${TARGETPLATFORM} node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 ARG TRIVY_VERSION
 RUN apk upgrade --no-cache \
   && apk add --no-cache ca-certificates osv-scanner wget \

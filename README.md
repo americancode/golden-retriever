@@ -500,8 +500,8 @@ The GitHub Actions workflow:
 - runs Trivy filesystem and image scans
 - uploads UNKNOWN, LOW, MEDIUM, HIGH, and CRITICAL Trivy findings to GitHub Code Scanning
 - blocks publishing when Trivy reports any CRITICAL vulnerability or more than 10 HIGH vulnerabilities, including unfixed findings
-- builds the CI image from `Dockerfile.ci`
-- scans and publishes the same built image artifact
+- builds and scans separate amd64 and arm64 CI images from `Dockerfile.ci`
+- promotes the scanned amd64 and arm64 images into one multi-architecture image tag
 - publishes to GHCR on `main`, tags, and manual dispatch
 - signs and verifies pushed images with cosign on non-PR runs
 
