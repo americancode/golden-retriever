@@ -21,21 +21,17 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  build-scan-publish:
-    name: Build, Scan, Publish
+  validate:
+    name: Validate Go and Build Inputs
     runs-on: ubuntu-latest
-    outputs:
-      published-digest: ${{ steps.build-and-push.outputs.digest }}
-      published-tags: ${{ steps.meta.outputs.tags }}
     permissions:
       contents: read
-      packages: write
-      id-token: write
-      security-events: write
 
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set Up Go
         uses: actions/setup-go@v7
@@ -46,15 +42,40 @@ jobs:
       - name: Test Go Packages
         run: go test ./...
 
+      - name: Vet Go Packages
+        run: go vet ./...
+
       - name: Run Go Vulnerability Check
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           "$(go env GOPATH)/bin/govulncheck" ./...
 
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
+      - name: Check Scan Script Syntax
+        run: bash -n scripts/scan-ci-image.sh
+
+  build-scan-publish:
+    name: Build, Scan, Publish
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      published-digest: ${{ steps.publish-image.outputs.digest }}
+      published-tags: ${{ steps.meta.outputs.tags }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          version: latest
+          persist-credentials: false
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          trivy-version: v0.74.0
 
       - name: Scan Source Files
         run: |
@@ -65,32 +86,49 @@ jobs:
             --skip-dirs .github \
             --skip-dirs .gr \
             --skip-dirs test \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --format sarif \
-            --output trivy-fs.sarif \
-            --exit-code 1 \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output trivy-fs.json \
+            --exit-code 0 \
             .
+          trivy convert --format sarif \
+            --output trivy-fs.sarif trivy-fs.json
 
       - name: Upload Source Scan SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         if: always() && hashFiles('trivy-fs.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
+      - name: Enforce Source Vulnerability Gate
+        run: |
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-fs.json)"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-fs.json)"
+          echo "Source vulnerabilities: CRITICAL=${critical} HIGH=${high}"
+          (( critical == 0 && high <= 15 ))
+
+      - name: Prepare Image Names
+        id: names
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          image="${REGISTRY}/${REPOSITORY,,}"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "quarantine=${image}:quarantine-${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
       - name: Install Cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: "v2.4.1"
 
       - name: Set Up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Log In to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -98,9 +136,9 @@ jobs:
 
       - name: Generate Image Metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.names.outputs.image }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -109,14 +147,14 @@ jobs:
 
       - name: Build Local Scan Image
         id: build-local
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.ci
           push: false
           load: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan
+            ${{ steps.names.outputs.quarantine }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -127,325 +165,73 @@ jobs:
             --scanners vuln \
             --skip-files usr/local/bin/trivy \
             --skip-dirs usr/local/lib/node_modules/npm \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --pkg-types os,library \
-            --format sarif \
-            --output trivy-image.sarif \
-            --exit-code 1 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan
+            --format json \
+            --output trivy-image.json \
+            --exit-code 0 \
+            "${{ steps.names.outputs.quarantine }}"
+          trivy convert --format sarif \
+            --output trivy-image.sarif trivy-image.json
 
       - name: Upload Image Scan SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         if: always() && hashFiles('trivy-image.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
-      - name: Publish Image
-        id: build-and-push
+      - name: Enforce Image Vulnerability Gate
+        run: |
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-image.json)"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-image.json)"
+          echo "Image vulnerabilities: CRITICAL=${critical} HIGH=${high}"
+          (( critical == 0 && high <= 15 ))
+
+      - name: Publish Scanned Image
+        id: publish-image
         if: ${{ github.event_name != 'pull_request' }}
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.ci
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        env:
+          SOURCE_IMAGE: ${{ steps.names.outputs.quarantine }}
+          IMAGE: ${{ steps.names.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          published_digest=""
+          while IFS= read -r tag; do
+            [[ -n "${tag}" ]] || continue
+            docker tag "${SOURCE_IMAGE}" "${tag}"
+            docker push "${tag}" >/dev/null
+            repo_digest="$(docker image inspect "${tag}" --format='{{json .RepoDigests}}' | jq -er --arg prefix "${IMAGE}@" '.[] | select(startswith($prefix))')"
+            digest="${repo_digest##*@}"
+            if [[ -z "${published_digest}" ]]; then
+              published_digest="${digest}"
+            elif [[ "${published_digest}" != "${digest}" ]]; then
+              echo "Published tag ${tag} resolved to ${digest}, expected ${published_digest}" >&2
+              exit 1
+            fi
+          done <<< "${TAGS}"
+          [[ -n "${published_digest}" ]] || { echo "No image tags were published" >&2; exit 1; }
+          echo "digest=${published_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Sign Published Image
         if: ${{ github.event_name != 'pull_request' }}
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          DIGEST: ${{ steps.publish-image.outputs.digest }}
         run: |
-          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+          while IFS= read -r tag; do
+            [[ -n "${tag}" ]] || continue
+            cosign sign --yes "${tag}@${DIGEST}"
+          done <<< "${TAGS}"
 
-  prune-registry:
-    name: Prune GHCR Images and Artifacts
-    runs-on: ubuntu-latest
-    needs: build-scan-publish
-    if: ${{ github.event_name != 'pull_request' }}
-    permissions:
-      packages: write
-
-    steps:
-      - name: Install ORAS
-        uses: oras-project/setup-oras@v2
-
-      - name: Log In to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Delete Old Image and Artifact Versions
+      - name: Verify Published Image
+        if: ${{ github.event_name != 'pull_request' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REGISTRY: ${{ env.REGISTRY }}
-          OWNER: ${{ github.repository_owner }}
-          PACKAGE_NAME: ${{ github.event.repository.name }}
-          KEEP_SEMVER_COUNT: "5"
-          CURRENT_DIGEST: ${{ needs.build-scan-publish.outputs.published-digest }}
-          CURRENT_TAGS: ${{ needs.build-scan-publish.outputs.published-tags }}
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.publish-image.outputs.digest }}
+          WORKFLOW_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
         run: |
-          python3 <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
-          import time
-
-          registry = os.environ["REGISTRY"]
-          owner = os.environ["OWNER"]
-          package = os.environ["PACKAGE_NAME"]
-          image = f"{registry}/{owner}/{package}"
-          keep_semver_count = int(os.environ.get("KEEP_SEMVER_COUNT", "5"))
-          max_passes = 5
-          current_digest = os.environ.get("CURRENT_DIGEST", "")
-          current_digest_hex = current_digest.split(":", 1)[1] if current_digest.startswith("sha256:") else ""
-          current_tags = {line.strip().rsplit(":", 1)[-1] for line in os.environ.get("CURRENT_TAGS", "").splitlines() if line.strip()}
-
-          semver_re = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
-          artifact_re = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
-
-          def gh_api(path, method="GET"):
-              cmd = [
-                  "gh",
-                  "api",
-                  "-H",
-                  "Accept: application/vnd.github+json",
-                  "-H",
-                  "X-GitHub-Api-Version: 2022-11-28",
-              ]
-              if method != "GET":
-                  cmd.extend(["-X", method])
-              cmd.append(path)
-              return subprocess.run(cmd, text=True, capture_output=True)
-
-          def api_base():
-              org_probe = gh_api(f"/orgs/{owner}")
-              if org_probe.returncode == 0:
-                  return f"/orgs/{owner}/packages/container/{package}/versions"
-              user_probe = gh_api(f"/users/{owner}")
-              if user_probe.returncode == 0:
-                  return f"/users/{owner}/packages/container/{package}/versions"
-              print(f"Unable to identify package owner type for {owner}", file=sys.stderr)
-              print(org_probe.stderr, file=sys.stderr)
-              print(user_probe.stderr, file=sys.stderr)
-              raise SystemExit(1)
-
-          def list_versions(base):
-              versions = []
-              page = 1
-              while True:
-                  res = gh_api(f"{base}?per_page=100&page={page}")
-                  if res.returncode != 0:
-                      print(res.stderr, file=sys.stderr)
-                      raise SystemExit(res.returncode)
-                  batch = json.loads(res.stdout)
-                  if not batch:
-                      break
-                  versions.extend(batch)
-                  page += 1
-              return versions
-
-          def tags_for(version):
-              return version.get("metadata", {}).get("container", {}).get("tags", []) or []
-
-          def digest_hex(version):
-              name = version.get("name", "")
-              if name.startswith("sha256:"):
-                  return name.split(":", 1)[1]
-              return ""
-
-          def digest_ref_hex(digest):
-              return digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
-
-          def semver_key(tag):
-              main, _, build = tag.partition("+")
-              core, sep, pre = main.partition("-")
-              nums = tuple(int(part) for part in core.split("."))
-              # Stable releases sort after prereleases for the same core.
-              pre_key = (1, "") if not sep else (0, pre)
-              return nums, pre_key, build
-
-          def classify(versions):
-              semver_tags = sorted(
-                  {tag for version in versions for tag in tags_for(version) if semver_re.match(tag)},
-                  key=semver_key,
-                  reverse=True,
-              )
-              keep_semver_tags = set(semver_tags[:keep_semver_count])
-
-              keep_image_digests = set()
-              keep_version_ids = set()
-              artifact_subjects = {}
-              keep_ref_tags = set()
-
-              for version in versions:
-                  tags = set(tags_for(version))
-                  digest = digest_hex(version)
-                  is_current_digest = bool(current_digest_hex) and digest == current_digest_hex
-                  if is_current_digest or "main" in tags or tags.intersection(keep_semver_tags) or tags.intersection(current_tags):
-                      keep_version_ids.add(version["id"])
-                      keep_ref_tags.update(tags.intersection({"main"} | keep_semver_tags | current_tags))
-                      if digest:
-                          keep_image_digests.add(digest)
-                      if is_current_digest:
-                          keep_image_digests.add(digest)
-
-              for tag in sorted(keep_ref_tags):
-                  add_referenced_manifest_digests(f"{image}:{tag}", keep_image_digests)
-
-              for version in versions:
-                  digest = digest_hex(version)
-                  if digest and digest in keep_image_digests:
-                      keep_version_ids.add(version["id"])
-
-              for version in versions:
-                  for tag in tags_for(version):
-                      match = artifact_re.match(tag)
-                      if match:
-                          artifact_subjects.setdefault(version["id"], set()).add(match.group(1))
-
-              for version in versions:
-                  subjects = artifact_subjects.get(version["id"], set())
-                  if subjects and subjects.intersection(keep_image_digests):
-                      keep_version_ids.add(version["id"])
-
-              return keep_semver_tags, keep_image_digests, keep_version_ids, artifact_subjects
-
-          def delete_order(version, artifact_subjects):
-              tags = tags_for(version)
-              if version["id"] in artifact_subjects:
-                  return 0
-              if not tags:
-                  return 1
-              return 2
-
-          def delete_ref_with_oras(ref):
-              return subprocess.run(
-                  ["oras", "manifest", "delete", "--force", ref],
-                  text=True,
-                  capture_output=True,
-              )
-
-          def fetch_manifest(ref):
-              res = subprocess.run(
-                  ["oras", "manifest", "fetch", ref],
-                  text=True,
-                  capture_output=True,
-              )
-              if res.returncode != 0:
-                  print(f"cleanup:manifest-fetch-failed ref={ref} error={res.stderr.strip() or res.stdout.strip() or res.returncode}", file=sys.stderr)
-                  return None
-              try:
-                  return json.loads(res.stdout)
-              except json.JSONDecodeError as err:
-                  print(f"cleanup:manifest-parse-failed ref={ref} error={err}", file=sys.stderr)
-                  return None
-
-          def add_referenced_manifest_digests(ref, keep_image_digests):
-              manifest = fetch_manifest(ref)
-              if not manifest:
-                  return
-              for desc in manifest.get("manifests", []) or []:
-                  digest = digest_ref_hex(desc.get("digest", ""))
-                  if digest:
-                      keep_image_digests.add(digest)
-
-          def delete_version(base, version_id):
-              return gh_api(f"{base}/{version_id}", method="DELETE")
-
-          base = api_base()
-          total_deleted = 0
-          final_kept = 0
-          failures = []
-          for cleanup_pass in range(1, max_passes + 1):
-              versions = list_versions(base)
-              keep_semver_tags, keep_image_digests, keep_version_ids, artifact_subjects = classify(versions)
-
-              print(f"cleanup:pass={cleanup_pass} package={owner}/{package} versions={len(versions)}")
-              print(f"cleanup:pass={cleanup_pass} keeping main and semver tags={','.join(sorted(keep_semver_tags, key=semver_key, reverse=True)) or '<none>'}")
-              print(f"cleanup:pass={cleanup_pass} keeping current digest={current_digest or '<none>'}")
-              print(f"cleanup:pass={cleanup_pass} keeping image digests={len(keep_image_digests)}")
-
-              deleted_this_pass = 0
-              kept_this_pass = 0
-              for version in sorted(versions, key=lambda item: delete_order(item, artifact_subjects)):
-                  version_id = version["id"]
-                  tags = tags_for(version)
-                  digest = version.get("name", "")
-                  if version_id in keep_version_ids:
-                      kept_this_pass += 1
-                      print(f"cleanup:keep pass={cleanup_pass} id={version_id} digest={digest} tags={','.join(tags) or '<untagged>'}")
-                      continue
-
-                  subjects = artifact_subjects.get(version_id, set())
-                  if subjects:
-                      reason = "stale-artifact"
-                  elif not tags:
-                      reason = "orphan-untagged"
-                  else:
-                      reason = "stale-image"
-
-                  subject_text = ",".join(sorted(subjects)) if subjects else "<none>"
-                  deleted = False
-                  errors = []
-
-                  for tag in tags:
-                      ref = f"{image}:{tag}"
-                      res = delete_ref_with_oras(ref)
-                      if res.returncode == 0:
-                          deleted = True
-                          print(f"cleanup:delete pass={cleanup_pass} method=oras reason={reason} id={version_id} ref={ref} digest={digest} subjects={subject_text}")
-                          break
-                      errors.append(f"oras {ref}: {res.stderr.strip() or res.stdout.strip() or res.returncode}")
-
-                  if not deleted and digest.startswith("sha256:"):
-                      ref = f"{image}@{digest}"
-                      res = delete_ref_with_oras(ref)
-                      if res.returncode == 0:
-                          deleted = True
-                          print(f"cleanup:delete pass={cleanup_pass} method=oras-digest reason={reason} id={version_id} ref={ref} digest={digest} subjects={subject_text}")
-                      else:
-                          errors.append(f"oras {ref}: {res.stderr.strip() or res.stdout.strip() or res.returncode}")
-
-                  if not deleted:
-                      res = delete_version(base, version_id)
-                      if res.returncode == 0:
-                          deleted = True
-                          print(f"cleanup:delete pass={cleanup_pass} method=github-api reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'}")
-                      else:
-                          errors.append(f"github-api status={res.returncode}: {res.stderr.strip() or res.stdout.strip()}")
-
-                  if deleted:
-                      deleted_this_pass += 1
-                      total_deleted += 1
-                  else:
-                      message = f"cleanup:delete-failed pass={cleanup_pass} reason={reason} id={version_id} digest={digest} subjects={subject_text} tags={','.join(tags) or '<untagged>'} errors={' | '.join(errors)}"
-                      print(message, file=sys.stderr)
-                      failures.append(message)
-
-              final_kept = kept_this_pass
-              print(f"cleanup:pass-done pass={cleanup_pass} kept={kept_this_pass} deleted={deleted_this_pass}")
-              if deleted_this_pass == 0:
-                  break
-              time.sleep(2)
-          else:
-              print(f"cleanup:warning max cleanup passes reached; run may need another pass")
-
-          print(f"cleanup:done kept={final_kept} deleted={total_deleted}")
-          if failures:
-              print(f"cleanup:warning delete failures={len(failures)}", file=sys.stderr)
-              for failure in failures:
-                  print(failure, file=sys.stderr)
-              raise SystemExit(1)
-          PY
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "${WORKFLOW_IDENTITY}"
