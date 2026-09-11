@@ -201,7 +201,14 @@ jobs:
             docker buildx imagetools create --tag "${tag}" \
               "${IMAGE}:quarantine-${GITHUB_SHA}-amd64" "${IMAGE}:quarantine-${GITHUB_SHA}-arm64"
           done <<< "${TAGS}"
-          digest="$(docker buildx imagetools inspect "${first_tag}" | awk '/^Digest:/ { print $2; exit }')"
+          digest=""
+          for attempt in {1..10}; do
+            if digest="$(docker buildx imagetools inspect "${first_tag}" 2>/dev/null | awk '/^Digest:/ { print $2; exit }')" && [[ -n "${digest}" ]]; then
+              break
+            fi
+            echo "Waiting for ${first_tag} to become readable (attempt ${attempt}/10)..."
+            sleep 3
+          done
           test -n "${digest}"
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
       - name: Install cosign
