@@ -81,11 +81,6 @@ jobs:
         run: |
           trivy fs \
             --scanners vuln \
-            --skip-files usr/local/bin/trivy \
-            --skip-dirs .git \
-            --skip-dirs .github \
-            --skip-dirs .gr \
-            --skip-dirs test \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --format json \
             --output trivy-fs.json \
@@ -106,7 +101,7 @@ jobs:
           critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-fs.json)"
           high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-fs.json)"
           echo "Source vulnerabilities: CRITICAL=${critical} HIGH=${high}"
-          (( critical == 0 && high <= 15 ))
+          (( critical == 0 && high <= 10 ))
 
       - name: Prepare Image Names
         id: names
@@ -163,8 +158,6 @@ jobs:
         run: |
           trivy image \
             --scanners vuln \
-            --skip-files usr/local/bin/trivy \
-            --skip-dirs usr/local/lib/node_modules/npm \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --pkg-types os,library \
             --format json \
@@ -186,7 +179,7 @@ jobs:
           critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-image.json)"
           high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-image.json)"
           echo "Image vulnerabilities: CRITICAL=${critical} HIGH=${high}"
-          (( critical == 0 && high <= 15 ))
+          (( critical == 0 && high <= 10 ))
 
       - name: Publish Scanned Image
         id: publish-image

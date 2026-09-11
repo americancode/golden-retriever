@@ -499,14 +499,13 @@ The GitHub Actions workflow:
 - runs `govulncheck` against the Go packages
 - runs Trivy filesystem and image scans
 - uploads UNKNOWN, LOW, MEDIUM, HIGH, and CRITICAL Trivy findings to GitHub Code Scanning
-- blocks publishing when Trivy reports any CRITICAL vulnerability or more than 15 HIGH vulnerabilities, including unfixed findings
+- blocks publishing when Trivy reports any CRITICAL vulnerability or more than 10 HIGH vulnerabilities, including unfixed findings
 - builds the CI image from `Dockerfile.ci`
 - scans and publishes the same built image artifact
 - publishes to GHCR on `main`, tags, and manual dispatch
 - signs and verifies pushed images with cosign on non-PR runs
-- cleans up old GHCR image versions after publish, keeping `main`, the five newest semver tags, and signature/artifact tags tied to the retained image digests
 
-The CI vulnerability gate uploads all Trivy severities, but blocks publication only when the scanned source or image contains at least one `CRITICAL` finding or more than 15 `HIGH` findings. `UNKNOWN`, `LOW`, and `MEDIUM` findings are reported through SARIF without independently failing the gate. Unfixed findings remain included in both the reports and threshold counts.
+The CI vulnerability gate uploads all Trivy severities and blocks publication when the scanned source or image contains any `CRITICAL` finding or more than 10 `HIGH` findings. `UNKNOWN`, `LOW`, and `MEDIUM` findings are reported through SARIF without independently failing the gate. Unfixed findings remain included in both the reports and the gate. Trivy runs without path exclusions.
 
 Build locally:
 
