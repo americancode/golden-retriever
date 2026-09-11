@@ -72,8 +72,17 @@ jobs:
           trivy fs --scanners vuln --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --format json --output "${RUNNER_TEMP}/trivy-fs.json" --exit-code 0 .
           trivy convert --format sarif --output "${RUNNER_TEMP}/trivy-fs.sarif" "${RUNNER_TEMP}/trivy-fs.json"
+      - name: Check source scan SARIF
+        id: source_sarif
+        if: ${{ always() }}
+        run: |
+          if [[ -f "${RUNNER_TEMP}/trivy-fs.sarif" ]]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Upload source scan SARIF
-        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
+        if: ${{ always() && steps.source_sarif.outputs.exists == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
         uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         with:
           sarif_file: ${{ runner.temp }}/trivy-fs.sarif
@@ -144,8 +153,17 @@ jobs:
             --format json --output "${RUNNER_TEMP}/trivy-image-${{ matrix.arch }}.json" --exit-code 0 "${IMAGE}"
           trivy convert --format sarif --output "${RUNNER_TEMP}/trivy-image-${{ matrix.arch }}.sarif" \
             "${RUNNER_TEMP}/trivy-image-${{ matrix.arch }}.json"
+      - name: Check ${{ matrix.arch }} image scan SARIF
+        id: image_sarif
+        if: ${{ always() }}
+        run: |
+          if [[ -f "${RUNNER_TEMP}/trivy-image-${{ matrix.arch }}.sarif" ]]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Upload ${{ matrix.arch }} image scan SARIF
-        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
+        if: ${{ always() && steps.image_sarif.outputs.exists == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
         uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         with:
           sarif_file: ${{ runner.temp }}/trivy-image-${{ matrix.arch }}.sarif
